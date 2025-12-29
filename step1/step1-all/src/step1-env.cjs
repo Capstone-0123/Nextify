@@ -10,34 +10,28 @@ const CWD = process.cwd();
  * 구조 변경 없이 설정 파일(Config)과 의존성(Dependencies)만 교체한다.
  */
 async function runStep1() {
-  const spinner = ora('프로젝트 환경 설정을 변경 중...').start();
+  const spinner = ora().start();
 
   try {
     // 1. package.json 수정 (Vite -> Next)
     spinner.text = 'package.json 의존성 및 스크립트 수정 중...';
     await updatePackageJson();
-  } catch (error) {
-    spinner.fail('package.json 의존성 및 스크립트 수정 중 에러 발생');
-    console.error(error);
-    throw error;
-  }
-
-  try {
-    // 1. package.json 수정 (Vite -> Next)
-    spinner.text = 'package.json 의존성 및 스크립트 수정 중...';
-    await updatePackageJson();
+    spinner.succeed('package.json 의존성 및 스크립트 수정 완료');
 
     // 2. 설정 파일 교체 (vite.config 삭제, next.config 생성)
-    spinner.text = 'Vite 설정을 제거하고 Next.js 설정을 생성 중...';
+    spinner.start('Vite 설정을 제거하고 Next.js 설정을 생성 중...');
     await setupConfigFiles();
+    spinner.succeed('설정 파일 교체 완료 (vite.config 삭제, next.config 생성)');
 
     // 3. TypeScript 설정 정리 (vite 타입 제거)
-    spinner.text = 'tsconfig.json에서 Vite 관련 설정 제거 중...';
+    spinner.start('tsconfig.json에서 Vite 관련 설정 제거 중...');
     await updateTsConfig();
+    spinner.succeed('tsconfig.json 설정 정리 완료');
 
-    spinner.succeed('환경 설정 변경 완료 (코드 및 폴더 구조는 변경되지 않음)');
+    console.log(chalk.gray('\n✨ 모든 환경 설정 변경이 완료되었습니다.'));
   } catch (error) {
-    spinner.fail('Step 1 실패');
+    // 에러 발생 시 현재 돌아가던 스피너를 실패 처리
+    spinner.fail('Step 1 진행 중 오류 발생');
     console.error(error);
     throw error;
   }
