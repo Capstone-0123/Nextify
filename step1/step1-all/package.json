@@ -16,6 +16,7 @@
     "chalk": "^4.1.2",
     "commander": "^11.1.0",
     "fs-extra": "^11.2.0",
+    "inquirer": "^8.0.0",
     "ora": "^5.4.1"
   },
   "engines": {
