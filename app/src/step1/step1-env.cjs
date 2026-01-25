@@ -1,3 +1,5 @@
+// src/step1/step1-env.cjs
+
 const fs = require('fs-extra');
 const path = require('path');
 const ora = require('ora');
