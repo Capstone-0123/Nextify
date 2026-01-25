@@ -1,6 +1,7 @@
 // src/step2/index.cjs
 // const { convertRoutes } = require('./route-converter.cjs');
 const { generateLayout } = require('./layout-generator.cjs');
+const { generateHomePage } = require('./home-page-generator.cjs');
 const chalk = require('chalk');
 
 async function runStep2(projectRoot) {
@@ -13,6 +14,8 @@ async function runStep2(projectRoot) {
   console.log(chalk.blue.bold('--레이아웃 생성 시작'));
   await generateLayout(projectRoot);
   console.log(chalk.blue.bold('--레이아웃 생성 완료'));
+
+  await generateHomePage(projectRoot);
   console.log(chalk.green.bold('✅ Step 2 모든 작업 완료!'));
 }
 
