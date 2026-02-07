@@ -1,6 +1,10 @@
 # 의존성 모듈 (가장 중요)
 node_modules/
 
+# Lock 파일 (npm만 사용)
+yarn.lock
+pnpm-lock.yaml
+
 # 로그 파일들
 npm-debug.log*
 yarn-debug.log*
