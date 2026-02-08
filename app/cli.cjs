@@ -169,7 +169,7 @@ program
 // =========================================================
 program
   .command('step3')
-  .description('3단계: 메타데이터 마이그레이션 (React Helmet -> Next.js Metadata)')
+  .description('3단계: 라우팅 페이지 변환 )')
   .action(async () => {
     try {
       // Step 3 실행
