@@ -654,6 +654,83 @@ async function migratePageMetadata(projectRoot, pageFilePath, componentFilePath)
 }
 
 /**
+ * import 경로를 절대 경로로 해석
+ */
+function resolveImportPath(importPath, fromFilePath, projectRoot) {
+  let absolutePath;
+
+  if (importPath.startsWith('.')) {
+    // 상대 경로
+    absolutePath = path.resolve(path.dirname(fromFilePath), importPath);
+  } else if (importPath.startsWith('@/')) {
+    // 알리아스 경로
+    absolutePath = path.join(projectRoot, 'src', importPath.slice(2));
+  } else {
+    // node_modules 패키지
+    return null;
+  }
+
+  // 확장자 추가 시도
+  const extensions = ['.tsx', '.jsx', '.ts', '.js'];
+  for (const ext of extensions) {
+    const tryPath = absolutePath + ext;
+    if (fs.existsSync(tryPath)) {
+      return tryPath;
+    }
+  }
+
+  // 이미 확장자가 있거나 디렉토리인 경우
+  if (fs.existsSync(absolutePath)) {
+    return absolutePath;
+  }
+
+  // index 파일 시도
+  for (const ext of extensions) {
+    const tryPath = path.join(absolutePath, `index${ext}`);
+    if (fs.existsSync(tryPath)) {
+      return tryPath;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * 파일에서 모든 import된 컴포넌트 경로 추출
+ */
+function extractAllImports(fileContent) {
+  const imports = [];
+  
+  // default import: import Component from '...'
+  const defaultImportRegex = /import\s+(\w+)\s+from\s+['"]([^'"]+)['"]/g;
+  let match;
+  
+  while ((match = defaultImportRegex.exec(fileContent)) !== null) {
+    imports.push({
+      name: match[1],
+      path: match[2],
+      type: 'default',
+    });
+  }
+
+  // named import: import { Component } from '...'
+  const namedImportRegex = /import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/g;
+  
+  while ((match = namedImportRegex.exec(fileContent)) !== null) {
+    const names = match[1].split(',').map(n => n.trim().split(' as ')[0].trim());
+    for (const name of names) {
+      imports.push({
+        name,
+        path: match[2],
+        type: 'named',
+      });
+    }
+  }
+
+  return imports;
+}
+
+/**
  * 프로젝트 전체 메타데이터 마이그레이션
  */
 async function migrateMetadata(projectRoot) {
@@ -666,68 +743,96 @@ async function migrateMetadata(projectRoot) {
     return;
   }
 
-  // app 디렉토리 내 모든 page.tsx 파일 찾기
-  const pageFiles = [];
+  // app 디렉토리 내 모든 page.tsx 및 layout.tsx 파일 찾기
+  const targetFiles = {
+    pages: [],
+    layouts: [],
+  };
 
-  async function findPageFiles(dir) {
+  async function findTargetFiles(dir) {
     const entries = await fs.readdir(dir, { withFileTypes: true });
 
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
 
       if (entry.isDirectory()) {
-        await findPageFiles(fullPath);
+        await findTargetFiles(fullPath);
       } else if (entry.name === 'page.tsx' || entry.name === 'page.jsx') {
-        pageFiles.push(fullPath);
+        targetFiles.pages.push(fullPath);
+      } else if (entry.name === 'layout.tsx' || entry.name === 'layout.jsx') {
+        // 루트 layout.tsx는 제외 (이미 providers 등이 있을 수 있음)
+        const relativePath = path.relative(appDir, fullPath);
+        if (relativePath !== 'layout.tsx' && relativePath !== 'layout.jsx') {
+          targetFiles.layouts.push(fullPath);
+        }
       }
     }
   }
 
-  await findPageFiles(appDir);
+  await findTargetFiles(appDir);
 
-  console.log(`   📁 발견된 페이지 파일: ${pageFiles.length}개`);
+  console.log(`   📁 발견된 페이지 파일: ${targetFiles.pages.length}개`);
+  console.log(`   📁 발견된 레이아웃 파일: ${targetFiles.layouts.length}개`);
 
   const results = [];
 
-  for (const pageFile of pageFiles) {
-    // page.tsx에서 import된 컴포넌트 찾기
+  // 1. page.tsx 파일 처리
+  for (const pageFile of targetFiles.pages) {
     const pageContent = await fs.readFile(pageFile, 'utf-8');
+    const imports = extractAllImports(pageContent);
 
-    // import 문에서 컴포넌트 경로 추출
-    const importMatch = pageContent.match(/import\s+(\w+)\s+from\s+['"]([^'"]+)['"]/);
+    for (const imp of imports) {
+      const absoluteComponentPath = resolveImportPath(imp.path, pageFile, projectRoot);
 
-    if (importMatch) {
-      const componentPath = importMatch[2];
-      let absoluteComponentPath;
-
-      // 상대 경로 해결
-      if (componentPath.startsWith('.')) {
-        absoluteComponentPath = path.resolve(path.dirname(pageFile), componentPath);
-      } else if (componentPath.startsWith('@/')) {
-        absoluteComponentPath = path.join(projectRoot, 'src', componentPath.slice(2));
-      } else {
-        // node_modules 패키지는 건너뜀
-        continue;
-      }
-
-      // 확장자 추가
-      const extensions = ['.tsx', '.jsx', '.ts', '.js'];
-      for (const ext of extensions) {
-        const tryPath = absoluteComponentPath + ext;
-        if (fs.existsSync(tryPath)) {
-          absoluteComponentPath = tryPath;
-          break;
-        }
-        // 이미 확장자가 있는 경우
-        if (fs.existsSync(absoluteComponentPath)) {
-          break;
-        }
-      }
-
-      if (fs.existsSync(absoluteComponentPath)) {
+      if (absoluteComponentPath && fs.existsSync(absoluteComponentPath)) {
         const result = await migratePageMetadata(projectRoot, pageFile, absoluteComponentPath);
-        results.push({ pageFile, componentPath: absoluteComponentPath, ...result });
+        results.push({ 
+          targetFile: pageFile, 
+          targetType: 'page',
+          componentPath: absoluteComponentPath, 
+          ...result 
+        });
       }
+    }
+  }
+
+  // 2. layout.tsx 파일 처리
+  for (const layoutFile of targetFiles.layouts) {
+    console.log(`   📄 레이아웃 처리 중: ${path.relative(projectRoot, layoutFile)}`);
+    
+    const layoutContent = await fs.readFile(layoutFile, 'utf-8');
+    const imports = extractAllImports(layoutContent);
+
+    // layout.tsx에서 import된 컴포넌트들 중 Helmet이 있는 것 찾기
+    for (const imp of imports) {
+      const absoluteComponentPath = resolveImportPath(imp.path, layoutFile, projectRoot);
+
+      if (absoluteComponentPath && fs.existsSync(absoluteComponentPath)) {
+        // 컴포넌트 파일 내용 확인
+        const componentContent = await fs.readFile(absoluteComponentPath, 'utf-8');
+        
+        // Helmet 태그가 있는지 확인
+        if (componentContent.includes('<Helmet') || componentContent.includes('<Head')) {
+          const result = await migratePageMetadata(projectRoot, layoutFile, absoluteComponentPath);
+          results.push({ 
+            targetFile: layoutFile, 
+            targetType: 'layout',
+            componentPath: absoluteComponentPath, 
+            ...result 
+          });
+        }
+      }
+    }
+
+    // layout.tsx 파일 자체에도 Helmet이 있을 수 있음 (직접 포함된 경우)
+    if (layoutContent.includes('<Helmet') || layoutContent.includes('<Head')) {
+      const result = await migratePageMetadata(projectRoot, layoutFile, layoutFile);
+      results.push({ 
+        targetFile: layoutFile, 
+        targetType: 'layout',
+        componentPath: layoutFile, 
+        ...result 
+      });
     }
   }
 
@@ -735,8 +840,12 @@ async function migrateMetadata(projectRoot) {
   const successful = results.filter(r => r.success && r.metadataType);
   const staticCount = successful.filter(r => r.metadataType === 'static').length;
   const dynamicCount = successful.filter(r => r.metadataType === 'dynamic').length;
+  const pageCount = successful.filter(r => r.targetType === 'page').length;
+  const layoutCount = successful.filter(r => r.targetType === 'layout').length;
 
   console.log(`\n✅ 메타데이터 마이그레이션 완료:`);
+  console.log(`   - 페이지 메타데이터: ${pageCount}개`);
+  console.log(`   - 레이아웃 메타데이터: ${layoutCount}개`);
   console.log(`   - 정적 메타데이터: ${staticCount}개`);
   console.log(`   - 동적 메타데이터: ${dynamicCount}개`);
 
