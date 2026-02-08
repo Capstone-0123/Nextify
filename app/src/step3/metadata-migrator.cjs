@@ -345,6 +345,99 @@ function extractDynamicTitlePattern(jsxContent) {
   return null;
 }
 
+/**
+ * Helmet 태그에서 모든 동적 메타데이터 표현식 추출
+ */
+function extractDynamicMetadataExpressions(jsxContent) {
+  const expressions = {
+    title: null,
+    titleSuffix: null,
+    description: null,
+    openGraph: {},
+    twitter: {},
+    images: [],
+  };
+
+  // 1. <title> 태그 (동적)
+  // 패턴: <title>{expr}</title> 또는 <title>{expr} - Suffix</title>
+  const titleMatch = jsxContent.match(/<title>\{([^}]+)\}(?:\s*[-|]\s*([^<]+))?<\/title>/);
+  if (titleMatch) {
+    expressions.title = titleMatch[1].trim();
+    if (titleMatch[2]) {
+      expressions.titleSuffix = titleMatch[2].trim();
+    }
+  }
+
+  // 2. <meta name="description"> (동적)
+  const descMatch = jsxContent.match(/<meta\s+name=["']description["']\s+content=\{([^}]+)\}/);
+  if (descMatch) {
+    expressions.description = descMatch[1].trim();
+  }
+
+  // 3. Open Graph 메타 태그들
+  const ogPatterns = [
+    { regex: /<meta\s+property=["']og:title["']\s+content=\{([^}]+)\}/, key: 'title' },
+    { regex: /<meta\s+property=["']og:description["']\s+content=\{([^}]+)\}/, key: 'description' },
+    { regex: /<meta\s+property=["']og:image["']\s+content=\{([^}]+)\}/, key: 'images' },
+    { regex: /<meta\s+property=["']og:url["']\s+content=\{([^}]+)\}/, key: 'url' },
+    { regex: /<meta\s+property=["']og:type["']\s+content=\{([^}]+)\}/, key: 'type' },
+  ];
+
+  for (const { regex, key } of ogPatterns) {
+    const match = jsxContent.match(regex);
+    if (match) {
+      if (key === 'images') {
+        expressions.openGraph[key] = `[${match[1].trim()}]`;
+      } else {
+        expressions.openGraph[key] = match[1].trim();
+      }
+    }
+  }
+
+  // 4. Twitter 메타 태그들
+  const twitterPatterns = [
+    { regex: /<meta\s+name=["']twitter:title["']\s+content=\{([^}]+)\}/, key: 'title' },
+    { regex: /<meta\s+name=["']twitter:description["']\s+content=\{([^}]+)\}/, key: 'description' },
+    { regex: /<meta\s+name=["']twitter:image["']\s+content=\{([^}]+)\}/, key: 'images' },
+    { regex: /<meta\s+name=["']twitter:card["']\s+content=\{([^}]+)\}/, key: 'card' },
+  ];
+
+  for (const { regex, key } of twitterPatterns) {
+    const match = jsxContent.match(regex);
+    if (match) {
+      if (key === 'images') {
+        expressions.twitter[key] = `[${match[1].trim()}]`;
+      } else {
+        expressions.twitter[key] = match[1].trim();
+      }
+    }
+  }
+
+  return expressions;
+}
+
+/**
+ * 동적 표현식에서 데이터 변수명 추출 (예: movie.title → movie)
+ */
+function extractDataVariableName(expressions) {
+  const allExpressions = [
+    expressions.title,
+    expressions.description,
+    ...Object.values(expressions.openGraph),
+    ...Object.values(expressions.twitter),
+  ].filter(Boolean);
+
+  for (const expr of allExpressions) {
+    // movie.title, data.name, post?.content 등에서 루트 변수명 추출
+    const match = expr.match(/^(\w+)[\.\?]/);
+    if (match) {
+      return match[1];
+    }
+  }
+
+  return 'data';
+}
+
 // ============================================================================
 // 메타데이터 코드 생성
 // ============================================================================
@@ -407,8 +500,9 @@ function generateStaticMetadataCode(title, metadata, viewport) {
 
 /**
  * 동적 메타데이터 generateMetadata 함수 코드 생성
+ * - 동적 표현식은 주석으로 처리하여 개발자가 참고할 수 있도록 함
  */
-function generateDynamicMetadataCode(patterns, componentInfo) {
+function generateDynamicMetadataCode(patterns, componentInfo, dynamicExpressions = null) {
   let code = `import type { Metadata } from 'next';\n`;
 
   // 데이터 패칭 함수 import (필요시)
@@ -417,8 +511,62 @@ function generateDynamicMetadataCode(patterns, componentInfo) {
     code += `// import { ${patterns.fetchFunction} } from '@/api/...';\n\n`;
   }
 
+  // 데이터 변수명 추출
+  const dataVar = dynamicExpressions ? extractDataVariableName(dynamicExpressions) : 'data';
+
+  // 원본 Helmet 메타데이터를 주석으로 보존
+  if (dynamicExpressions) {
+    code += `\n/*\n`;
+    code += ` * 원본 Helmet에서 추출된 동적 메타데이터:\n`;
+    code += ` * 아래 표현식들을 참고하여 generateMetadata 함수를 완성하세요.\n`;
+    code += ` *\n`;
+    if (dynamicExpressions.title) {
+      const titleExpr = dynamicExpressions.titleSuffix 
+        ? `\${${dynamicExpressions.title}} - ${dynamicExpressions.titleSuffix}`
+        : dynamicExpressions.title;
+      code += ` * title: ${titleExpr}\n`;
+    }
+    if (dynamicExpressions.description) {
+      code += ` * description: ${dynamicExpressions.description}\n`;
+    }
+    if (Object.keys(dynamicExpressions.openGraph).length > 0) {
+      code += ` * openGraph:\n`;
+      for (const [key, value] of Object.entries(dynamicExpressions.openGraph)) {
+        code += ` *   - ${key}: ${value}\n`;
+      }
+    }
+    if (Object.keys(dynamicExpressions.twitter).length > 0) {
+      code += ` * twitter:\n`;
+      for (const [key, value] of Object.entries(dynamicExpressions.twitter)) {
+        code += ` *   - ${key}: ${value}\n`;
+      }
+    }
+    code += ` *\n`;
+    code += ` * 예시 구현:\n`;
+    code += ` * const ${dataVar} = await fetch${dataVar.charAt(0).toUpperCase() + dataVar.slice(1)}(id);\n`;
+    code += ` * return {\n`;
+    if (dynamicExpressions.title) {
+      const titleCode = dynamicExpressions.titleSuffix 
+        ? `\`\${${dynamicExpressions.title}} - ${dynamicExpressions.titleSuffix}\``
+        : dynamicExpressions.title;
+      code += ` *   title: ${titleCode},\n`;
+    }
+    if (dynamicExpressions.description) {
+      code += ` *   description: ${dynamicExpressions.description},\n`;
+    }
+    if (Object.keys(dynamicExpressions.openGraph).length > 0) {
+      code += ` *   openGraph: {\n`;
+      for (const [key, value] of Object.entries(dynamicExpressions.openGraph)) {
+        code += ` *     ${key}: ${value},\n`;
+      }
+      code += ` *   },\n`;
+    }
+    code += ` * };\n`;
+    code += ` */\n\n`;
+  }
+
   // generateMetadata 함수 생성
-  code += `\nexport async function generateMetadata(`;
+  code += `export async function generateMetadata(`;
 
   const params = [];
   if (patterns.paramUsage.includes('params')) {
@@ -442,17 +590,17 @@ function generateDynamicMetadataCode(patterns, componentInfo) {
     code += `  const query = (await searchParams).q;\n`;
   }
 
-  // 데이터 패칭
-  if (patterns.hasDataFetching) {
-    code += `\n  // [case 1: 데이터 패칭 로직]\n`;
-    code += `  // const data = await ${patterns.fetchFunction || 'fetchData'}(id);\n`;
-    code += `  // if (!data) return { title: 'Not Found' };\n`;
-  }
+  // 데이터 패칭 (주석 처리)
+  code += `\n  // TODO: 데이터 패칭 로직 구현\n`;
+  code += `  // const ${dataVar} = await fetch${dataVar.charAt(0).toUpperCase() + dataVar.slice(1)}(id);\n`;
+  code += `  // if (!${dataVar}) {\n`;
+  code += `  //   return { title: 'Not Found' };\n`;
+  code += `  // }\n`;
 
-  // 반환값
+  // 반환값 생성 (기본 템플릿)
   code += `\n  return {\n`;
-  code += `    title: '', // TODO: 동적 title 설정\n`;
-  code += `    description: '', // TODO: 동적 description 설정\n`;
+  code += `    title: '', // TODO: 위 주석의 표현식 참고\n`;
+  code += `    description: '', // TODO: 위 주석의 표현식 참고\n`;
   code += `  };\n`;
   code += `}\n`;
 
@@ -604,6 +752,9 @@ async function migratePageMetadata(projectRoot, pageFilePath, componentFilePath)
   // 정적 메타데이터 추출
   const { title, metadata, viewport, hasDynamicContent } = extractStaticMetadata(helmetContent.content);
 
+  // 동적 메타데이터 표현식 추출
+  const dynamicExpressions = extractDynamicMetadataExpressions(helmetContent.content);
+
   let metadataCode = '';
   let metadataType = 'static';
 
@@ -611,18 +762,22 @@ async function migratePageMetadata(projectRoot, pageFilePath, componentFilePath)
   if (dynamicPatterns.hasDataFetching || dynamicPatterns.hasSearchParams || hasDynamicContent) {
     // 동적 메타데이터
     metadataType = 'dynamic';
-    metadataCode = generateDynamicMetadataCode(dynamicPatterns, { title, metadata });
+    
+    // 동적 표현식이 있으면 전달
+    const hasDynamicExpressions = dynamicExpressions.title || 
+      dynamicExpressions.description || 
+      Object.keys(dynamicExpressions.openGraph).length > 0 ||
+      Object.keys(dynamicExpressions.twitter).length > 0;
 
-    // 정적 부분도 있으면 주석으로 추가
-    if (title || Object.keys(metadata.basic).length > 0) {
-      metadataCode += `\n// 정적 메타데이터 참고용:\n`;
-      metadataCode += `// ${JSON.stringify({ title, ...metadata.basic })}\n`;
-    }
+    metadataCode = generateDynamicMetadataCode(
+      dynamicPatterns, 
+      { title, metadata },
+      hasDynamicExpressions ? dynamicExpressions : null
+    );
   } else if (dynamicPatterns.hasTitleTemplate) {
     // 타이틀 템플릿 (layout.tsx용)
     metadataType = 'template';
-    // layout.tsx에 추가하는 로직은 별도 처리 필요
-    console.log(`   ℹ️ titleTemplate 감지됨 - layout.tsx에 수동 추가 필요`);
+    console.log(`   ℹ️ titleTemplate 감지됨`);
     metadataCode = generateTitleTemplateCode(dynamicPatterns.titleTemplate);
   } else {
     // 정적 메타데이터

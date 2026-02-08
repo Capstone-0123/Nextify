@@ -871,39 +871,54 @@ function generateConfigCode(dependencies) {
 
 /**
  * Import 및 Props 이관 메인 함수
+ * @param {Object[]} sourceFiles - 분석할 소스 파일들 (main.tsx, App.tsx 등)
  */
-async function migrateProviderImports(projectRoot, providers, sourceFile, entryFile) {
+async function migrateProviderImports(projectRoot, providers, sourceFiles, entryFile) {
   console.log('📦 Import 및 설정 이관 시작...');
 
   const targetFilePath = path.join(projectRoot, 'src/app/providers.tsx');
 
-  const providerImports = collectProviderImports(sourceFile, providers, targetFilePath);
-  console.log(`   - Provider import ${providerImports.length}개 수집`);
+  // 배열이 아니면 배열로 변환 (하위 호환성)
+  const files = Array.isArray(sourceFiles) ? sourceFiles : [sourceFiles];
 
-  const dependencies = trackProviderDependencies(sourceFile, providers);
-  console.log(`   - 설정 변수 ${dependencies.length}개 추적`);
+  // 모든 소스 파일에서 Provider import 수집
+  let allProviderImports = [];
+  let allDependencies = [];
+  let allDependencyImports = [];
 
-  const dependencyImports = collectDependencyImports(sourceFile, dependencies, targetFilePath);
-  console.log(`   - 의존성 import ${dependencyImports.length}개 수집`);
+  for (const sourceFile of files) {
+    const providerImports = collectProviderImports(sourceFile, providers, targetFilePath);
+    allProviderImports.push(...providerImports);
 
-  const allImports = [...providerImports, ...dependencyImports];
+    const dependencies = trackProviderDependencies(sourceFile, providers);
+    allDependencies.push(...dependencies);
+
+    const dependencyImports = collectDependencyImports(sourceFile, dependencies, targetFilePath);
+    allDependencyImports.push(...dependencyImports);
+  }
+
+  console.log(`   - Provider import ${allProviderImports.length}개 수집`);
+  console.log(`   - 설정 변수 ${allDependencies.length}개 추적`);
+  console.log(`   - 의존성 import ${allDependencyImports.length}개 수집`);
+
+  const allImports = [...allProviderImports, ...allDependencyImports];
   const importStatements = generateImportStatements(allImports);
 
-  if (needsUseStateImport(dependencies)) {
+  if (needsUseStateImport(allDependencies)) {
     const hasUseState = importStatements.some(s => s.includes('useState'));
     if (!hasUseState) {
       importStatements.unshift("import { useState } from 'react';");
     }
   }
 
-  const configCodes = generateConfigCode(dependencies);
+  const configCodes = generateConfigCode(allDependencies);
 
   console.log('✅ Import 및 설정 이관 완료');
 
   return {
     imports: importStatements,
     configCodes,
-    dependencies,
+    dependencies: allDependencies,
   };
 }
 
@@ -1184,18 +1199,18 @@ async function applyProvidersToLayout(projectRoot) {
  */
 async function migrateProviders(projectRoot) {
   // 1. Provider 트리 추출
-  const { providers, entryFile, sourceFile } = await extractProviderTree(projectRoot);
+  const { providers, entryFile, sourceFiles } = await extractProviderTree(projectRoot);
 
   if (providers.length === 0) {
     console.log('⚠️ 마이그레이션할 Provider가 없습니다.');
     return;
   }
 
-  // 2. Import 및 설정 이관
+  // 2. Import 및 설정 이관 (모든 소스 파일에서 수집)
   const { imports, configCodes } = await migrateProviderImports(
     projectRoot,
     providers,
-    sourceFile,
+    sourceFiles,
     entryFile
   );
 
