@@ -2,50 +2,11 @@
 
 const fs = require('fs-extra');
 const path = require('path');
-const ora = require('ora');
 const chalk = require('chalk');
 const readline = require('readline');
 
 // [중요] 기존의 const CWD = process.cwd(); 는 삭제하거나 주석 처리합니다.
 // 함수들이 이제 인자로 경로를 받아서 처리하기 때문입니다.
-
-/**
- * Step 1 메인 함수
- * targetDir를 인자로 받도록 수정 (기본값: 현재 실행 위치)
- */
-async function runStep1(targetDir = process.cwd()) {
-  const spinner = ora().start();
-
-  try {
-    // 1. package.json 수정
-    spinner.text = 'package.json 의존성 및 스크립트 수정 중...';
-    // [중요] targetDir를 인자로 전달
-    await updatePackageJson(targetDir);
-    spinner.succeed('package.json 의존성 및 스크립트 수정 완료');
-
-    // 2. 설정 파일 업데이트 및 정리
-    spinner.start('설정 파일 업데이트 및 정리 중...');
-    // [중요] targetDir를 인자로 전달
-    await setupConfigFiles(targetDir);
-    spinner.succeed('설정 파일 업데이트 완료 (Vite config 삭제, Next.js config 생성, .gitignore 업데이트)');
-
-    // 3. vite.config.ts 설정
-    spinner.start('vite.config.ts 설정 마이그레이션 중...');
-    // [중요] targetDir를 인자로 전달
-    await migrateViteConfig(targetDir);
-    spinner.succeed('vite.config.ts 설정 마이그레이션 완료');
-
-    // 4. TypeScript 설정 정리
-    spinner.start('TypeScript 컴파일러 설정 정리 중...');
-    // [중요] targetDir를 인자로 전달
-    await updateTsConfig(targetDir);
-    spinner.succeed('TypeScript 컴파일러 설정 정리 완료');
-  } catch (error) {
-    spinner.fail('Step 1 실패');
-    console.error(error);
-    throw error;
-  }
-}
 
 // ====================================================
 // 1. package.json 수정 (cwd 인자 추가)
@@ -1520,5 +1481,8 @@ function askUserConfirmationForTsConfig(conflictType, conflictDetails) {
 }
 
 module.exports = {
-  runStep1,
+  updatePackageJson,
+  setupConfigFiles,
+  migrateViteConfig,
+  updateTsConfig,
 };

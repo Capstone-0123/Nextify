@@ -146,7 +146,6 @@ program
 
       // 완료 안내
       const installCmd = getInstallCommand(pm);
-      console.log(chalk.green.bold('\n✅ Step 1 완료!'));
 
       if (mode === 'copy') {
         // 현재 경로에서 target 경로로 가는 상대 경로 계산
