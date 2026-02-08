@@ -16,6 +16,15 @@ async function cloneProject(source, destination) {
         return true;
       },
     });
+    
+    // .gitignore 파일을 명시적으로 복사 (기존 내용 유지 보장)
+    const sourceGitignore = path.join(source, '.gitignore');
+    const destGitignore = path.join(destination, '.gitignore');
+    if (fs.existsSync(sourceGitignore)) {
+      // 원본 .gitignore가 있으면 항상 복사 (기존 내용 보존)
+      await fs.copy(sourceGitignore, destGitignore, { overwrite: true });
+    }
+    
     spinner.succeed(`프로젝트 복제 완료: ${destination}`);
   } catch (e) {
     spinner.fail('프로젝트 복제 실패');
