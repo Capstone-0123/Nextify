@@ -69,7 +69,23 @@ program
       // CLI 옵션으로 모드 결정
       if (options.output) {
         mode = 'copy';
-        targetPath = path.resolve(options.output);
+        // 입력값 정리 (공백 제거)
+        const cleanedPath = options.output.trim();
+        
+        // Windows 절대 경로 판단 (C:\, D:\ 등) 또는 Unix 절대 경로 (/)
+        const isAbsolutePath = path.isAbsolute(cleanedPath) || /^[A-Za-z]:[\\/]/.test(cleanedPath);
+        
+        if (isAbsolutePath) {
+          // 절대 경로면 그대로 사용
+          targetPath = path.resolve(cleanedPath);
+        } else if (cleanedPath.includes('/') || cleanedPath.includes('\\')) {
+          // 상대 경로 (./foo, ../bar 등)면 현재 디렉토리 기준
+          targetPath = path.resolve(cwd, cleanedPath);
+        } else {
+          // 폴더명만 입력한 경우 부모 디렉토리에 생성
+          const parentDir = path.dirname(cwd);
+          targetPath = path.join(parentDir, cleanedPath);
+        }
       } else if (options.inplace) {
         mode = 'inplace';
       } else {
