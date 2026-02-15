@@ -12,26 +12,7 @@ const fs = require('fs-extra');
 // 상수 정의
 // ============================================================================
 
-/**
- * 영구 저장소 키워드
- */
 const STORAGE_KEYWORDS = ['localStorage', 'sessionStorage'];
-
-/**
- * Persist 미들웨어 키워드
- */
-const PERSIST_KEYWORDS = ['persist'];
-
-/**
- * 초기값 타입별 기본값 매핑
- */
-const DEFAULT_VALUES = {
-  object: 'null',
-  boolean: 'false',
-  array: '[]',
-  string: "''",
-  number: '0',
-};
 
 // ============================================================================
 // 1. 대상 파일 분석 및 분류
@@ -62,12 +43,11 @@ async function findStoreFiles(projectRoot) {
 
 /**
  * 스토어 파일 분류
- * @returns {{ persistence: string[], volatile: string[], persistMiddleware: string[] }}
  */
 async function classifyStoreFiles(storeFiles) {
   const classified = {
-    persistence: [],      // Case a: localStorage/sessionStorage 직접 사용
-    volatile: [],         // Case b: 휘발성 (저장소 사용 안 함)
+    persistence: [],       // Case a: localStorage/sessionStorage 직접 사용
+    volatile: [],          // Case b: 휘발성 (저장소 사용 안 함)
     persistMiddleware: [], // Case c: Persist 미들웨어 사용
   };
 
@@ -103,7 +83,7 @@ async function classifyStoreFiles(storeFiles) {
  */
 function extractStoreName(content, filePath) {
   // export const useAuthStore = create(...) 패턴
-  const match = content.match(/export\s+const\s+(use\w+Store)\s*=/);
+  const match = content.match(/export\s+const\s+(use\w+(?:Store)?)\s*=/);
   if (match) {
     return match[1];
   }
@@ -114,84 +94,77 @@ function extractStoreName(content, filePath) {
   return `use${baseName.charAt(0).toUpperCase() + baseName.slice(1)}Store`;
 }
 
+/**
+ * 스토어에서 localStorage 키 추출
+ */
+function extractStorageKey(content) {
+  // localStorage.getItem('key') 또는 localStorage.setItem('key', ...)
+  const match = content.match(/localStorage\.(getItem|setItem)\s*\(\s*['"]([^'"]+)['"]/);
+  return match ? match[2] : 'store-data';
+}
+
+/**
+ * 스토어에서 상태 키들 추출
+ */
+function extractStateKeys(content) {
+  const keys = [];
+  
+  // create<...>((set) => ({ user: ..., isLoggedIn: ... })) 패턴에서 키 추출
+  const statePattern = /create[^(]*\([^)]*\)\s*=>\s*\(\s*\{([^]*?)\}\s*\)\s*\)/;
+  const match = content.match(statePattern);
+  
+  if (match) {
+    const stateBody = match[1];
+    // 첫 번째 레벨의 키만 추출 (중첩 객체 제외)
+    const keyPattern = /^\s*(\w+)\s*:/gm;
+    let keyMatch;
+    while ((keyMatch = keyPattern.exec(stateBody)) !== null) {
+      // 함수가 아닌 상태 키만 (login:, logout: 등 함수 제외)
+      const key = keyMatch[1];
+      // 해당 키가 함수인지 확인
+      const afterKey = stateBody.slice(keyMatch.index + keyMatch[0].length);
+      if (!afterKey.trim().startsWith('(') && !afterKey.trim().startsWith('async')) {
+        keys.push(key);
+      }
+    }
+  }
+
+  return keys.length > 0 ? keys : ['data'];
+}
+
 // ============================================================================
 // 2. Case a: 영구 데이터 스토어 변환
 // ============================================================================
 
 /**
- * getItem 호출의 초기값 타입 추론 및 기본값 반환
- */
-function inferDefaultValue(expression) {
-  const text = expression.toLowerCase();
-
-  // JSON.parse가 있으면 객체/배열일 가능성
-  if (text.includes('json.parse')) {
-    // || [] 또는 || null 패턴으로 타입 추론
-    if (text.includes('|| []') || text.includes('?? []')) {
-      return DEFAULT_VALUES.array;
-    }
-    if (text.includes('|| null') || text.includes('?? null')) {
-      return DEFAULT_VALUES.object;
-    }
-    // 기본적으로 객체로 추론
-    return DEFAULT_VALUES.object;
-  }
-
-  // Boolean 패턴
-  if (text.includes('!!') || text.includes('boolean') || 
-      text.includes('isloggedin') || text.includes('isopen')) {
-    return DEFAULT_VALUES.boolean;
-  }
-
-  // 기본값
-  return DEFAULT_VALUES.object;
-}
-
-/**
- * 영구 데이터 스토어 변환 (Case a)
+ * 영구 데이터 스토어 변환 (Case a) - ts-morph 사용
  */
 async function transformPersistenceStore(filePath, projectRoot) {
   console.log(`   📄 영구 데이터 스토어 변환: ${path.relative(projectRoot, filePath)}`);
 
-  let content = await fs.readFile(filePath, 'utf-8');
+  const project = new Project({
+    useInMemoryFileSystem: false,
+  });
+
+  const sourceFile = project.addSourceFileAtPath(filePath);
+  let content = sourceFile.getFullText();
   const storeName = extractStoreName(content, filePath);
+  const storageKey = extractStorageKey(content);
+  const stateKeys = extractStateKeys(content);
 
-  // 1. getItem 초기값을 기본값으로 치환
-  // 패턴: user: JSON.parse(localStorage.getItem('user')) || null
-  content = content.replace(
-    /(\w+):\s*JSON\.parse\s*\(\s*localStorage\.getItem\s*\([^)]+\)\s*\)\s*(\|\||&&|\?\?)\s*(\w+|\[\]|null|'[^']*'|"[^"]*")/g,
-    (match, key, operator, defaultVal) => {
-      // 타입에 맞는 기본값 사용
-      let newDefault = defaultVal;
-      if (defaultVal === 'null' || defaultVal.includes('null')) {
-        newDefault = 'null';
-      } else if (defaultVal === '[]') {
-        newDefault = '[]';
-      } else if (defaultVal === 'false' || defaultVal === 'true') {
-        newDefault = 'false';
-      }
-      return `${key}: ${newDefault}`;
-    }
-  );
+  // 1. 인터페이스에 hydrate 메서드 시그니처 추가
+  content = addHydrateToInterface(content);
 
-  // 2. !!localStorage.getItem 패턴 치환 (boolean)
-  content = content.replace(
-    /(\w+):\s*!!\s*localStorage\.getItem\s*\([^)]+\)/g,
-    (match, key) => `${key}: false`
-  );
+  // 2. getItem 초기값을 기본값으로 치환
+  content = replaceGetItemInitialValues(content);
 
-  // 3. localStorage.getItem 단독 사용 치환
-  content = content.replace(
-    /(\w+):\s*localStorage\.getItem\s*\([^)]+\)/g,
-    (match, key) => `${key}: null`
-  );
-
-  // 4. setItem/removeItem을 window 체크로 래핑
+  // 3. setItem/removeItem을 window 체크로 래핑
   content = wrapStorageCallsWithWindowCheck(content);
 
-  // 5. hydrate 함수 추가
-  content = addHydrateFunction(content, storeName);
+  // 4. hydrate 함수 구현 추가
+  content = addHydrateFunctionToStore(content, storeName, storageKey, stateKeys);
 
+  // 파일 저장
   await fs.writeFile(filePath, content);
   console.log(`   ✅ 변환 완료: ${storeName}`);
 
@@ -199,22 +172,104 @@ async function transformPersistenceStore(filePath, projectRoot) {
 }
 
 /**
+ * TypeScript 인터페이스에 hydrate 메서드 시그니처 추가
+ */
+function addHydrateToInterface(content) {
+  // interface XxxState { ... } 또는 type XxxState = { ... } 패턴 찾기
+  const interfacePattern = /(interface|type)\s+(\w+State)\s*(=\s*)?\{/g;
+  let match;
+  
+  while ((match = interfacePattern.exec(content)) !== null) {
+    const keyword = match[1]; // interface 또는 type
+    const interfaceName = match[2];
+    const startIndex = match.index;
+    const braceStartIndex = match.index + match[0].length - 1;
+    
+    // 중괄호 매칭으로 인터페이스 끝 찾기
+    let braceCount = 1;
+    let endIndex = braceStartIndex + 1;
+    
+    while (braceCount > 0 && endIndex < content.length) {
+      if (content[endIndex] === '{') braceCount++;
+      else if (content[endIndex] === '}') braceCount--;
+      endIndex++;
+    }
+    
+    // 인터페이스 내용 추출
+    const interfaceContent = content.slice(braceStartIndex, endIndex);
+    
+    // 이미 hydrate가 있으면 건너뜀
+    if (interfaceContent.includes('hydrate:') || interfaceContent.includes('hydrate :')) {
+      continue;
+    }
+    
+    // 들여쓰기 감지 (첫 번째 멤버의 들여쓰기 사용)
+    const indentMatch = interfaceContent.match(/\n(\s+)\w+/);
+    const indent = indentMatch ? indentMatch[1] : '  ';
+    
+    // 닫는 중괄호 앞에 hydrate 추가
+    const newInterfaceContent = interfaceContent.slice(0, -1) + 
+      `${indent}hydrate: () => void\n` + 
+      interfaceContent.slice(-1);
+    
+    content = content.slice(0, braceStartIndex) + newInterfaceContent + content.slice(endIndex);
+    
+    // 패턴의 lastIndex 업데이트 (내용이 변경되었으므로)
+    interfacePattern.lastIndex = braceStartIndex + newInterfaceContent.length;
+  }
+
+  return content;
+}
+
+/**
+ * getItem 초기값을 기본값으로 치환
+ */
+function replaceGetItemInitialValues(content) {
+  // 패턴 1: JSON.parse(localStorage.getItem('key')) || defaultValue
+  content = content.replace(
+    /(\w+):\s*JSON\.parse\s*\(\s*localStorage\.getItem\s*\([^)]+\)\s*(?:!|\s)*\)\s*(\|\||&&|\?\?)\s*([\w\[\]'"]+)/g,
+    (match, key, operator, defaultVal) => {
+      let newDefault = 'null';
+      if (defaultVal === '[]') newDefault = '[]';
+      else if (defaultVal === 'false' || defaultVal === 'true') newDefault = 'false';
+      else if (defaultVal.startsWith("'") || defaultVal.startsWith('"')) newDefault = "''";
+      return `${key}: ${newDefault}`;
+    }
+  );
+
+  // 패턴 2: !!localStorage.getItem('key')
+  content = content.replace(
+    /(\w+):\s*!!\s*localStorage\.getItem\s*\([^)]+\)/g,
+    (match, key) => `${key}: false`
+  );
+
+  // 패턴 3: localStorage.getItem('key') 단독
+  content = content.replace(
+    /(\w+):\s*localStorage\.getItem\s*\([^)]+\)/g,
+    (match, key) => `${key}: null`
+  );
+
+  return content;
+}
+
+/**
  * localStorage.setItem/removeItem 호출을 window 체크로 래핑
  */
 function wrapStorageCallsWithWindowCheck(content) {
-  // 이미 window 체크가 있는 경우는 건너뜀
-  const storageCallPattern = /(?<!if\s*\(\s*typeof\s+window\s*!==?\s*['"]undefined['"]\s*\)\s*\{\s*)localStorage\.(setItem|removeItem)\s*\([^)]+\)\s*;?/g;
-
-  // 함수 내부의 storage 호출 찾기
   const lines = content.split('\n');
   const result = [];
   
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     
-    // localStorage.setItem 또는 removeItem이 있고, 이미 window 체크가 없는 경우
-    if ((line.includes('localStorage.setItem') || line.includes('localStorage.removeItem')) &&
-        !lines.slice(Math.max(0, i - 3), i).some(l => l.includes('typeof window'))) {
+    // localStorage.setItem 또는 removeItem이 있는지 확인
+    if ((line.includes('localStorage.setItem') || line.includes('localStorage.removeItem'))) {
+      // 이미 window 체크가 있는지 확인 (이전 3줄 체크)
+      const previousLines = lines.slice(Math.max(0, i - 3), i).join('\n');
+      if (previousLines.includes('typeof window')) {
+        result.push(line);
+        continue;
+      }
       
       const indent = line.match(/^(\s*)/)[1];
       const trimmedLine = line.trim();
@@ -231,42 +286,76 @@ function wrapStorageCallsWithWindowCheck(content) {
 }
 
 /**
- * hydrate 함수 추가
+ * 스토어에 hydrate 함수 추가
  */
-function addHydrateFunction(content, storeName) {
-  // 이미 hydrate가 있는지 확인
-  if (content.includes('hydrate:') || content.includes('hydrate :')) {
+function addHydrateFunctionToStore(content, storeName, storageKey, stateKeys) {
+  // 이미 hydrate 구현이 있으면 건너뜀
+  if (/hydrate\s*:\s*\(\s*\)\s*=>\s*\{/.test(content)) {
     return content;
   }
 
-  // localStorage.getItem 키 추출
-  const storageKeyMatch = content.match(/localStorage\.getItem\s*\(\s*['"]([^'"]+)['"]\s*\)/);
-  const storageKey = storageKeyMatch ? storageKeyMatch[1] : 'store';
+  // 상태 키별 hydrate 로직 생성
+  const hydrateSetStatements = stateKeys.map(key => `${key}: JSON.parse(stored)`).join(', ');
 
-  // 상태 키 추출 (첫 번째 상태 속성)
-  const stateKeyMatch = content.match(/create[^(]*\(\s*\(?set\)?\s*=>\s*\(\s*{\s*(\w+):/);
-  const stateKey = stateKeyMatch ? stateKeyMatch[1] : 'data';
-
-  const hydrateFunction = `
-  hydrate: () => {
+  const hydrateFunction = `hydrate: () => {
     if (typeof window !== 'undefined') {
       const stored = localStorage.getItem('${storageKey}');
       if (stored) {
         try {
-          set({ ${stateKey}: JSON.parse(stored) });
+          set({ ${hydrateSetStatements} });
         } catch (e) {
           console.error('Failed to hydrate ${storeName}:', e);
         }
       }
     }
-  },`;
+  },
+  `;
 
-  // create 함수의 마지막 속성 뒤에 추가
-  // 패턴: })) 또는 }); 앞에 삽입
-  content = content.replace(
-    /(\s*)(}\s*\)\s*\)?\s*;?\s*)$/,
-    `$1${hydrateFunction}$1$2`
-  );
+  // create 함수의 })) 또는 }); 패턴을 찾아서 그 앞에 hydrate 추가
+  // 패턴: create<...>((set) => ({ ... })) 또는 create((set) => ({ ... }));
+  
+  // 방법 1: })) 패턴 (create 끝)
+  if (/\}\s*\)\s*\)\s*;?\s*$/.test(content)) {
+    content = content.replace(
+      /(\s*)\}\s*\)\s*\)\s*;?\s*$/,
+      `\n  ${hydrateFunction}$1}));`
+    );
+    return content;
+  }
+
+  // 방법 2: }); 패턴
+  if (/\}\s*\)\s*;?\s*$/.test(content)) {
+    content = content.replace(
+      /(\s*)\}\s*\)\s*;?\s*$/,
+      `\n  ${hydrateFunction}$1});`
+    );
+    return content;
+  }
+
+  // 방법 3: 역순으로 create 함수 블록을 찾아서 마지막 속성 뒤에 추가
+  // create<AuthState>((set) => ({ ... })) 패턴에서 마지막 })의 위치 찾기
+  const createMatch = content.match(/create\s*(?:<[^>]+>)?\s*\(\s*\(?set\)?\s*=>\s*\(\s*\{/);
+  if (createMatch) {
+    const createStart = createMatch.index + createMatch[0].length;
+    
+    // 중괄호 매칭으로 스토어 객체 끝 찾기
+    let braceCount = 1;
+    let i = createStart;
+    
+    while (braceCount > 0 && i < content.length) {
+      if (content[i] === '{') braceCount++;
+      else if (content[i] === '}') braceCount--;
+      i++;
+    }
+    
+    // 마지막 } 위치 (i-1)
+    const objectEndIndex = i - 1;
+    
+    // 마지막 } 앞에 hydrate 함수 삽입
+    content = content.slice(0, objectEndIndex) + 
+      `\n  ${hydrateFunction}` + 
+      content.slice(objectEndIndex);
+  }
 
   return content;
 }
@@ -284,7 +373,7 @@ async function transformPersistMiddlewareStore(filePath, projectRoot) {
   let content = await fs.readFile(filePath, 'utf-8');
   const storeName = extractStoreName(content, filePath);
 
-  // skipHydration: true 추가 또는 수정
+  // skipHydration: true 추가
   content = addSkipHydration(content);
 
   await fs.writeFile(filePath, content);
@@ -297,39 +386,34 @@ async function transformPersistMiddlewareStore(filePath, projectRoot) {
  * persist 설정에 skipHydration: true 추가
  */
 function addSkipHydration(content) {
-  // 이미 skipHydration: true가 있는지 확인
   if (/skipHydration\s*:\s*true/.test(content)) {
     return content;
   }
 
-  // skipHydration: false를 true로 변경
   if (/skipHydration\s*:\s*false/.test(content)) {
     return content.replace(/skipHydration\s*:\s*false/, 'skipHydration: true');
   }
 
   // persist의 설정 객체에 skipHydration 추가
-  // 패턴: persist(..., { name: '...' }) -> persist(..., { name: '...', skipHydration: true })
-  
-  // 방법 1: name: '...' 뒤에 추가
-  if (/persist\s*\([^,]+,\s*\{[^}]*name\s*:\s*['"][^'"]+['"]/.test(content)) {
-    content = content.replace(
-      /(persist\s*\([^,]+,\s*\{[^}]*name\s*:\s*['"][^'"]+['"])(\s*,?\s*\})/,
-      '$1, skipHydration: true$2'
-    );
-    return content;
-  }
-
-  // 방법 2: 설정 객체가 있는 경우 첫 번째 속성 뒤에 추가
+  // 패턴: { name: 'store-name' } -> { name: 'store-name', skipHydration: true }
   content = content.replace(
-    /(persist\s*\([^,]+,\s*\{\s*)(\w+\s*:)/,
-    '$1skipHydration: true, $2'
+    /(\{\s*name\s*:\s*['"][^'"]+['"])(\s*,?\s*\})/,
+    '$1, skipHydration: true$2'
   );
+
+  // name이 마지막이 아닌 경우
+  if (!content.includes('skipHydration')) {
+    content = content.replace(
+      /(\{\s*name\s*:\s*['"][^'"]+['"]\s*,)/,
+      '$1 skipHydration: true,'
+    );
+  }
 
   return content;
 }
 
 // ============================================================================
-// 4. Provider에 hydrate 트리거 주입
+// 4. Provider에 hydrate 트리거 주입 (ts-morph 사용)
 // ============================================================================
 
 /**
@@ -339,6 +423,7 @@ function findProviderFile(projectRoot) {
   const possiblePaths = [
     path.join(projectRoot, 'src/app/providers.tsx'),
     path.join(projectRoot, 'src/app/providers.jsx'),
+    path.join(projectRoot, 'src/app/Providers.tsx'),
     path.join(projectRoot, 'src/components/providers/Provider.tsx'),
     path.join(projectRoot, 'src/components/providers/Provider.jsx'),
     path.join(projectRoot, 'src/providers/Provider.tsx'),
@@ -354,7 +439,7 @@ function findProviderFile(projectRoot) {
 }
 
 /**
- * Provider에 hydrate 트리거 주입
+ * Provider에 hydrate 트리거 주입 (ts-morph 사용)
  */
 async function injectHydrateToProvider(projectRoot, stores) {
   if (stores.length === 0) {
@@ -370,116 +455,153 @@ async function injectHydrateToProvider(projectRoot, stores) {
 
   console.log(`   📄 Provider에 hydrate 트리거 주입: ${path.relative(projectRoot, providerPath)}`);
 
-  let content = await fs.readFile(providerPath, 'utf-8');
+  const project = new Project({
+    useInMemoryFileSystem: false,
+  });
+
+  const sourceFile = project.addSourceFileAtPath(providerPath);
 
   // 1. 스토어 import 추가
-  const imports = [];
   for (const store of stores) {
     const relativePath = path.relative(path.dirname(providerPath), store.filePath)
       .replace(/\\/g, '/')
       .replace(/\.(ts|tsx|js|jsx)$/, '');
     
     const importPath = relativePath.startsWith('.') ? relativePath : `./${relativePath}`;
-    const importStatement = `import { ${store.storeName} } from '${importPath}';`;
     
-    if (!content.includes(store.storeName)) {
-      imports.push(importStatement);
-    }
-  }
-
-  // import 문 추가 (기존 import 뒤에)
-  if (imports.length > 0) {
-    const lastImportMatch = content.match(/^import .+$/gm);
-    if (lastImportMatch) {
-      const lastImport = lastImportMatch[lastImportMatch.length - 1];
-      content = content.replace(
-        lastImport,
-        `${lastImport}\n${imports.join('\n')}`
-      );
-    } else {
-      content = imports.join('\n') + '\n\n' + content;
+    // 이미 import되어 있는지 확인
+    const existingImport = sourceFile.getImportDeclaration(decl => 
+      decl.getModuleSpecifierValue() === importPath
+    );
+    
+    if (!existingImport) {
+      sourceFile.addImportDeclaration({
+        namedImports: [store.storeName],
+        moduleSpecifier: importPath,
+      });
     }
   }
 
   // 2. useEffect import 확인 및 추가
-  if (!content.includes('useEffect')) {
-    content = content.replace(
-      /import React/,
-      "import React, { useEffect }"
+  const reactImport = sourceFile.getImportDeclaration(decl => 
+    decl.getModuleSpecifierValue() === 'react'
+  );
+
+  if (reactImport) {
+    const namedImports = reactImport.getNamedImports();
+    const hasUseEffect = namedImports.some(imp => imp.getName() === 'useEffect');
+    if (!hasUseEffect) {
+      reactImport.addNamedImport('useEffect');
+    }
+  } else {
+    // react import가 없으면 추가
+    const hasUseEffectImport = sourceFile.getImportDeclarations().some(decl => 
+      decl.getNamedImports().some(imp => imp.getName() === 'useEffect')
     );
-    // React import가 없는 경우
-    if (!content.includes('useEffect')) {
-      content = `import { useEffect } from 'react';\n` + content;
+    if (!hasUseEffectImport) {
+      sourceFile.addImportDeclaration({
+        namedImports: ['useEffect'],
+        moduleSpecifier: 'react',
+      });
     }
   }
 
-  // 3. useEffect 내부에 hydrate 호출 추가
-  const hydrateCallsCode = stores.map(store => {
+  // 3. Providers 함수 찾기
+  let providersFunction = sourceFile.getFunction('Providers');
+  
+  // 화살표 함수인 경우
+  if (!providersFunction) {
+    const providersVar = sourceFile.getVariableDeclaration('Providers');
+    if (providersVar) {
+      const initializer = providersVar.getInitializer();
+      if (initializer && initializer.getKind() === SyntaxKind.ArrowFunction) {
+        // 화살표 함수는 직접 수정이 어려우므로 텍스트 기반으로 처리
+        await sourceFile.save();
+        let content = await fs.readFile(providerPath, 'utf-8');
+        content = injectUseEffectTextBased(content, stores);
+        await fs.writeFile(providerPath, content);
+        console.log(`   ✅ Provider hydrate 트리거 주입 완료`);
+        return;
+      }
+    }
+  }
+
+  // function 선언인 경우도 텍스트 기반으로 처리 (더 안전함)
+  await sourceFile.save();
+  let content = await fs.readFile(providerPath, 'utf-8');
+  content = injectUseEffectTextBased(content, stores);
+  await fs.writeFile(providerPath, content);
+  console.log(`   ✅ Provider hydrate 트리거 주입 완료`);
+}
+
+/**
+ * 텍스트 기반 useEffect 주입 (더 정확한 위치에 삽입)
+ */
+function injectUseEffectTextBased(content, stores) {
+  // hydrate 호출 코드 생성
+  const hydrateCalls = stores.map(store => {
     if (store.type === 'persistence') {
       return `    ${store.storeName}.getState().hydrate();`;
     } else if (store.type === 'persistMiddleware') {
       return `    ${store.storeName}.persist.rehydrate();`;
     }
     return '';
-  }).filter(Boolean).join('\n');
+  }).filter(Boolean);
 
-  // 기존 useEffect가 있는지 확인
-  if (content.includes('useEffect(() => {')) {
-    // 기존 useEffect 내부에 추가 (중복 체크)
-    const existingEffect = content.match(/useEffect\(\(\)\s*=>\s*\{([^}]*)\}/);
-    if (existingEffect) {
-      let effectBody = existingEffect[1];
-      
-      for (const store of stores) {
-        const hydrateCall = store.type === 'persistence' 
-          ? `${store.storeName}.getState().hydrate()`
-          : `${store.storeName}.persist.rehydrate()`;
-        
-        if (!effectBody.includes(hydrateCall)) {
-          effectBody = `\n${hydrateCallsCode}\n${effectBody}`;
-        }
-      }
-
-      content = content.replace(
-        /useEffect\(\(\)\s*=>\s*\{[^}]*\}/,
-        `useEffect(() => {${effectBody}}`
-      );
-    }
-  } else {
-    // 새 useEffect 추가
-    const useEffectCode = `
-  useEffect(() => {
-${hydrateCallsCode}
-  }, []);
-`;
-
-    // Providers 함수 내부 첫 번째 return 앞에 추가
-    content = content.replace(
-      /(function\s+Providers[^{]*\{)/,
-      `$1${useEffectCode}`
-    );
-
-    // 화살표 함수인 경우
-    if (!content.includes('useEffect')) {
-      content = content.replace(
-        /(export\s+(?:const|function)\s+Providers[^=]*=\s*\([^)]*\)\s*(?::\s*[^=]+)?\s*=>\s*\{)/,
-        `$1${useEffectCode}`
-      );
+  // 이미 useEffect가 있고 hydrate 호출이 있는지 확인
+  for (const call of hydrateCalls) {
+    if (content.includes(call.trim())) {
+      // 이미 있으면 제거 (중복 방지)
+      hydrateCalls.splice(hydrateCalls.indexOf(call), 1);
     }
   }
 
-  await fs.writeFile(providerPath, content);
-  console.log(`   ✅ Provider hydrate 트리거 주입 완료`);
+  if (hydrateCalls.length === 0) {
+    return content;
+  }
+
+  const useEffectCode = `
+  useEffect(() => {
+${hydrateCalls.join('\n')}
+  }, []);
+`;
+
+  // 기존 useEffect가 있는지 확인
+  if (content.includes('useEffect(() => {')) {
+    // 기존 useEffect 내부에 hydrate 호출 추가
+    content = content.replace(
+      /(useEffect\(\(\)\s*=>\s*\{)/,
+      `$1\n${hydrateCalls.join('\n')}`
+    );
+    return content;
+  }
+
+  // return 문 바로 앞에 useEffect 추가
+  // 방법 1: return ( 패턴 앞에 추가
+  if (content.includes('return (')) {
+    content = content.replace(
+      /(\s+)(return\s*\()/,
+      `$1${useEffectCode}$1$2`
+    );
+    return content;
+  }
+
+  // 방법 2: return <Fragment> 또는 return <> 패턴
+  if (content.match(/return\s*<[A-Za-z>]/)) {
+    content = content.replace(
+      /(\s+)(return\s*<)/,
+      `$1${useEffectCode}$1$2`
+    );
+    return content;
+  }
+
+  return content;
 }
 
 // ============================================================================
 // 5. 휘발성 스토어 처리 (Case b)
 // ============================================================================
 
-/**
- * 휘발성 스토어는 변경 없이 유지
- * 단, 사용하는 컴포넌트가 'use client'를 가지고 있는지 확인하는 로그만 출력
- */
 function reportVolatileStores(stores, projectRoot) {
   if (stores.length === 0) return;
 
@@ -494,9 +616,6 @@ function reportVolatileStores(stores, projectRoot) {
 // 메인 함수
 // ============================================================================
 
-/**
- * Zustand 스토어 마이그레이션 메인 함수
- */
 async function migrateZustandStores(projectRoot) {
   console.log('🐻 Zustand 스토어 마이그레이션 시작...');
 
@@ -522,14 +641,22 @@ async function migrateZustandStores(projectRoot) {
 
   // 3. Case a: 영구 데이터 스토어 변환
   for (const filePath of classified.persistence) {
-    const result = await transformPersistenceStore(filePath, projectRoot);
-    transformedStores.push(result);
+    try {
+      const result = await transformPersistenceStore(filePath, projectRoot);
+      transformedStores.push(result);
+    } catch (error) {
+      console.error(`   ❌ 스토어 변환 실패 (${filePath}):`, error.message);
+    }
   }
 
   // 4. Case c: Persist 미들웨어 스토어 변환
   for (const filePath of classified.persistMiddleware) {
-    const result = await transformPersistMiddlewareStore(filePath, projectRoot);
-    transformedStores.push(result);
+    try {
+      const result = await transformPersistMiddlewareStore(filePath, projectRoot);
+      transformedStores.push(result);
+    } catch (error) {
+      console.error(`   ❌ 스토어 변환 실패 (${filePath}):`, error.message);
+    }
   }
 
   // 5. Case b: 휘발성 스토어 보고
