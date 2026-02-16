@@ -155,13 +155,20 @@ async function transformPersistenceStore(filePath, projectRoot) {
   // 1. 인터페이스에 hydrate 메서드 시그니처 추가
   content = addHydrateToInterface(content);
 
-  // 2. getItem 초기값을 기본값으로 치환
+  // 2. 모듈 최상위의 localStorage 접근 코드 주석처리 및 관련 변수 추적
+  const { content: updatedContent, storageRelatedVars } = commentOutTopLevelStorageAccess(content);
+  content = updatedContent;
+
+  // 3. 모듈 최상위 변수를 참조하는 스토어 초기값 대체
+  content = replaceStorageVariableReferences(content, storageRelatedVars);
+
+  // 4. 스토어 내부 직접 getItem 초기값을 기본값으로 치환
   content = replaceGetItemInitialValues(content);
 
-  // 3. setItem/removeItem을 window 체크로 래핑
+  // 5. setItem/removeItem을 window 체크로 래핑
   content = wrapStorageCallsWithWindowCheck(content);
 
-  // 4. hydrate 함수 구현 추가
+  // 6. hydrate 함수 구현 추가
   content = addHydrateFunctionToStore(content, storeName, storageKey, stateKeys);
 
   // 파일 저장
@@ -222,7 +229,220 @@ function addHydrateToInterface(content) {
 }
 
 /**
- * getItem 초기값을 기본값으로 치환
+ * 모듈 최상위의 localStorage 접근 코드 주석처리 및 관련 변수 추적
+ * 예: const savedUser = localStorage.getItem('key')
+ *     const initialUser = savedUser ? JSON.parse(savedUser) : null
+ */
+function commentOutTopLevelStorageAccess(content) {
+  const topLevelStorageVars = [];
+  const derivedVars = [];
+
+  // 패턴 1: const xxx = localStorage.getItem('key') 또는 sessionStorage.getItem('key')
+  const storageGetPattern = /^(const|let|var)\s+(\w+)\s*=\s*(localStorage|sessionStorage)\.getItem\s*\([^)]+\)/gm;
+  let match;
+  while ((match = storageGetPattern.exec(content)) !== null) {
+    topLevelStorageVars.push(match[2]);
+  }
+
+  // 해당 변수들을 사용하는 파생 변수 찾기
+  // 예: const initialUser = savedUser ? JSON.parse(savedUser) : null
+  for (const varName of topLevelStorageVars) {
+    const derivedPattern = new RegExp(`^(const|let|var)\\s+(\\w+)\\s*=\\s*${varName}\\s*\\?`, 'gm');
+    let derivedMatch;
+    while ((derivedMatch = derivedPattern.exec(content)) !== null) {
+      derivedVars.push(derivedMatch[2]);
+    }
+    // JSON.parse(varName) 패턴도 찾기
+    const jsonParsePattern = new RegExp(`^(const|let|var)\\s+(\\w+)\\s*=.*JSON\\.parse\\s*\\(\\s*${varName}`, 'gm');
+    while ((derivedMatch = jsonParsePattern.exec(content)) !== null) {
+      if (!derivedVars.includes(derivedMatch[2])) {
+        derivedVars.push(derivedMatch[2]);
+      }
+    }
+  }
+
+  // 모든 관련 변수 수집
+  const allStorageRelatedVars = [...topLevelStorageVars, ...derivedVars];
+
+  // 주석처리: localStorage/sessionStorage 직접 접근하는 라인
+  const lines = content.split('\n');
+  const result = [];
+  let inCreateBlock = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmedLine = line.trim();
+
+    // create 블록 시작 감지 (스토어 내부)
+    if (trimmedLine.includes('create<') || trimmedLine.includes('create(')) {
+      inCreateBlock = true;
+    }
+
+    // create 블록 안은 건드리지 않음 (다른 함수에서 처리)
+    if (inCreateBlock) {
+      result.push(line);
+      // 블록 끝 감지
+      if (trimmedLine.includes('));') && !trimmedLine.startsWith('//')) {
+        inCreateBlock = false;
+      }
+      continue;
+    }
+
+    // 모듈 최상위의 localStorage/sessionStorage 접근 주석처리
+    if ((trimmedLine.startsWith('const ') || trimmedLine.startsWith('let ') || trimmedLine.startsWith('var ')) &&
+        (trimmedLine.includes('localStorage') || trimmedLine.includes('sessionStorage'))) {
+      result.push(`// SSR 호환성: hydrate에서 처리됨`);
+      result.push(`// ${line.trimStart()}`);
+      continue;
+    }
+
+    // 파생 변수도 주석처리 (topLevelStorageVars를 참조하는 변수 선언)
+    let isDerivedVar = false;
+    for (const varName of topLevelStorageVars) {
+      if ((trimmedLine.startsWith('const ') || trimmedLine.startsWith('let ') || trimmedLine.startsWith('var ')) &&
+          new RegExp(`\\b${varName}\\b`).test(trimmedLine)) {
+        result.push(`// SSR 호환성: hydrate에서 처리됨`);
+        result.push(`// ${line.trimStart()}`);
+        isDerivedVar = true;
+        break;
+      }
+    }
+    
+    if (isDerivedVar) {
+      continue;
+    }
+
+    result.push(line);
+  }
+
+  return { 
+    content: result.join('\n'), 
+    storageRelatedVars: allStorageRelatedVars 
+  };
+}
+
+/**
+ * 인터페이스에서 필드별 타입 정보 추출
+ * 예: interface MovieState { favorites: number[]; ... } -> { favorites: 'number[]' }
+ */
+function extractInterfaceFieldTypes(content) {
+  const fieldTypes = {};
+
+  // interface XxxState { ... } 패턴 찾기
+  const interfacePattern = /(interface|type)\s+(\w+State)\s*(=\s*)?\{([^}]+)\}/gs;
+  let interfaceMatch;
+
+  while ((interfaceMatch = interfacePattern.exec(content)) !== null) {
+    const interfaceBody = interfaceMatch[4];
+    
+    // 각 필드 타입 추출: fieldName: type
+    const fieldPattern = /(\w+)\s*:\s*([^;\n]+)/g;
+    let fieldMatch;
+
+    while ((fieldMatch = fieldPattern.exec(interfaceBody)) !== null) {
+      const fieldName = fieldMatch[1];
+      const fieldType = fieldMatch[2].trim();
+      fieldTypes[fieldName] = fieldType;
+    }
+  }
+
+  return fieldTypes;
+}
+
+/**
+ * 타입에 따른 기본값 결정
+ */
+function getDefaultValueForType(typeStr) {
+  if (!typeStr) return 'null';
+
+  const normalizedType = typeStr.replace(/\s+/g, ' ').trim();
+
+  // 배열 타입: number[], string[], any[], Array<...>, etc.
+  if (normalizedType.endsWith('[]') || normalizedType.startsWith('Array<')) {
+    return '[]';
+  }
+
+  // boolean 타입
+  if (normalizedType === 'boolean') {
+    return 'false';
+  }
+
+  // number 타입
+  if (normalizedType === 'number') {
+    return '0';
+  }
+
+  // string 타입
+  if (normalizedType === 'string') {
+    return "''";
+  }
+
+  // null 가능 타입 (| null 포함) 또는 객체 타입
+  if (normalizedType.includes('| null') || 
+      normalizedType.includes('null |') ||
+      normalizedType.startsWith('{') ||
+      /^[A-Z]/.test(normalizedType)) { // 대문자로 시작하면 커스텀 타입/객체
+    return 'null';
+  }
+
+  // 기본값
+  return 'null';
+}
+
+/**
+ * 모듈 최상위에서 선언된 변수를 참조하는 스토어 초기값 대체
+ * 인터페이스 타입 정보를 기반으로 적절한 기본값 설정
+ * 예: user: initialUser -> user: null (타입이 User | null인 경우)
+ *     favorites: initialFavorites -> favorites: [] (타입이 number[]인 경우)
+ */
+function replaceStorageVariableReferences(content, storageRelatedVars) {
+  if (storageRelatedVars.length === 0) {
+    return content;
+  }
+
+  // 인터페이스에서 타입 정보 추출
+  const fieldTypes = extractInterfaceFieldTypes(content);
+
+  for (const varName of storageRelatedVars) {
+    // 패턴 1: key: varName (직접 참조)
+    content = content.replace(
+      new RegExp(`(\\w+):\\s*${varName}\\s*,`, 'g'),
+      (match, key) => {
+        const defaultValue = getDefaultValueForType(fieldTypes[key]);
+        return `${key}: ${defaultValue},`;
+      }
+    );
+
+    // 패턴 2: key: !!varName (boolean 변환)
+    content = content.replace(
+      new RegExp(`(\\w+):\\s*!!\\s*${varName}\\s*,`, 'g'),
+      '$1: false,'
+    );
+
+    // 패턴 3: key: varName ? JSON.parse(varName) : defaultValue (삼항 연산)
+    content = content.replace(
+      new RegExp(`(\\w+):\\s*${varName}\\s*\\?[^,]+,`, 'g'),
+      (match, key) => {
+        const defaultValue = getDefaultValueForType(fieldTypes[key]);
+        return `${key}: ${defaultValue},`;
+      }
+    );
+
+    // 패턴 4: key: JSON.parse(varName) (JSON 파싱)
+    content = content.replace(
+      new RegExp(`(\\w+):\\s*JSON\\.parse\\s*\\(\\s*${varName}\\s*\\)\\s*,`, 'g'),
+      (match, key) => {
+        const defaultValue = getDefaultValueForType(fieldTypes[key]);
+        return `${key}: ${defaultValue},`;
+      }
+    );
+  }
+
+  return content;
+}
+
+/**
+ * getItem 초기값을 기본값으로 치환 (스토어 내부 직접 사용 시)
  */
 function replaceGetItemInitialValues(content) {
   // 패턴 1: JSON.parse(localStorage.getItem('key')) || defaultValue
