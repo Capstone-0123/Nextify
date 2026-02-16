@@ -150,17 +150,19 @@ async function transformPersistenceStore(filePath, projectRoot) {
   let content = sourceFile.getFullText();
   const storeName = extractStoreName(content, filePath);
   const storageKey = extractStorageKey(content);
-  const stateKeys = extractStateKeys(content);
+
+  // 인터페이스에서 타입 정보 추출
+  const fieldTypes = extractInterfaceFieldTypes(content);
 
   // 1. 인터페이스에 hydrate 메서드 시그니처 추가
   content = addHydrateToInterface(content);
 
-  // 2. 모듈 최상위의 localStorage 접근 코드 주석처리 및 관련 변수 추적
-  const { content: updatedContent, storageRelatedVars } = commentOutTopLevelStorageAccess(content);
+  // 2. 모듈 최상위 localStorage 접근을 헬퍼 함수로 변환
+  const { content: updatedContent, storageInfo } = transformTopLevelStorageToHelper(content, storageKey, fieldTypes);
   content = updatedContent;
 
   // 3. 모듈 최상위 변수를 참조하는 스토어 초기값 대체
-  content = replaceStorageVariableReferences(content, storageRelatedVars);
+  content = replaceStorageVariableReferences(content, storageInfo.relatedVars, fieldTypes);
 
   // 4. 스토어 내부 직접 getItem 초기값을 기본값으로 치환
   content = replaceGetItemInitialValues(content);
@@ -168,8 +170,11 @@ async function transformPersistenceStore(filePath, projectRoot) {
   // 5. setItem/removeItem을 window 체크로 래핑
   content = wrapStorageCallsWithWindowCheck(content);
 
-  // 6. hydrate 함수 구현 추가
-  content = addHydrateFunctionToStore(content, storeName, storageKey, stateKeys);
+  // 6. 헬퍼 함수를 사용하는 hydrate 함수 구현 추가
+  content = addHelperBasedHydrateFunction(content, storageInfo);
+
+  // Note: 자동 hydration은 providers.tsx에서 useEffect로 처리됨
+  // 스토어 파일에 별도의 자동 hydration 코드를 추가하지 않음
 
   // 파일 저장
   await fs.writeFile(filePath, content);
@@ -229,96 +234,252 @@ function addHydrateToInterface(content) {
 }
 
 /**
- * 모듈 최상위의 localStorage 접근 코드 주석처리 및 관련 변수 추적
+ * 모듈 최상위의 localStorage 접근을 헬퍼 함수로 변환
  * 예: const savedUser = localStorage.getItem('key')
  *     const initialUser = savedUser ? JSON.parse(savedUser) : null
+ * 변환 후:
+ *     const getStoredUser = () => {
+ *       if (typeof window === 'undefined') return null;
+ *       const savedUser = localStorage.getItem('key');
+ *       return savedUser ? JSON.parse(savedUser) : null;
+ *     };
  */
-function commentOutTopLevelStorageAccess(content) {
-  const topLevelStorageVars = [];
-  const derivedVars = [];
-
-  // 패턴 1: const xxx = localStorage.getItem('key') 또는 sessionStorage.getItem('key')
-  const storageGetPattern = /^(const|let|var)\s+(\w+)\s*=\s*(localStorage|sessionStorage)\.getItem\s*\([^)]+\)/gm;
-  let match;
-  while ((match = storageGetPattern.exec(content)) !== null) {
-    topLevelStorageVars.push(match[2]);
+function transformTopLevelStorageToHelper(content, storageKey, fieldTypes) {
+  const storageAccessInfo = analyzeStorageAccess(content);
+  
+  if (storageAccessInfo.length === 0) {
+    return { 
+      content, 
+      storageInfo: { relatedVars: [], helperFunctions: [] } 
+    };
   }
 
-  // 해당 변수들을 사용하는 파생 변수 찾기
-  // 예: const initialUser = savedUser ? JSON.parse(savedUser) : null
-  for (const varName of topLevelStorageVars) {
-    const derivedPattern = new RegExp(`^(const|let|var)\\s+(\\w+)\\s*=\\s*${varName}\\s*\\?`, 'gm');
-    let derivedMatch;
-    while ((derivedMatch = derivedPattern.exec(content)) !== null) {
-      derivedVars.push(derivedMatch[2]);
+  const helperFunctions = [];
+  const relatedVars = [];
+  let newContent = content;
+
+  for (const info of storageAccessInfo) {
+    // 헬퍼 함수 이름 생성 (예: savedUser -> getStoredUser)
+    const helperName = generateHelperFunctionName(info.derivedVarName || info.storageVarName);
+    
+    // 반환 타입 결정
+    const returnType = determineReturnType(info, fieldTypes);
+    
+    // 헬퍼 함수 생성
+    const helperFunction = generateHelperFunction(helperName, info, returnType);
+    helperFunctions.push({
+      name: helperName,
+      code: helperFunction,
+      storageKey: info.storageKey,
+      returnType,
+      originalVarName: info.derivedVarName || info.storageVarName,
+      relatedStateFields: info.relatedStateFields || []
+    });
+
+    // 관련 변수 수집
+    relatedVars.push(info.storageVarName);
+    if (info.derivedVarName) {
+      relatedVars.push(info.derivedVarName);
     }
-    // JSON.parse(varName) 패턴도 찾기
-    const jsonParsePattern = new RegExp(`^(const|let|var)\\s+(\\w+)\\s*=.*JSON\\.parse\\s*\\(\\s*${varName}`, 'gm');
-    while ((derivedMatch = jsonParsePattern.exec(content)) !== null) {
-      if (!derivedVars.includes(derivedMatch[2])) {
-        derivedVars.push(derivedMatch[2]);
-      }
-    }
+
+    // 원본 코드에서 해당 라인들 제거
+    newContent = removeStorageLines(newContent, info);
   }
 
-  // 모든 관련 변수 수집
-  const allStorageRelatedVars = [...topLevelStorageVars, ...derivedVars];
+  // 헬퍼 함수들을 create 문 바로 앞에 삽입
+  newContent = insertHelperFunctions(newContent, helperFunctions);
 
-  // 주석처리: localStorage/sessionStorage 직접 접근하는 라인
+  return {
+    content: newContent,
+    storageInfo: {
+      relatedVars,
+      helperFunctions
+    }
+  };
+}
+
+/**
+ * 모듈 최상위 localStorage 접근 분석
+ */
+function analyzeStorageAccess(content) {
+  const results = [];
   const lines = content.split('\n');
-  const result = [];
   let inCreateBlock = false;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const trimmedLine = line.trim();
 
-    // create 블록 시작 감지 (스토어 내부)
+    // create 블록 감지
     if (trimmedLine.includes('create<') || trimmedLine.includes('create(')) {
       inCreateBlock = true;
     }
-
-    // create 블록 안은 건드리지 않음 (다른 함수에서 처리)
-    if (inCreateBlock) {
-      result.push(line);
-      // 블록 끝 감지
-      if (trimmedLine.includes('));') && !trimmedLine.startsWith('//')) {
-        inCreateBlock = false;
-      }
-      continue;
+    if (inCreateBlock && trimmedLine.includes('));')) {
+      inCreateBlock = false;
     }
 
-    // 모듈 최상위의 localStorage/sessionStorage 접근 주석처리
-    if ((trimmedLine.startsWith('const ') || trimmedLine.startsWith('let ') || trimmedLine.startsWith('var ')) &&
-        (trimmedLine.includes('localStorage') || trimmedLine.includes('sessionStorage'))) {
-      result.push(`// SSR 호환성: hydrate에서 처리됨`);
-      result.push(`// ${line.trimStart()}`);
-      continue;
-    }
+    // create 블록 안은 건너뜀
+    if (inCreateBlock) continue;
 
-    // 파생 변수도 주석처리 (topLevelStorageVars를 참조하는 변수 선언)
-    let isDerivedVar = false;
-    for (const varName of topLevelStorageVars) {
-      if ((trimmedLine.startsWith('const ') || trimmedLine.startsWith('let ') || trimmedLine.startsWith('var ')) &&
-          new RegExp(`\\b${varName}\\b`).test(trimmedLine)) {
-        result.push(`// SSR 호환성: hydrate에서 처리됨`);
-        result.push(`// ${line.trimStart()}`);
-        isDerivedVar = true;
-        break;
-      }
-    }
+    // localStorage.getItem 패턴 찾기
+    const storageMatch = trimmedLine.match(/^(const|let|var)\s+(\w+)\s*=\s*(localStorage|sessionStorage)\.getItem\s*\(\s*['"]([^'"]+)['"]\s*\)/);
     
-    if (isDerivedVar) {
-      continue;
-    }
+    if (storageMatch) {
+      const storageVarName = storageMatch[2];
+      const storageType = storageMatch[3];
+      const storageKey = storageMatch[4];
 
-    result.push(line);
+      // 다음 줄에서 파생 변수 찾기 (예: const initialUser = savedUser ? JSON.parse(savedUser) : null)
+      let derivedVarName = null;
+      let defaultValue = null;
+      let derivedLineIndex = -1;
+
+      for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+        const nextLine = lines[j].trim();
+        const derivedMatch = nextLine.match(new RegExp(`^(const|let|var)\\s+(\\w+)\\s*=\\s*${storageVarName}\\s*\\?\\s*JSON\\.parse\\s*\\(\\s*${storageVarName}\\s*\\)\\s*:\\s*([^;]+)`));
+        
+        if (derivedMatch) {
+          derivedVarName = derivedMatch[2];
+          defaultValue = derivedMatch[3].trim();
+          derivedLineIndex = j;
+          break;
+        }
+      }
+
+      results.push({
+        storageVarName,
+        storageType,
+        storageKey,
+        derivedVarName,
+        defaultValue,
+        lineIndex: i,
+        derivedLineIndex,
+        relatedStateFields: findRelatedStateFields(content, derivedVarName || storageVarName)
+      });
+    }
   }
 
-  return { 
-    content: result.join('\n'), 
-    storageRelatedVars: allStorageRelatedVars 
-  };
+  return results;
+}
+
+/**
+ * 관련된 상태 필드 찾기
+ */
+function findRelatedStateFields(content, varName) {
+  const fields = [];
+  
+  // 스토어 내부에서 해당 변수를 사용하는 필드 찾기
+  // 예: user: initialUser, isAuthenticated: !!initialUser
+  const directPattern = new RegExp(`(\\w+):\\s*${varName}\\s*,`, 'g');
+  const booleanPattern = new RegExp(`(\\w+):\\s*!!\\s*${varName}\\s*,`, 'g');
+  
+  let match;
+  while ((match = directPattern.exec(content)) !== null) {
+    fields.push({ name: match[1], derivation: 'direct' });
+  }
+  while ((match = booleanPattern.exec(content)) !== null) {
+    if (!fields.find(f => f.name === match[1])) {
+      fields.push({ name: match[1], derivation: 'boolean' });
+    }
+  }
+
+  return fields;
+}
+
+/**
+ * 헬퍼 함수 이름 생성
+ */
+function generateHelperFunctionName(varName) {
+  // initialUser -> getStoredUser, savedFavorites -> getStoredFavorites
+  const baseName = varName
+    .replace(/^(initial|saved|stored)/, '')
+    .replace(/^[a-z]/, c => c.toUpperCase());
+  
+  return `getStored${baseName}`;
+}
+
+/**
+ * 반환 타입 결정
+ */
+function determineReturnType(info, fieldTypes) {
+  // 관련 상태 필드의 타입 확인
+  for (const field of info.relatedStateFields || []) {
+    if (field.derivation === 'direct' && fieldTypes[field.name]) {
+      return fieldTypes[field.name];
+    }
+  }
+
+  // 기본값에서 타입 추론
+  if (info.defaultValue) {
+    if (info.defaultValue === '[]') return 'array';
+    if (info.defaultValue === 'null') return 'null';
+    if (info.defaultValue === 'false' || info.defaultValue === 'true') return 'boolean';
+  }
+
+  return 'null';
+}
+
+/**
+ * 헬퍼 함수 생성
+ */
+function generateHelperFunction(helperName, info, returnType) {
+  let defaultReturn = 'null';
+  if (returnType === 'array' || returnType.endsWith('[]')) {
+    defaultReturn = '[]';
+  }
+
+  return `// SSR 방어: localStorage 접근을 함수 내부로 이동
+const ${helperName} = () => {
+  if (typeof window === 'undefined') return ${defaultReturn};
+  const ${info.storageVarName} = ${info.storageType}.getItem('${info.storageKey}');
+  return ${info.storageVarName} ? JSON.parse(${info.storageVarName}) : ${defaultReturn};
+};
+`;
+}
+
+/**
+ * 원본 코드에서 storage 관련 라인 제거
+ */
+function removeStorageLines(content, info) {
+  const lines = content.split('\n');
+  const linesToRemove = new Set([info.lineIndex]);
+  
+  if (info.derivedLineIndex !== -1) {
+    linesToRemove.add(info.derivedLineIndex);
+  }
+
+  // 인접한 주석도 제거 (// Intentional SSR-breaking 등)
+  if (info.lineIndex > 0) {
+    const prevLine = lines[info.lineIndex - 1].trim();
+    if (prevLine.startsWith('//') && (prevLine.includes('SSR') || prevLine.includes('localStorage'))) {
+      linesToRemove.add(info.lineIndex - 1);
+    }
+  }
+
+  const result = lines.filter((_, index) => !linesToRemove.has(index));
+  return result.join('\n');
+}
+
+/**
+ * 헬퍼 함수들을 create 문 앞에 삽입
+ */
+function insertHelperFunctions(content, helperFunctions) {
+  if (helperFunctions.length === 0) return content;
+
+  const helperCode = helperFunctions.map(h => h.code).join('\n');
+  
+  // export const useXxxStore = create 패턴 찾기
+  const createPattern = /(\n)(export\s+const\s+use\w+Store\s*=\s*create)/;
+  
+  if (createPattern.test(content)) {
+    content = content.replace(createPattern, `$1${helperCode}\n$2`);
+  } else {
+    // create( 패턴으로 fallback
+    const fallbackPattern = /(const\s+use\w+Store\s*=\s*create)/;
+    content = content.replace(fallbackPattern, `${helperCode}\n$1`);
+  }
+
+  return content;
 }
 
 /**
@@ -395,13 +556,15 @@ function getDefaultValueForType(typeStr) {
  * 예: user: initialUser -> user: null (타입이 User | null인 경우)
  *     favorites: initialFavorites -> favorites: [] (타입이 number[]인 경우)
  */
-function replaceStorageVariableReferences(content, storageRelatedVars) {
+function replaceStorageVariableReferences(content, storageRelatedVars, fieldTypes) {
   if (storageRelatedVars.length === 0) {
     return content;
   }
 
-  // 인터페이스에서 타입 정보 추출
-  const fieldTypes = extractInterfaceFieldTypes(content);
+  // fieldTypes가 전달되지 않은 경우 추출
+  if (!fieldTypes) {
+    fieldTypes = extractInterfaceFieldTypes(content);
+  }
 
   for (const varName of storageRelatedVars) {
     // 패턴 1: key: varName (직접 참조)
@@ -574,6 +737,82 @@ function addHydrateFunctionToStore(content, storeName, storageKey, stateKeys) {
     // 마지막 } 앞에 hydrate 함수 삽입
     content = content.slice(0, objectEndIndex) + 
       `\n  ${hydrateFunction}` + 
+      content.slice(objectEndIndex);
+  }
+
+  return content;
+}
+
+/**
+ * 헬퍼 함수를 사용하는 hydrate 함수 추가
+ */
+function addHelperBasedHydrateFunction(content, storageInfo) {
+  // 이미 hydrate 구현이 있으면 건너뜀
+  if (/hydrate\s*:\s*\(\s*\)\s*=>\s*\{/.test(content)) {
+    return content;
+  }
+
+  const { helperFunctions } = storageInfo;
+  
+  if (!helperFunctions || helperFunctions.length === 0) {
+    return content;
+  }
+
+  // hydrate 함수 내용 생성
+  const hydrateStatements = [];
+  
+  for (const helper of helperFunctions) {
+    // 헬퍼 함수 호출로 값 가져오기
+    const varName = helper.originalVarName.replace(/^(initial|saved)/, '').toLowerCase();
+    
+    // 관련된 상태 필드들에 대한 set 구문 생성
+    if (helper.relatedStateFields && helper.relatedStateFields.length > 0) {
+      const setFields = helper.relatedStateFields.map(field => {
+        if (field.derivation === 'boolean') {
+          return `${field.name}: !!${varName}`;
+        }
+        return `${field.name}: ${varName}`;
+      }).join(', ');
+      
+      hydrateStatements.push(`    const ${varName} = ${helper.name}();`);
+      hydrateStatements.push(`    set({ ${setFields} });`);
+    } else {
+      // 관련 필드를 찾지 못한 경우, 변수명에서 추론
+      hydrateStatements.push(`    const ${varName} = ${helper.name}();`);
+      hydrateStatements.push(`    set({ ${varName} });`);
+    }
+  }
+
+  const hydrateFunction = `// 클라이언트에서 hydration 시 호출
+  hydrate: () => {
+${hydrateStatements.join('\n')}
+  },`;
+
+  // create 함수의 첫 번째 속성 앞에 hydrate 추가 (순서: hydrate가 먼저 오도록)
+  // 또는 user: null, 같은 초기값 뒤에 추가
+
+  // 스토어 객체의 시작 찾기
+  const createPattern = /create\s*(?:<[^>]+>)?\s*\(\s*\(?set\)?\s*=>\s*\(\s*\{/;
+  const createMatch = content.match(createPattern);
+  
+  if (createMatch) {
+    const createStart = createMatch.index + createMatch[0].length;
+    
+    // 중괄호 매칭으로 스토어 객체 끝 찾기
+    let braceCount = 1;
+    let i = createStart;
+    
+    while (braceCount > 0 && i < content.length) {
+      if (content[i] === '{') braceCount++;
+      else if (content[i] === '}') braceCount--;
+      i++;
+    }
+    
+    const objectEndIndex = i - 1;
+    
+    // 마지막 } 앞에 hydrate 함수 삽입
+    content = content.slice(0, objectEndIndex) + 
+      `\n  ${hydrateFunction}\n` + 
       content.slice(objectEndIndex);
   }
 
