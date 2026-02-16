@@ -21,6 +21,19 @@ async function runStep5(projectRoot) {
     // Vite 환경변수 마이그레이션 실행
     console.log(chalk.blue.bold('--Vite 환경변수 마이그레이션 시작'));
     const envResult = await migrateImportMetaEnvToNextPublicEnv(projectRoot);
+    
+    // 변환된 파일 정보 즉시 출력
+    if (envResult && envResult.totalFiles !== undefined) {
+      console.log(chalk.cyan(`     - 검사한 파일: ${envResult.totalFiles}개`));
+      console.log(chalk.cyan(`     - 변환된 파일: ${envResult.processedFiles ? envResult.processedFiles.length : 0}개`));
+      
+      if (envResult.processedFiles && envResult.processedFiles.length > 0) {
+        console.log(chalk.cyan('     변환된 파일:'));
+        for (const filePath of envResult.processedFiles) {
+          console.log(chalk.cyan(`       - ${filePath}`));
+        }
+      }
+    }
     console.log(chalk.blue.bold('--Vite 환경변수 마이그레이션 완료'));
 
     // Zustand 스토어 마이그레이션 실행
@@ -32,24 +45,10 @@ async function runStep5(projectRoot) {
     console.log(chalk.green.bold('✅ Step 5 모든 작업 완료!'));
 
     // 결과 요약 출력
-    if (envResult || result) {
+    if (result) {
       console.log(chalk.yellow('\n📋 마이그레이션 결과 요약:'));
 
-      if (envResult) {
-        console.log(chalk.cyan(`\n  ✅ Vite 환경변수 마이그레이션 완료:`));
-        console.log(chalk.cyan(`     - 검사한 파일: ${envResult.totalFiles}개`));
-        console.log(chalk.cyan(`     - 변환된 파일: ${envResult.processedFiles.length}개`));
-        
-        if (envResult.processedFiles.length > 0) {
-          console.log(chalk.cyan('\n  변환된 파일:'));
-          for (const filePath of envResult.processedFiles) {
-            console.log(chalk.cyan(`    - ${filePath}`));
-          }
-        }
-      }
-
-      if (result) {
-        console.log(chalk.cyan(`\n  ✅ Zustand 스토어 마이그레이션 완료:`));
+      console.log(chalk.cyan(`\n  ✅ Zustand 스토어 마이그레이션 완료:`));
         console.log(chalk.cyan(`     - 변환된 스토어: ${result.transformed.length}개`));
         console.log(chalk.cyan(`     - 유지된 스토어: ${result.volatile.length}개`));
         
@@ -76,7 +75,6 @@ async function runStep5(projectRoot) {
         console.log(chalk.white('  2. 휘발성 스토어는 반드시 "use client" 컴포넌트에서만 사용하세요.'));
         console.log(chalk.white('  3. Persist 미들웨어 사용 시 skipHydration: true 설정을 확인하세요.'));
       }
-    }
 
   } catch (error) {
     console.error(chalk.red.bold('❌ Step 5 오류 발생:'), error);

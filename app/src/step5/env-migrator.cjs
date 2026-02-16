@@ -11,7 +11,10 @@ async function migrateImportMetaEnvToNextPublicEnv(projectRoot) {
   const srcDir = path.join(projectRoot, 'src');
 
   if (!fs.existsSync(srcDir)) {
-    return;
+    return {
+      totalFiles: 0,
+      processedFiles: [],
+    };
   }
 
   // 1. src/ 하위 .ts, .tsx 파일 찾기
