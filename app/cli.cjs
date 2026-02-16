@@ -73,10 +73,10 @@ program
         mode = 'copy';
         // 입력값 정리 (공백 제거)
         const cleanedPath = options.output.trim();
-        
+
         // Windows 절대 경로 판단 (C:\, D:\ 등) 또는 Unix 절대 경로 (/)
         const isAbsolutePath = path.isAbsolute(cleanedPath) || /^[A-Za-z]:[\\/]/.test(cleanedPath);
-        
+
         if (isAbsolutePath) {
           // 절대 경로면 그대로 사용
           targetPath = path.resolve(cleanedPath);
@@ -202,7 +202,7 @@ program
 // =========================================================
 program
   .command('step4')
-  .description('4단계: Tailwind CSS 및 Styled Components 설정')
+  .description('4단계: 스타일/리소스 마이그레이션')
   .action(async () => {
     try {
       // Step 4 실행
@@ -218,13 +218,29 @@ program
 // =========================================================
 program
   .command('step5')
-  .description('5단계: 브라우저 전용 API 최상단 접근 제어')
+  .description('5단계: use client" 처리 및 Zustand 상태 관리 마이그레이션')
   .action(async () => {
     try {
       // Step 5 실행
       await runStep5(process.cwd());
     } catch (error) {
       console.error(chalk.red('\n❌ Step 5 오류 발생:'), error);
+      process.exit(1);
+    }
+  });
+
+// =========================================================
+// Command: Step 6
+// =========================================================
+program
+  .command('step6')
+  .description('6단계: 환경 변수 설정 & 의존성 갱신 가이드')
+  .action(async () => {
+    try {
+      // Step 6 실행
+      await runStep6(process.cwd());
+    } catch (error) {
+      console.error(chalk.red('\n❌ Step 6 오류 발생:'), error);
       process.exit(1);
     }
   });
