@@ -665,11 +665,7 @@ async function migrateZustandStores(projectRoot) {
   // 6. Provider에 hydrate 트리거 주입
   await injectHydrateToProvider(projectRoot, transformedStores);
 
-  // 결과 요약
-  console.log(`\n✅ Zustand 스토어 마이그레이션 완료:`);
-  console.log(`   - 변환된 스토어: ${transformedStores.length}개`);
-  console.log(`   - 유지된 스토어: ${classified.volatile.length}개`);
-
+  // 결과 반환 (완료 메시지와 요약은 step5/index.cjs에서 출력)
   return {
     transformed: transformedStores,
     volatile: classified.volatile,
