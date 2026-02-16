@@ -10,7 +10,7 @@ const { runStep2 } = require('./src/step2/index.cjs');
 const { runStep3 } = require('./src/step3/index.cjs');
 const { runStep4 } = require('./src/step4/index.cjs');
 const { runStep5 } = require('./src/step5/index.cjs');
-
+const { runStep6 } = require('./src/step6/index.cjs');
 const {
   detectPackageManager,
   detectLanguage,
