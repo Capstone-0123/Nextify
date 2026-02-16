@@ -1,4 +1,3 @@
-// src/step3/index.cjs
 // Step 3: Route, Link, Outlet 마이그레이션 + 메타데이터 마이그레이션
 
 const { migrateMetadata } = require('./metadata-migrator.cjs');

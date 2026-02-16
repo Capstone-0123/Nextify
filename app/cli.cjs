@@ -8,6 +8,7 @@ const path = require('path');
 const { runStep1 } = require('./src/step1/index.cjs');
 const { runStep2 } = require('./src/step2/index.cjs');
 const { runStep3 } = require('./src/step3/index.cjs');
+const { runStep4 } = require('./src/step4/index.cjs');
 const { runStep5 } = require('./src/step5/index.cjs');
 
 const {
@@ -192,6 +193,22 @@ program
       await runStep3(process.cwd());
     } catch (error) {
       console.error(chalk.red('\n❌ Step 3 오류 발생:'), error);
+      process.exit(1);
+    }
+  });
+
+// =========================================================
+// Command: Step 4
+// =========================================================
+program
+  .command('step4')
+  .description('4단계: 스타일/리소스 마이그레이션')
+  .action(async () => {
+    try {
+      // Step 4 실행
+      await runStep4(process.cwd());
+    } catch (error) {
+      console.error(chalk.red('\n❌ Step 4 오류 발생:'), error);
       process.exit(1);
     }
   });
