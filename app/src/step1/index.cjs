@@ -1,4 +1,3 @@
-// src/step1/index.cjs
 // Step 1: 환경 설정 - 패키지, 설정파일
 
 const {
