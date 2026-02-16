@@ -10,6 +10,7 @@ const { runStep2 } = require('./src/step2/index.cjs');
 const { runStep3 } = require('./src/step3/index.cjs');
 const { runStep4 } = require('./src/step4/index.cjs');
 const { runStep5 } = require('./src/step5/index.cjs');
+const { runStep6 } = require('./src/step6/index.cjs');
 
 const {
   detectPackageManager,
@@ -225,6 +226,22 @@ program
       await runStep5(process.cwd());
     } catch (error) {
       console.error(chalk.red('\n❌ Step 5 오류 발생:'), error);
+      process.exit(1);
+    }
+  });
+
+// =========================================================
+// Command: Step 6
+// =========================================================
+program
+  .command('step6')
+  .description('6단계: 환경 변수 설정 & 의존성 갱신 가이드')
+  .action(async () => {
+    try {
+      // Step 6 실행
+      await runStep6(process.cwd());
+    } catch (error) {
+      console.error(chalk.red('\n❌ Step 6 오류 발생:'), error);
       process.exit(1);
     }
   });
