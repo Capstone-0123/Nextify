@@ -1,4 +1,3 @@
-// src/step2/index.cjs
 // Step 2: 구조 변환 - 레이아웃, Provider 생성
 // Note: 홈 페이지 생성은 step3의 route-migrator.cjs에서 처리됩니다.
 
