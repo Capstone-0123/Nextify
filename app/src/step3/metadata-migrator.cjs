@@ -714,6 +714,289 @@ async function commentOutHelmet(componentFilePath, helmetContent) {
 }
 
 // ============================================================================
+// 루트 Layout.tsx의 <head> 태그 처리
+// ============================================================================
+
+/**
+ * layout.tsx의 <head> 태그에서 메타데이터 추출
+ */
+function extractMetadataFromHead(headContent) {
+  const metadata = {
+    basic: {},
+    openGraph: {},
+    twitter: {},
+    icons: {},
+    alternates: {},
+    robots: null,
+  };
+  const viewport = {};
+  let title = null;
+  const otherTags = []; // preconnect 등 Next.js에서 직접 지원하지 않는 태그
+
+  // 1. <title> 태그 추출
+  const titleMatch = headContent.match(/<title>([^<]+)<\/title>/i);
+  if (titleMatch) {
+    title = titleMatch[1].trim();
+  }
+
+  // 2. <meta> 태그 추출
+  const metaTagRegex = /<meta\s+([^>]+)\/?>/gi;
+  let match;
+
+  while ((match = metaTagRegex.exec(headContent)) !== null) {
+    const tagContent = match[0];
+    const fullTag = match[0];
+
+    // charSet은 Next.js에서 자동 처리
+    if (tagContent.includes('charSet') || tagContent.includes('charset')) {
+      continue;
+    }
+
+    const name = extractAttributeValue(tagContent, 'name');
+    const property = extractAttributeValue(tagContent, 'property');
+    const content = extractAttributeValue(tagContent, 'content');
+
+    // viewport 처리
+    if (name === 'viewport' && content) {
+      Object.assign(viewport, transformValue(content, 'viewport'));
+      continue;
+    }
+
+    // theme-color 처리
+    if (name === 'theme-color' && content) {
+      viewport.themeColor = content;
+      continue;
+    }
+
+    if (!content) continue;
+
+    const identifier = name || property;
+    if (!identifier) continue;
+
+    // 기본 메타 태그
+    if (META_TAG_MAPPING.basic[identifier]) {
+      const mapping = META_TAG_MAPPING.basic[identifier];
+      metadata.basic[mapping.key] = transformValue(content, mapping.transform);
+    }
+    // Open Graph 태그
+    else if (identifier.startsWith('og:') && META_TAG_MAPPING.openGraph[identifier]) {
+      const mapping = META_TAG_MAPPING.openGraph[identifier];
+      metadata.openGraph[mapping.key] = transformValue(content, mapping.transform);
+    }
+    // Twitter 태그
+    else if (identifier.startsWith('twitter:') && META_TAG_MAPPING.twitter[identifier]) {
+      const mapping = META_TAG_MAPPING.twitter[identifier];
+      metadata.twitter[mapping.key] = transformValue(content, mapping.transform);
+    }
+    // Robots 태그
+    else if (identifier === 'robots') {
+      metadata.robots = transformValue(content, 'robots');
+    }
+  }
+
+  // 3. <link> 태그 추출
+  const linkTagRegex = /<link\s+([^>]+)\/?>/gi;
+
+  while ((match = linkTagRegex.exec(headContent)) !== null) {
+    const tagContent = match[0];
+    const rel = extractAttributeValue(tagContent, 'rel');
+    const href = extractAttributeValue(tagContent, 'href');
+    const type = extractAttributeValue(tagContent, 'type');
+
+    if (!rel) continue;
+
+    // icon 관련
+    if (rel === 'icon' || rel === 'shortcut icon') {
+      metadata.icons.icon = href;
+      continue;
+    }
+    if (rel === 'apple-touch-icon') {
+      metadata.icons.apple = href;
+      continue;
+    }
+
+    // canonical
+    if (rel === 'canonical' && href) {
+      metadata.alternates.canonical = href;
+      continue;
+    }
+
+    // preconnect, preload 등은 Next.js Metadata API에서 직접 지원하지 않음
+    // 이런 태그들은 별도로 보존
+    if (rel === 'preconnect' || rel === 'preload' || rel === 'dns-prefetch') {
+      otherTags.push(tagContent);
+    }
+  }
+
+  return {
+    title,
+    metadata,
+    viewport,
+    otherTags,
+  };
+}
+
+/**
+ * 루트 layout.tsx 파일의 메타데이터 마이그레이션
+ */
+async function migrateRootLayoutMetadata(projectRoot) {
+  const rootLayoutPath = path.join(projectRoot, 'src/app/layout.tsx');
+
+  if (!fs.existsSync(rootLayoutPath)) {
+    console.log('   ℹ️ src/app/layout.tsx 파일이 없습니다.');
+    return { success: false, reason: 'no_root_layout' };
+  }
+
+  console.log('   📄 루트 layout.tsx 메타데이터 처리 중...');
+
+  let content = await fs.readFile(rootLayoutPath, 'utf-8');
+
+  // 이미 metadata export가 있는지 확인
+  if (content.includes('export const metadata') || content.includes('export async function generateMetadata')) {
+    console.log('   ⚠️ 루트 layout.tsx에 이미 메타데이터가 존재합니다.');
+    return { success: false, reason: 'already_has_metadata' };
+  }
+
+  // <head> 태그 내용 추출
+  const headMatch = content.match(/<head[^>]*>([\s\S]*?)<\/head>/i);
+
+  if (!headMatch) {
+    console.log('   ℹ️ <head> 태그가 없습니다.');
+    return { success: false, reason: 'no_head_tag' };
+  }
+
+  const headContent = headMatch[1];
+
+  // 메타데이터 추출
+  const { title, metadata, viewport, otherTags } = extractMetadataFromHead(headContent);
+
+  // 추출된 메타데이터가 있는지 확인
+  const hasTitle = !!title;
+  const hasBasicMeta = Object.keys(metadata.basic).length > 0;
+  const hasIcons = Object.keys(metadata.icons).length > 0;
+  const hasViewport = Object.keys(viewport).length > 0;
+  const hasOpenGraph = Object.keys(metadata.openGraph).length > 0;
+  const hasTwitter = Object.keys(metadata.twitter).length > 0;
+
+  if (!hasTitle && !hasBasicMeta && !hasIcons && !hasViewport && !hasOpenGraph && !hasTwitter) {
+    console.log('   ℹ️ 추출할 메타데이터가 없습니다.');
+    return { success: false, reason: 'no_metadata' };
+  }
+
+  // 메타데이터 코드 생성
+  let metadataCode = '';
+
+  // Metadata import 추가
+  const needsMetadataImport = hasTitle || hasBasicMeta || hasIcons || hasOpenGraph || hasTwitter;
+  const needsViewportImport = hasViewport;
+
+  if (needsMetadataImport || needsViewportImport) {
+    const imports = [];
+    if (needsMetadataImport) imports.push('Metadata');
+    if (needsViewportImport) imports.push('Viewport');
+    metadataCode += `import type { ${imports.join(', ')} } from 'next';\n\n`;
+  }
+
+  // metadata export 생성
+  if (needsMetadataImport) {
+    const metadataObj = {};
+
+    if (title) {
+      metadataObj.title = title;
+    }
+
+    Object.assign(metadataObj, metadata.basic);
+
+    if (hasIcons) {
+      metadataObj.icons = metadata.icons;
+    }
+
+    if (hasOpenGraph) {
+      metadataObj.openGraph = metadata.openGraph;
+    }
+
+    if (hasTwitter) {
+      metadataObj.twitter = metadata.twitter;
+    }
+
+    if (metadata.robots) {
+      metadataObj.robots = metadata.robots;
+    }
+
+    if (Object.keys(metadata.alternates).length > 0) {
+      metadataObj.alternates = metadata.alternates;
+    }
+
+    metadataCode += `export const metadata: Metadata = ${JSON.stringify(metadataObj, null, 2)};\n`;
+  }
+
+  // viewport export 생성
+  if (needsViewportImport) {
+    metadataCode += `\nexport const viewport: Viewport = ${JSON.stringify(viewport, null, 2)};\n`;
+  }
+
+  // <head> 태그 내용 정리
+  // meta, title, link(icon) 태그는 제거하고 preconnect 등만 남김
+  let newHeadContent = headContent;
+
+  // title 태그 제거
+  newHeadContent = newHeadContent.replace(/<title>[^<]*<\/title>/gi, '');
+
+  // meta 태그 제거 (charset 제외)
+  newHeadContent = newHeadContent.replace(/<meta\s+(?!.*charset)[^>]*\/?>/gi, '');
+
+  // icon 관련 link 태그 제거
+  newHeadContent = newHeadContent.replace(/<link\s+[^>]*rel=["'](icon|shortcut icon|apple-touch-icon)["'][^>]*\/?>/gi, '');
+
+  // 주석 처리된 index.html 관련 주석 유지, 빈 줄 정리
+  newHeadContent = newHeadContent
+    .replace(/^\s*\n/gm, '')
+    .trim();
+
+  // preconnect 등 남은 태그가 있으면 유지, 없으면 간단하게
+  if (otherTags.length > 0 || newHeadContent.includes('<link')) {
+    // 남은 태그들 유지
+    newHeadContent = `\n        {/* 기타 head 태그 (preconnect 등) */}\n        ${newHeadContent.split('\n').map(l => l.trim()).filter(l => l).join('\n        ')}\n      `;
+  } else {
+    // 빈 head 태그
+    newHeadContent = '\n        {/* 메타데이터는 export const metadata로 이동됨 */}\n      ';
+  }
+
+  // 파일 내용 수정
+  // 1. import 다음에 metadata export 추가
+  const importEndMatch = content.match(/^(import[\s\S]*?;\n)(?=\n*(?:export|const|function|async|\/\/))/m);
+
+  if (importEndMatch) {
+    const insertPosition = importEndMatch.index + importEndMatch[0].length;
+    content = content.slice(0, insertPosition) + '\n' + metadataCode + '\n' + content.slice(insertPosition);
+  } else {
+    // import가 없으면 파일 시작에 추가
+    content = metadataCode + '\n' + content;
+  }
+
+  // 2. <head> 태그 내용 교체
+  content = content.replace(
+    /<head[^>]*>[\s\S]*?<\/head>/i,
+    `<head>${newHeadContent}</head>`
+  );
+
+  await fs.writeFile(rootLayoutPath, content, 'utf-8');
+
+  console.log('   ✅ 루트 layout.tsx 메타데이터 분리 완료');
+  console.log(`      - title: ${title || '없음'}`);
+  console.log(`      - description: ${metadata.basic.description || '없음'}`);
+  console.log(`      - viewport: ${hasViewport ? '있음' : '없음'}`);
+  console.log(`      - icons: ${hasIcons ? '있음' : '없음'}`);
+
+  return {
+    success: true,
+    title,
+    metadata,
+    viewport,
+  };
+}
+
+// ============================================================================
 // 메인 함수
 // ============================================================================
 
@@ -898,6 +1181,10 @@ async function migrateMetadata(projectRoot) {
     return;
   }
 
+  // 0. 루트 layout.tsx의 <head> 태그 메타데이터 처리
+  console.log('\n📌 루트 layout.tsx 메타데이터 처리...');
+  const rootLayoutResult = await migrateRootLayoutMetadata(projectRoot);
+
   // app 디렉토리 내 모든 page.tsx 및 layout.tsx 파일 찾기
   const targetFiles = {
     pages: [],
@@ -915,7 +1202,7 @@ async function migrateMetadata(projectRoot) {
       } else if (entry.name === 'page.tsx' || entry.name === 'page.jsx') {
         targetFiles.pages.push(fullPath);
       } else if (entry.name === 'layout.tsx' || entry.name === 'layout.jsx') {
-        // 루트 layout.tsx는 제외 (이미 providers 등이 있을 수 있음)
+        // 루트 layout.tsx는 제외 (위에서 별도 처리)
         const relativePath = path.relative(appDir, fullPath);
         if (relativePath !== 'layout.tsx' && relativePath !== 'layout.jsx') {
           targetFiles.layouts.push(fullPath);
@@ -999,12 +1286,13 @@ async function migrateMetadata(projectRoot) {
   const layoutCount = successful.filter(r => r.targetType === 'layout').length;
 
   console.log(`\n✅ 메타데이터 마이그레이션 완료:`);
+  console.log(`   - 루트 layout.tsx: ${rootLayoutResult.success ? '처리 완료' : '없음/이미 처리됨'}`);
   console.log(`   - 페이지 메타데이터: ${pageCount}개`);
   console.log(`   - 레이아웃 메타데이터: ${layoutCount}개`);
   console.log(`   - 정적 메타데이터: ${staticCount}개`);
   console.log(`   - 동적 메타데이터: ${dynamicCount}개`);
 
-  return results;
+  return { rootLayoutResult, results };
 }
 
 // ============================================================================
@@ -1014,7 +1302,9 @@ async function migrateMetadata(projectRoot) {
 module.exports = {
   migrateMetadata,
   migratePageMetadata,
+  migrateRootLayoutMetadata,
   extractStaticMetadata,
+  extractMetadataFromHead,
   detectDynamicMetadataPattern,
   generateStaticMetadataCode,
   generateDynamicMetadataCode,
