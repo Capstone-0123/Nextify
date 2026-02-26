@@ -1,9 +1,9 @@
 // Step 5: "use client" 처리 및 Zustand 상태 관리 마이그레이션
 
+const { migrateBrowserAPIs } = require('./browser-api-migrator.cjs');
 const { migrateZustandStores } = require('./zustand-migrator.cjs');
 const { migrateUseClient } = require('./useclient-migrator.cjs');
 const { migrateImportMetaEnvToNextPublicEnv } = require('./env-migrator.cjs');
-const { migrateBrowserAPIs } = require('./browser-api-migrator.cjs');
 
 const chalk = require('chalk');
 
@@ -40,9 +40,15 @@ async function runStep5(projectRoot) {
     }
     console.log(chalk.blue.bold('--Vite 환경변수 마이그레이션 완료'));
     console.log(chalk.blue.bold('--브라우저 전용 API 최상단 접근 제어 마이그레이션 시작'));
-    await migrateBrowserAPIs(projectRoot);
-
-    console.log(chalk.blue.bold('-브라우저 전용 API 최상단 접근 제어 마이그레이션 완료'));
+    const browserResult = await migrateBrowserAPIs(projectRoot);
+    if (browserResult && browserResult.processedFiles && browserResult.processedFiles.length > 0) {
+      console.log(chalk.cyan(`     - 검사한 파일: ${browserResult.totalFiles}개`));
+      console.log(chalk.cyan(`     - 변환된 파일: ${browserResult.processedFiles.length}개`));
+      for (const fp of browserResult.processedFiles) {
+        console.log(chalk.cyan(`       - ${fp}`));
+      }
+    }
+    console.log(chalk.blue.bold('--브라우저 전용 API 최상단 접근 제어 마이그레이션 완료'));
     // Zustand 스토어 마이그레이션 실행
     console.log(chalk.blue.bold('--Zustand 상태 관리 마이그레이션 시작'));
     const result = await migrateZustandStores(projectRoot);

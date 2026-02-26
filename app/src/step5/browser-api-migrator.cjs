@@ -1,1605 +1,257 @@
-// src/step5/browser-api-migrator.cjs
-// 브라우저 전용 API(window, document, localStorage) 최상단 접근 제어 모듈
-// Next.js 14+ App Router, React 18 Strict Mode, Zustand 최적화
+// app/src/step5/browser-api-migrator.cjs
+// 브라우저 API 최상단 접근 탐지 및 SSR-safe 변환
 
-const { Project, SyntaxKind } = require('ts-morph');
 const fs = require('fs-extra');
 const path = require('path');
 
-// ============================================================================
-// Case 1: Variable Declaration - Utils/Constants (.ts, .tsx)
-// ============================================================================
-
-/**
- * Case 1: 변수 선언 시 브라우저 API 접근 처리
- * Store 파일은 제외하고, 스토어 생성 함수는 보호
- * @param {string} projectRoot - 프로젝트 루트 경로
- */
-function handleVariableDeclaration(projectRoot) {
-  console.log('   📝 Case 1: Variable Declaration 처리 중...');
-  
-  const srcPath = path.join(projectRoot, 'src');
-  if (!fs.existsSync(srcPath)) {
-    console.log('   ⚠️ src 디렉토리를 찾을 수 없습니다.');
-    return;
-  }
-
-  const project = new Project({
-    skipAddingFilesFromTsConfig: true,
-  });
-
-  // .ts, .tsx 파일 찾기 (store 파일 제외)
-  const allFiles = [
-    ...findFiles(srcPath, /\.ts$/),
-    ...findFiles(srcPath, /\.tsx$/),
-  ];
-  const files = allFiles.filter(filePath => {
-    return !isStoreFile(filePath, srcPath);
-  });
-  
-  let modifiedCount = 0;
-  
-  for (const filePath of files) {
-    try {
-      const sourceFile = project.addSourceFileAtPath(filePath);
-      let modified = false;
-
-      // 최상단 변수 선언 찾기 (const, let)
-      const statements = sourceFile.getStatements();
-      const topLevelVariableStatements = [];
-      
-      for (const stmt of statements) {
-        if (stmt.getKind() === SyntaxKind.VariableStatement) {
-          // 부모가 함수나 클래스 내부가 아닌지 확인
-          let isInsideFunction = false;
-          let parent = stmt.getParent();
-          while (parent) {
-            const kind = parent.getKind();
-            if (kind === SyntaxKind.FunctionDeclaration ||
-                kind === SyntaxKind.FunctionExpression ||
-                kind === SyntaxKind.ArrowFunction ||
-                kind === SyntaxKind.ClassDeclaration ||
-                kind === SyntaxKind.MethodDeclaration) {
-              isInsideFunction = true;
-              break;
-            }
-            parent = parent.getParent();
-          }
-          
-          if (!isInsideFunction) {
-            topLevelVariableStatements.push(stmt);
-          }
-        }
-      }
-      
-      // 스토어/클라이언트 생성 함수 목록 (절대 fallback 하면 안 되는 함수들)
-      const storeCreationFunctions = [
-        'create',
-        'configureStore',
-        'QueryClient',
-        'ApolloClient',
-        'createStore',
-        'createSlice',
-      ];
-      
-      for (const varStatement of topLevelVariableStatements) {
-        const declarations = varStatement.getDeclarationList().getDeclarations();
-        
-        for (const declaration of declarations) {
-          const initializer = declaration.getInitializer();
-          if (!initializer) continue;
-
-          const initializerText = initializer.getText();
-          
-          // 이미 typeof window 체크가 있는지 확인 (idempotency)
-          if (initializerText.includes('typeof window') || initializerText.includes('typeof document')) {
-            continue;
-          }
-          
-          // 스토어 생성 함수 호출인지 확인
-          const isStoreCreation = storeCreationFunctions.some(func => {
-            // create(...), configureStore(...), new QueryClient(...) 등
-            const pattern1 = new RegExp(`\\b${func}\\s*[<(]`);
-            const pattern2 = new RegExp(`new\\s+${func}\\s*[<(]`);
-            return pattern1.test(initializerText) || pattern2.test(initializerText);
-          });
-          
-          if (isStoreCreation) {
-            // 스토어 생성 함수는 항상 실행되어야 함
-            // 내부의 localStorage 접근만 처리
-            const modifiedStore = processStoreCreation(initializer, sourceFile);
-            if (modifiedStore) {
-              modified = true;
-              console.log(`      ✅ ${path.relative(projectRoot, filePath)}: 스토어 내부 localStorage 접근 처리됨: ${declaration.getName()}`);
-            }
-            continue;
-          }
-          
-          // window, document, localStorage 직접 참조 확인
-          const browserApiPatterns = [
-            /(window|document|localStorage|sessionStorage)\.[\w.]+/,
-            /window\.(innerWidth|innerHeight|outerWidth|outerHeight|screen|location|navigator|Swiper|Chart|Map|Editor)/,
-            /document\.(body|documentElement|title|cookie|domain)/,
-            /localStorage\.(getItem|setItem|removeItem|clear)/,
-            /sessionStorage\.(getItem|setItem|removeItem|clear)/,
-          ];
-          
-          const hasBrowserApi = browserApiPatterns.some(pattern => pattern.test(initializerText));
-          if (!hasBrowserApi) continue;
-
-          // 변수명 가져오기
-          const varName = declaration.getName();
-          
-          // 이벤트 핸들러인지 확인 (handle로 시작하거나 함수를 할당하는 경우)
-          const isEventHandler = /^handle/.test(varName) || 
-                                 varName.toLowerCase().includes('handler') ||
-                                 varName.toLowerCase().includes('submit') ||
-                                 varName.toLowerCase().includes('click');
-          
-          // 이벤트 핸들러는 처리하지 않음 (일반 함수로 유지)
-          if (isEventHandler) {
-            continue;
-          }
-          
-          // ========================================================================
-          // 우선순위 1: 사용 그래프 분석 및 React 컴포넌트 내부 사용 확인
-          // ========================================================================
-          
-          if (filePath.endsWith('.tsx')) {
-            // React 컴포넌트 내부에서 사용되는지 확인
-            const usageAnalysis = analyzeVariableUsage(sourceFile, varName);
-            
-            // useState 초기화자로 사용되는 경우 → Semantic React Migration (최우선)
-            if (usageAnalysis.usedAsUseStateInitializer) {
-              const migrationResult = performSemanticReactMigration(
-                sourceFile,
-                varName,
-                initializerText,
-                usageAnalysis.useStateInfo,
-                varStatement
-              );
-              
-              if (migrationResult.success) {
-                modified = true;
-                console.log(`      ✅ ${path.relative(projectRoot, filePath)}: ${varName} → Semantic React Migration 적용됨`);
-                continue; // 다음 변수로 이동
-              } else {
-                // 마이그레이션 실패 시 변환 중단 (모호한 경우)
-                console.warn(`      ⚠️ ${path.relative(projectRoot, filePath)}: ${varName} 마이그레이션 실패, 변환 중단`);
-                continue;
-              }
-            }
-            
-            // JSX 또는 render logic에서 사용되는 경우 → Semantic Migration
-            if (usageAnalysis.usedInJSX || usageAnalysis.usedInRenderLogic) {
-              // 이미 Case 3에서 처리되므로 여기서는 스킵
-              continue;
-            }
-            
-            // Event handler에서 사용되는 경우 → 처리하지 않음
-            if (usageAnalysis.usedInEventHandler) {
-              continue;
-            }
-          }
-          
-          // localStorage/sessionStorage 읽기인 경우 추가 처리
-          // (이미 위에서 semantic migration이 적용되었을 수 있음)
-          const isStorageRead = /(localStorage|sessionStorage)\.getItem/.test(initializerText);
-          
-          // localStorage 읽기가 컴포넌트 state에 영향을 주는 경우 최상단에 남겨두지 않음
-          if (isStorageRead && filePath.endsWith('.tsx')) {
-            // 이미 semantic migration이 적용되었는지 확인
-            // (위의 usageAnalysis에서 처리되었을 수 있음)
-            // 여기서는 추가로 처리할 필요 없음
-          }
-          
-          // ========================================================================
-          // 우선순위 3: Generic typeof window 래핑 (최하위 우선순위)
-          // React 컴포넌트와 연결되지 않은 경우에만 적용
-          // ========================================================================
-          
-          // .tsx 파일인 경우 추가 검증
-          if (filePath.endsWith('.tsx')) {
-            const usageAnalysis = analyzeVariableUsage(sourceFile, varName);
-            
-            // React 컴포넌트와 연결된 경우 변환 중단
-            if (usageAnalysis.usedAsUseStateInitializer ||
-                usageAnalysis.usedInJSX ||
-                usageAnalysis.usedInRenderLogic ||
-                usageAnalysis.usedInEventHandler) {
-              // 이미 semantic migration이 적용되었거나 Case 3에서 처리될 예정
-              console.log(`      ⏭️ ${path.relative(projectRoot, filePath)}: ${varName} → React 컴포넌트와 연결됨, generic 래핑 스킵`);
-              continue;
-            }
-          }
-          
-          // React 컴포넌트와 연결되지 않은 경우에만 generic typeof window 래핑 적용
-          // 타입 추론 (기본값 결정)
-          const type = inferTypeFromExpression(initializerText);
-          const defaultValue = getDefaultValue(type);
-
-          // 초기화식 교체
-          let newInitializer;
-          if (initializerText.includes('||')) {
-            // window.Swiper || null 같은 패턴
-            newInitializer = `typeof window !== 'undefined' ? (${initializerText}) : ${defaultValue}`;
-          } else {
-            newInitializer = `typeof window !== 'undefined' ? ${initializerText} : ${defaultValue}`;
-          }
-          
-          initializer.replaceWithText(newInitializer);
-          
-          modified = true;
-          console.log(`      ✅ ${path.relative(projectRoot, filePath)}: ${varName} → Generic typeof window 래핑 적용됨`);
-        }
-      }
-
-      if (modified) {
-        sourceFile.saveSync();
-        modifiedCount++;
-      }
-    } catch (error) {
-      console.warn(`   ⚠️ ${filePath} 처리 실패: ${error.message}`);
-    }
-  }
-
-  console.log(`   ✅ Case 1 완료: ${modifiedCount}개 파일 수정됨`);
-}
-
-/**
- * 스토어 생성 함수 내부의 localStorage 접근 처리
- * create() 호출 자체는 항상 실행되도록 보호
- */
-function processStoreCreation(initializer, sourceFile) {
-  let modified = false;
-  
-  // 화살표 함수와 함수 표현식 찾기
-  const arrowFunctions = initializer.getDescendantsOfKind(SyntaxKind.ArrowFunction);
-  const functionExpressions = initializer.getDescendantsOfKind(SyntaxKind.FunctionExpression);
-  
-  const allFunctions = [...arrowFunctions, ...functionExpressions];
-  
-  for (const func of allFunctions) {
-    const body = func.getBody();
-    if (!body || body.getKind() !== SyntaxKind.Block) continue;
-    
-    // CallExpression 찾기
-    const callExpressions = body.getDescendantsOfKind(SyntaxKind.CallExpression);
-    
-    for (const expr of callExpressions) {
-      const exprText = expr.getText();
-      
-      // localStorage 접근 확인
-      if (/localStorage\.(getItem|setItem|removeItem|clear)/.test(exprText)) {
-        // 이미 typeof window 체크가 있는지 확인
-        let parent = expr.getParent();
-        let alreadyProtected = false;
-        while (parent) {
-          const parentText = parent.getText();
-          if (parentText.includes('typeof window')) {
-            alreadyProtected = true;
-            break;
-          }
-          parent = parent.getParent();
-        }
-        
-        if (alreadyProtected) continue;
-        
-        try {
-          // localStorage 호출만 감싸기
-          const newExpr = `typeof window !== 'undefined' ? ${exprText} : null`;
-          expr.replaceWithText(newExpr);
-          modified = true;
-        } catch (error) {
-          // AST 교체 실패 시 텍스트 교체 시도
-          const bodyText = body.getText();
-          const escapedExpr = exprText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          const newBodyText = bodyText.replace(
-            new RegExp(`\\b${escapedExpr}\\b`, 'g'),
-            `typeof window !== 'undefined' ? ${exprText} : null`
-          );
-          if (newBodyText !== bodyText) {
-            body.replaceWithText(newBodyText);
-            modified = true;
-          }
-        }
-      }
-    }
-  }
-  
-  return modified;
-}
-
-// ============================================================================
-// Case 2: Side Effect Logic - Utils/Logic (.ts) 즉시 실행 코드
-// ============================================================================
-
-/**
- * Case 2: .ts 파일에서 즉시 실행되는 브라우저 API 호출 처리
- * @param {string} projectRoot - 프로젝트 루트 경로
- */
-function handleSideEffectLogic(projectRoot) {
-  console.log('   📝 Case 2: Side Effect Logic 처리 중...');
-  
-  const srcPath = path.join(projectRoot, 'src');
-  if (!fs.existsSync(srcPath)) {
-    return;
-  }
-
-  const project = new Project({
-    skipAddingFilesFromTsConfig: true,
-  });
-
-  // .ts 파일만 찾기 (store 파일 제외)
-  const allTsFiles = findFiles(srcPath, /\.ts$/);
-  const tsFiles = allTsFiles.filter(filePath => {
-    return !isStoreFile(filePath, srcPath);
-  });
-  
-  let modifiedCount = 0;
-  
-  for (const filePath of tsFiles) {
-    try {
-      const sourceFile = project.addSourceFileAtPath(filePath);
-      let modified = false;
-
-      const statements = sourceFile.getStatements();
-      
-      for (const statement of statements) {
-        if (statement.getKind() === SyntaxKind.ExpressionStatement) {
-          const expr = statement.getExpression();
-          const exprText = expr.getText();
-          
-          // 브라우저 API 호출 확인
-          const browserApiCalls = [
-            /window\.(addEventListener|removeEventListener|alert|confirm|prompt)/,
-            /document\.(title|body|querySelector|getElementById)/,
-            /document\.body\.(classList|style)/,
-          ];
-
-          const hasBrowserApiCall = browserApiCalls.some(pattern => pattern.test(exprText));
-          
-          if (!hasBrowserApiCall) continue;
-          
-          // 이미 typeof window 체크가 있는지 확인 (idempotency)
-          let parent = statement.getParent();
-          let alreadyProtected = false;
-          while (parent) {
-            const parentText = parent.getText();
-            if (parentText.includes('typeof window')) {
-              alreadyProtected = true;
-              break;
-            }
-            parent = parent.getParent();
-          }
-          
-          if (alreadyProtected) continue;
-
-          // if (typeof window !== 'undefined') 블록으로 래핑
-          const newCode = `if (typeof window !== 'undefined') {\n  ${exprText};\n}`;
-          statement.replaceWithText(newCode);
-          modified = true;
-          console.log(`      ✅ ${path.relative(projectRoot, filePath)}: 실행 구문 래핑됨`);
-        }
-      }
-
-      if (modified) {
-        sourceFile.saveSync();
-        modifiedCount++;
-      }
-    } catch (error) {
-      console.warn(`   ⚠️ ${filePath} 처리 실패: ${error.message}`);
-    }
-  }
-
-  console.log(`   ✅ Case 2 완료: ${modifiedCount}개 파일 수정됨`);
-}
-
-// ============================================================================
-// Case 3: Rendering Value - Component (.tsx) 렌더링 값 계산
-// ============================================================================
-
-/**
- * Case 3: .tsx 파일에서 렌더링에 사용되는 브라우저 값 처리
- * Hydration-safe 패턴: mounted state 사용
- * typeof window는 렌더링에서 절대 사용하지 않음
- * @param {string} projectRoot - 프로젝트 루트 경로
- */
-function handleRenderingValue(projectRoot) {
-  console.log('   📝 Case 3: Rendering Value 처리 중...');
-  
-  const srcPath = path.join(projectRoot, 'src');
-  if (!fs.existsSync(srcPath)) {
-    return;
-  }
-
-  const project = new Project({
-    skipAddingFilesFromTsConfig: true,
-  });
-
-  const tsxFiles = findFiles(srcPath, /\.tsx$/);
-  
-  let modifiedCount = 0;
-  
-  for (const filePath of tsxFiles) {
-    try {
-      const sourceFile = project.addSourceFileAtPath(filePath);
-      let modified = false;
-      const fileText = sourceFile.getText();
-      
-      // 컴포넌트 함수 찾기
-      const functions = sourceFile.getFunctions();
-      
-      for (const func of functions) {
-        const body = func.getBody();
-        if (!body || body.getKind() !== SyntaxKind.Block) continue;
-
-        const statements = body.getStatements();
-        
-        // 이미 mounted 패턴이 있는지 확인 (idempotency)
-        const hasMountedPattern = fileText.includes('const [mounted') && 
-                                  fileText.includes('setMounted(true)');
-        
-        // 최상단 변수 선언에서 브라우저 API 사용 확인
-        for (let i = 0; i < statements.length; i++) {
-          const stmt = statements[i];
-          
-          if (stmt.getKind() === SyntaxKind.VariableStatement) {
-            const declarations = stmt.getDeclarationList().getDeclarations();
-            
-            for (const declaration of declarations) {
-              const initializer = declaration.getInitializer();
-              if (!initializer) continue;
-
-              const initializerText = initializer.getText();
-              const varName = declaration.getName();
-              
-              // 이미 useState나 useEffect에 있는지 확인 (idempotency)
-              if (initializerText.includes('useState') || initializerText.includes('useEffect')) {
-                continue;
-              }
-
-              // typeof window 체크가 있는 경우 처리
-              if (initializerText.includes('typeof window')) {
-                // typeof window를 제거하고 원래 표현식 추출
-                const cleanExpression = initializerText
-                  .replace(/typeof\s+window\s*!==\s*['"]undefined['"]\s*\?\s*/, '')
-                  .replace(/\s*:\s*[^,}]+$/, '')
-                  .trim();
-                
-                if (cleanExpression && cleanExpression !== initializerText) {
-                  // 브라우저 API 사용 확인
-                  const browserApiPatterns = [
-                    /(window|document|localStorage|sessionStorage)\.[\w.]+/,
-                    /window\.(innerWidth|innerHeight|outerWidth|outerHeight|screen|location|navigator)/,
-                    /document\.(body|documentElement|title|cookie|domain)/,
-                  ];
-                  
-                  const hasBrowserApi = browserApiPatterns.some(pattern => pattern.test(cleanExpression));
-                  
-                  if (hasBrowserApi) {
-                    // JSX에서 사용되는지 확인
-                    const jsxUsage = findJsxUsage(sourceFile, varName);
-                    if (jsxUsage) {
-                      // localStorage인지 확인
-                      const isLocalStorage = /localStorage\.(getItem|setItem)/.test(cleanExpression);
-                      
-                      // mounted 패턴이 필요한지 확인
-                      const needsMountedPattern = requiresMountedPattern(cleanExpression);
-                      
-                      if (isLocalStorage) {
-                        // localStorage는 항상 빈 문자열 기본값 + useEffect
-                        const setterName = `set${varName.charAt(0).toUpperCase() + varName.slice(1)}`;
-                        const newVarDecl = `const [${varName}, ${setterName}] = useState("");`;
-                        const useEffectCode = `\nuseEffect(() => {\n  ${setterName}(${cleanExpression});\n}, []);`;
-                        
-                        stmt.replaceWithText(newVarDecl + useEffectCode);
-                        addReactHookImports(sourceFile, ['useState', 'useEffect']);
-                        
-                        modified = true;
-                        console.log(`      ✅ ${path.relative(projectRoot, filePath)}: ${varName} → localStorage useEffect 패턴으로 변환됨`);
-                      } else if (needsMountedPattern) {
-                        // mounted 패턴이 필요한 경우 (window.innerWidth, matchMedia, navigator 등)
-                        const type = inferTypeFromExpression(cleanExpression);
-                        const defaultValue = getDefaultValue(type);
-                        const setterName = `set${varName.charAt(0).toUpperCase() + varName.slice(1)}`;
-                        
-                        let mountedCode = '';
-                        if (!hasMountedPattern) {
-                          mountedCode = `const [mounted, setMounted] = useState(false);\nuseEffect(() => setMounted(true), []);\n`;
-                          addReactHookImports(sourceFile, ['useState', 'useEffect']);
-                        }
-                        
-                        const newVarDecl = `${mountedCode}const [${varName}, ${setterName}] = useState(${defaultValue});`;
-                        const useEffectCode = `\nuseEffect(() => {\n  ${setterName}(${cleanExpression});\n}, []);`;
-                        
-                        stmt.replaceWithText(newVarDecl + useEffectCode);
-                        addReactHookImports(sourceFile, ['useState', 'useEffect']);
-                        addMountedGuard(sourceFile, func);
-                        
-                        modified = true;
-                        console.log(`      ✅ ${path.relative(projectRoot, filePath)}: ${varName} → Hydration-safe 패턴으로 변환됨`);
-                      } else {
-                        // 그 외의 경우 useEffect 사용
-                        const type = inferTypeFromExpression(cleanExpression);
-                        const defaultValue = getDefaultValue(type);
-                        const setterName = `set${varName.charAt(0).toUpperCase() + varName.slice(1)}`;
-                        
-                        const newVarDecl = `const [${varName}, ${setterName}] = useState(${defaultValue});`;
-                        const useEffectCode = `\nuseEffect(() => {\n  ${setterName}(${cleanExpression});\n}, []);`;
-                        
-                        stmt.replaceWithText(newVarDecl + useEffectCode);
-                        addReactHookImports(sourceFile, ['useState', 'useEffect']);
-                        
-                        modified = true;
-                        console.log(`      ✅ ${path.relative(projectRoot, filePath)}: ${varName} → useEffect 패턴으로 변환됨`);
-                      }
-                    }
-                  }
-                }
-                continue;
-              }
-              
-              // 브라우저 API 사용 확인
-              const browserApiPatterns = [
-                /(window|document|localStorage|sessionStorage)\.[\w.]+/,
-                /window\.(innerWidth|innerHeight|outerWidth|outerHeight|screen|location|navigator)/,
-                /document\.(body|documentElement|title|cookie|domain)/,
-              ];
-              
-              const hasBrowserApi = browserApiPatterns.some(pattern => pattern.test(initializerText));
-              if (!hasBrowserApi) continue;
-
-              // 이벤트 핸들러인지 확인 (handle로 시작하거나 JSX props에 함수로 할당)
-              const isEventHandler = /^handle/.test(varName) || 
-                                     varName.toLowerCase().includes('handler') ||
-                                     varName.toLowerCase().includes('submit') ||
-                                     varName.toLowerCase().includes('click');
-              
-              // JSX에서 함수 prop으로 사용되는지 확인
-              const jsxAttributes = sourceFile.getDescendantsOfKind(SyntaxKind.JsxAttribute);
-              let isFunctionProp = false;
-              for (const attr of jsxAttributes) {
-                const nameNode = attr.getNameNode();
-                const attrName = nameNode ? nameNode.getText() : '';
-                const attrValue = attr.getInitializer();
-                if (attrName === varName || (attrValue && attrValue.getText().includes(varName))) {
-                  // onSubmit, onClick 등 이벤트 핸들러 prop인지 확인
-                  if (/^(on[A-Z]|onSubmit|onClick|onChange|onFocus|onBlur)/.test(attrName)) {
-                    isFunctionProp = true;
-                    break;
-                  }
-                }
-              }
-              
-              // 이벤트 핸들러는 useState로 변환하지 않음
-              if (isEventHandler || isFunctionProp) {
-                continue;
-              }
-
-              // JSX에서 사용되는지 확인
-              const jsxUsage = findJsxUsage(sourceFile, varName);
-              if (!jsxUsage) continue;
-
-              // localStorage인지 확인
-              const isLocalStorage = /localStorage\.(getItem|setItem)/.test(initializerText);
-              
-              // mounted 패턴이 필요한지 확인 (window.innerWidth, matchMedia, navigator, layout measurement만)
-              const needsMountedPattern = requiresMountedPattern(initializerText);
-              
-              if (isLocalStorage) {
-                // localStorage는 항상 빈 문자열 기본값 + useEffect
-                const setterName = `set${varName.charAt(0).toUpperCase() + varName.slice(1)}`;
-                const newVarDecl = `const [${varName}, ${setterName}] = useState("");`;
-                const useEffectCode = `\nuseEffect(() => {\n  ${setterName}(${initializerText});\n}, []);`;
-                
-                stmt.replaceWithText(newVarDecl + useEffectCode);
-                addReactHookImports(sourceFile, ['useState', 'useEffect']);
-                
-                modified = true;
-                console.log(`      ✅ ${path.relative(projectRoot, filePath)}: ${varName} → localStorage useEffect 패턴으로 변환됨`);
-              } else if (needsMountedPattern) {
-                // mounted 패턴이 필요한 경우 (window.innerWidth, matchMedia, navigator 등)
-                const type = inferTypeFromExpression(initializerText);
-                const defaultValue = getDefaultValue(type);
-                const setterName = `set${varName.charAt(0).toUpperCase() + varName.slice(1)}`;
-                
-                let mountedCode = '';
-                if (!hasMountedPattern) {
-                  mountedCode = `const [mounted, setMounted] = useState(false);\nuseEffect(() => setMounted(true), []);\n`;
-                  addReactHookImports(sourceFile, ['useState', 'useEffect']);
-                }
-                
-                const newVarDecl = `${mountedCode}const [${varName}, ${setterName}] = useState(${defaultValue});`;
-                const useEffectCode = `\nuseEffect(() => {\n  ${setterName}(${initializerText});\n}, []);`;
-                
-                stmt.replaceWithText(newVarDecl + useEffectCode);
-                addReactHookImports(sourceFile, ['useState', 'useEffect']);
-                addMountedGuard(sourceFile, func);
-                
-                modified = true;
-                console.log(`      ✅ ${path.relative(projectRoot, filePath)}: ${varName} → Hydration-safe 패턴으로 변환됨`);
-              } else {
-                // 그 외의 경우 useEffect 사용
-                const type = inferTypeFromExpression(initializerText);
-                const defaultValue = getDefaultValue(type);
-                const setterName = `set${varName.charAt(0).toUpperCase() + varName.slice(1)}`;
-                
-                const newVarDecl = `const [${varName}, ${setterName}] = useState(${defaultValue});`;
-                const useEffectCode = `\nuseEffect(() => {\n  ${setterName}(${initializerText});\n}, []);`;
-                
-                stmt.replaceWithText(newVarDecl + useEffectCode);
-                addReactHookImports(sourceFile, ['useState', 'useEffect']);
-                
-                modified = true;
-                console.log(`      ✅ ${path.relative(projectRoot, filePath)}: ${varName} → useEffect 패턴으로 변환됨`);
-              }
-            }
-          }
-        }
-      }
-
-      if (modified) {
-        sourceFile.saveSync();
-        modifiedCount++;
-      }
-    } catch (error) {
-      console.warn(`   ⚠️ ${filePath} 처리 실패: ${error.message}`);
-    }
-  }
-
-  console.log(`   ✅ Case 3 완료: ${modifiedCount}개 파일 수정됨`);
-}
-
-/**
- * 컴포넌트에 mounted guard 추가
- */
-function addMountedGuard(sourceFile, func) {
-  const body = func.getBody();
-  if (!body || body.getKind() !== SyntaxKind.Block) return;
-  
-  const statements = body.getStatements();
-  const returnStmt = statements.find(s => s.getKind() === SyntaxKind.ReturnStatement);
-  
-  if (returnStmt) {
-    const currentStatements = body.getStatements();
-    const returnIndex = currentStatements.indexOf(returnStmt);
-    
-    if (returnIndex !== -1 && returnIndex > 0) {
-      // 이미 guard가 있는지 확인 (idempotency)
-      const prevStmt = currentStatements[returnIndex - 1];
-      if (prevStmt.getKind() === SyntaxKind.IfStatement) {
-        const ifText = prevStmt.getText();
-        if (ifText.includes('!mounted') || ifText.includes('mounted === false')) {
-          return; // 이미 guard가 있음
-        }
-      }
-      
-      // guard 추가
-      body.insertStatements(returnIndex, writer => {
-        writer.writeLine('if (!mounted) return null;');
-      });
-    }
-  }
-}
-
-// ============================================================================
-// Case 4: DOM/Event Handler - Component (.tsx) 렌더링 외 실행
-// ============================================================================
-
-/**
- * Case 4: .tsx 파일에서 렌더링 외 브라우저 API 실행 처리
- * DOM 접근과 이벤트 리스너를 useEffect로 이동
- * @param {string} projectRoot - 프로젝트 루트 경로
- */
-function handleDOMEventHandler(projectRoot) {
-  console.log('   📝 Case 4: DOM/Event Handler 처리 중...');
-  
-  const srcPath = path.join(projectRoot, 'src');
-  if (!fs.existsSync(srcPath)) {
-    return;
-  }
-
-  const project = new Project({
-    skipAddingFilesFromTsConfig: true,
-  });
-
-  const tsxFiles = findFiles(srcPath, /\.tsx$/);
-  
-  let modifiedCount = 0;
-  
-  for (const filePath of tsxFiles) {
-    try {
-      const sourceFile = project.addSourceFileAtPath(filePath);
-      let modified = false;
-
-      // 컴포넌트 함수 찾기
-      const functions = sourceFile.getFunctions();
-      
-      for (const func of functions) {
-        const body = func.getBody();
-        if (!body || body.getKind() !== SyntaxKind.Block) continue;
-
-        const statements = body.getStatements();
-        const statementsToMove = [];
-        
-        // 렌더링 단계에서 실행되는 브라우저 API 호출 찾기
-        for (let i = 0; i < statements.length; i++) {
-          const stmt = statements[i];
-          
-          if (stmt.getKind() === SyntaxKind.ExpressionStatement) {
-            const expr = stmt.getExpression();
-            const exprText = expr.getText();
-            
-            // DOM API 호출 확인
-            const domApiPatterns = [
-              /window\.(addEventListener|removeEventListener)/,
-              /document\.(title|body|querySelector|getElementById|addEventListener|removeEventListener)/,
-              /document\.body\.(classList|style)/,
-            ];
-
-            const hasDomApiCall = domApiPatterns.some(pattern => pattern.test(exprText));
-            
-            if (!hasDomApiCall) continue;
-            
-            // 이미 useEffect 내부에 있는지 확인
-            let isInsideUseEffect = false;
-            let currentParent = stmt.getParent();
-            while (currentParent) {
-              const kind = currentParent.getKind();
-              if (kind === SyntaxKind.CallExpression) {
-                const callExpr = currentParent.getExpression();
-                if (callExpr && callExpr.getText() === 'useEffect') {
-                  isInsideUseEffect = true;
-                  break;
-                }
-              }
-              currentParent = currentParent.getParent();
-            }
-            
-            if (isInsideUseEffect) continue;
-
-            statementsToMove.push({ stmt, exprText });
-          }
-        }
-
-        // useEffect로 이동
-        if (statementsToMove.length > 0) {
-          // return 문을 먼저 찾기 (변경 전)
-          const returnStmt = statements.find(s => 
-            s.getKind() === SyntaxKind.ReturnStatement
-          );
-          
-          let useEffectCode = '\nuseEffect(() => {\n';
-          let hasAddEventListener = false;
-          let eventHandlers = [];
-          
-          // 코드 생성
-          for (const { exprText } of statementsToMove) {
-            if (exprText.includes('addEventListener')) {
-              // window.addEventListener('scroll', handler) 또는 document.addEventListener('click', handler)
-              const match = exprText.match(/(window|document)\.addEventListener\(['"]([\w]+)['"],\s*([^)]+)\)/);
-              if (match) {
-                const [, target, eventType, handler] = match;
-                useEffectCode += `  ${exprText};\n`;
-                eventHandlers.push({ target, eventType, handler: handler.trim() });
-                hasAddEventListener = true;
-              } else {
-                useEffectCode += `  ${exprText};\n`;
-              }
-            } else {
-              useEffectCode += `  ${exprText};\n`;
-            }
-          }
-          
-          // cleanup 함수 추가
-          if (hasAddEventListener && eventHandlers.length > 0) {
-            useEffectCode += '  return () => {\n';
-            for (const { target, eventType, handler } of eventHandlers) {
-              useEffectCode += `    ${target}.removeEventListener('${eventType}', ${handler});\n`;
-            }
-            useEffectCode += '  };\n';
-          }
-          
-          useEffectCode += '}, []);';
-          
-          // statements 제거 (역순으로)
-          for (let i = statementsToMove.length - 1; i >= 0; i--) {
-            statementsToMove[i].stmt.remove();
-          }
-          
-          // useEffect 추가
-          if (returnStmt) {
-            // returnStmt의 현재 위치 찾기 (제거 후)
-            const currentStatements = body.getStatements();
-            const returnIndex = currentStatements.indexOf(returnStmt);
-            if (returnIndex !== -1) {
-              body.insertStatements(returnIndex, writer => {
-                writer.writeLine(useEffectCode);
-              });
-            } else {
-              body.addStatements(useEffectCode);
-            }
-          } else {
-            body.addStatements(useEffectCode);
-          }
-          
-          // useEffect import 추가 (중복 방지)
-          addReactHookImports(sourceFile, ['useEffect']);
-          
-          modified = true;
-          console.log(`      ✅ ${path.relative(projectRoot, filePath)}: DOM API 호출 → useEffect로 이동됨`);
-        }
-      }
-
-      if (modified) {
-        sourceFile.saveSync();
-        modifiedCount++;
-      }
-    } catch (error) {
-      console.warn(`   ⚠️ ${filePath} 처리 실패: ${error.message}`);
-    }
-  }
-
-  console.log(`   ✅ Case 4 완료: ${modifiedCount}개 파일 수정됨`);
-}
-
-// ============================================================================
-// Case 5: Void/Reference - 무의미한 코드 제거
-// ============================================================================
-
-/**
- * Case 5: 무의미한 브라우저 API 참조 코드 제거
- * void (window.innerWidth < 768), void window.innerWidth 등
- * @param {string} projectRoot - 프로젝트 루트 경로
- */
-function handleVoidReference(projectRoot) {
-  console.log('   📝 Case 5: Void/Reference 처리 중...');
-  
-  const srcPath = path.join(projectRoot, 'src');
-  if (!fs.existsSync(srcPath)) {
-    return;
-  }
-
-  const project = new Project({
-    skipAddingFilesFromTsConfig: true,
-  });
-
-  const allFiles = [
-    ...findFiles(srcPath, /\.ts$/),
-    ...findFiles(srcPath, /\.tsx$/),
-  ];
-  
-  let removedCount = 0;
-  
-  for (const filePath of allFiles) {
-    try {
-      const sourceFile = project.addSourceFileAtPath(filePath);
-      let modified = false;
-
-      const statements = sourceFile.getStatements();
-      const statementsToRemove = [];
-      
-      for (const stmt of statements) {
-        if (stmt.getKind() === SyntaxKind.ExpressionStatement) {
-          const expr = stmt.getExpression();
-          const exprText = expr.getText();
-          
-          // void window, void (window.innerWidth < 768), window.console.log 등 무의미한 코드 패턴
-          const voidPatterns = [
-            /^void\s*\(?\s*(window|document|localStorage)/,
-            /^void\s*\(?\s*window\./,
-            /^void\s*\(?\s*\(window\.[^)]+\)/,
-            /window\.console\.(log|warn|error|debug)/,
-            /^(window|document|localStorage)\.\w+;?\s*$/,
-          ];
-
-          const isVoidReference = voidPatterns.some(pattern => pattern.test(exprText));
-          
-          if (isVoidReference) {
-            // 변수 선언 내부가 아닌지 확인
-            let parent = stmt.getParent();
-            let isInsideVariable = false;
-            while (parent) {
-              if (parent.getKind() === SyntaxKind.VariableStatement) {
-                isInsideVariable = true;
-                break;
-              }
-              parent = parent.getParent();
-            }
-            
-            if (!isInsideVariable) {
-              statementsToRemove.push(stmt);
-            }
-          }
-        }
-      }
-
-      // 코드 제거
-      for (const stmt of statementsToRemove) {
-        stmt.remove();
-        modified = true;
-        removedCount++;
-      }
-
-      if (modified) {
-        sourceFile.saveSync();
-        console.log(`      ✅ ${path.relative(projectRoot, filePath)}: 무의미한 코드 제거됨`);
-      }
-    } catch (error) {
-      console.warn(`   ⚠️ ${filePath} 처리 실패: ${error.message}`);
-    }
-  }
-
-  console.log(`   ✅ Case 5 완료: ${removedCount}개 코드 제거됨`);
-}
-
-// ============================================================================
-// Case 6: Lib Initialization - UI 라이브러리 초기화
-// ============================================================================
-
-/**
- * Case 6: UI 라이브러리 초기화 처리
- * Dynamic Import로 강제 변환 (.tsx)
- * typeof window 체크 추가 (.ts)
- * 'use client'는 삽입하지 않음 (사용자 요청)
- * @param {string} projectRoot - 프로젝트 루트 경로
- */
-function handleLibInitialization(projectRoot) {
-  console.log('   📝 Case 6: Lib Initialization 처리 중...');
-  
-  const srcPath = path.join(projectRoot, 'src');
-  if (!fs.existsSync(srcPath)) {
-    return;
-  }
-
-  const project = new Project({
-    skipAddingFilesFromTsConfig: true,
-  });
-
-  const allFiles = [
-    ...findFiles(srcPath, /\.ts$/),
-    ...findFiles(srcPath, /\.tsx$/),
-  ];
-  
-  const windowDependentLibs = [
-    'Swiper',
-    'Map',
-    'Chart',
-    'Editor',
-    'ApexCharts',
-    'Chart.js',
-    'GoogleMap',
-    'KakaoMap',
-    'NaverMap',
-    'TuiEditor',
-    'Quill',
-    'TinyMCE',
-    'CKEditor',
-    'CodeMirror',
-    'Monaco',
-    'D3',
-    'Three',
-    'Fabric',
-    'Konva',
-    'Pixi',
-  ];
-  
-  let modifiedCount = 0;
-  
-  for (const filePath of allFiles) {
-    try {
-      const sourceFile = project.addSourceFileAtPath(filePath);
-      let modified = false;
-      const fileText = sourceFile.getText();
-
-      // import 문에서 라이브러리 확인
-      const imports = sourceFile.getImportDeclarations();
-      let hasWindowDependentLib = false;
-      let libName = null;
-      let libImportPath = null;
-      let importDeclToRemove = null;
-      
-      for (const importDecl of imports) {
-        const moduleSpecifier = importDecl.getModuleSpecifierValue();
-        const namedImports = importDecl.getNamedImports().map(n => n.getName());
-        const defaultImport = importDecl.getDefaultImport()?.getText();
-        
-        for (const lib of windowDependentLibs) {
-          if (moduleSpecifier.includes(lib.toLowerCase()) || 
-              namedImports.includes(lib) || 
-              defaultImport === lib) {
-            hasWindowDependentLib = true;
-            libName = lib;
-            libImportPath = moduleSpecifier;
-            importDeclToRemove = importDecl;
-            break;
-          }
-        }
-        
-        if (hasWindowDependentLib) break;
-      }
-
-      if (!hasWindowDependentLib) continue;
-
-      // 이미 useEffect나 dynamic import에 있는지 확인 (idempotency)
-      if (fileText.includes('dynamic') || fileText.includes('useEffect')) {
-        // dynamic import가 이미 있는지 확인
-        const hasDynamicImport = fileText.includes(`dynamic(() => import('${libImportPath}')`);
-        if (hasDynamicImport) {
-          continue;
-        }
-      }
-
-      // new 키워드로 인스턴스 생성 확인 (최상단)
-      const statements = sourceFile.getStatements();
-      
-      for (const stmt of statements) {
-        if (stmt.getKind() === SyntaxKind.VariableStatement) {
-          const declarations = stmt.getDeclarationList().getDeclarations();
-          
-          for (const declaration of declarations) {
-            const initializer = declaration.getInitializer();
-            if (!initializer) continue;
-
-            const initializerText = initializer.getText();
-            
-            // new LibName(...) 패턴 확인
-            const newPattern = new RegExp(`new\\s+${libName}\\s*\\(`);
-            if (!newPattern.test(initializerText)) continue;
-            
-            // 이미 useEffect나 dynamic import에 있는지 확인 (idempotency)
-            if (initializerText.includes('useEffect') || 
-                initializerText.includes('dynamic')) {
-              continue;
-            }
-
-            // .tsx 파일인 경우 Dynamic Import로 강제 변환
-            if (filePath.endsWith('.tsx')) {
-              const varName = declaration.getName();
-              
-              // 기존 import 제거
-              if (importDeclToRemove) {
-                importDeclToRemove.remove();
-                modified = true;
-              }
-              
-              // dynamic import 추가
-              const dynamicImportCode = `const ${varName} = dynamic(() => import('${libImportPath}'), { ssr: false });`;
-              
-              // import 문 다음에 추가
-              const importStatements = sourceFile.getStatements().filter(s => 
-                s.getKind() === SyntaxKind.ImportDeclaration
-              );
-              
-              if (importStatements.length > 0) {
-                const lastImport = importStatements[importStatements.length - 1];
-                const lastImportIndex = sourceFile.getStatements().indexOf(lastImport);
-                sourceFile.insertStatements(lastImportIndex + 1, dynamicImportCode);
-              } else {
-                sourceFile.insertStatements(0, dynamicImportCode);
-              }
-              
-              // next/dynamic import 추가 (중복 방지)
-              const hasDynamicImport = sourceFile.getImportDeclarations().some(
-                decl => decl.getModuleSpecifierValue() === 'next/dynamic'
-              );
-              
-              if (!hasDynamicImport) {
-                sourceFile.addImportDeclaration({
-                  defaultImport: 'dynamic',
-                  moduleSpecifier: 'next/dynamic',
-                });
-                modified = true;
-              }
-              
-              // 최상단 new Lib() 호출 제거
-              stmt.remove();
-              
-              modified = true;
-              console.log(`      ✅ ${path.relative(projectRoot, filePath)}: ${libName} → dynamic import로 변환됨`);
-            } else {
-              // .ts 파일인 경우 typeof window 체크 추가
-              if (!initializerText.includes('typeof window')) {
-                const newInitializer = `typeof window !== 'undefined' ? ${initializerText} : null`;
-                initializer.replaceWithText(newInitializer);
-                modified = true;
-                console.log(`      ✅ ${path.relative(projectRoot, filePath)}: ${libName} 초기화에 typeof window 체크 추가됨`);
-              }
-            }
-          }
-        }
-      }
-
-      if (modified) {
-        sourceFile.saveSync();
-        modifiedCount++;
-      }
-    } catch (error) {
-      console.warn(`   ⚠️ ${filePath} 처리 실패: ${error.message}`);
-    }
-  }
-
-  console.log(`   ✅ Case 6 완료: ${modifiedCount}개 파일 수정됨`);
-}
-
-// ============================================================================
-// 유틸리티 함수
-// ============================================================================
-
-/**
- * Store 파일인지 확인
- */
-function isStoreFile(filePath, srcPath) {
-  const relativePath = path.relative(srcPath, filePath);
-  return relativePath.includes('store/') || 
-         relativePath.includes('stores/') ||
-         /\.store\.ts$/.test(filePath) ||
-         /authStore\.ts$/.test(filePath) ||
-         /.*Store\.ts$/.test(filePath);
-}
-
-/**
- * 파일에 'use client' 지시어가 있는지 확인
- */
-function hasUseClient(sourceFile) {
-  const statements = sourceFile.getStatements();
-  for (const stmt of statements) {
-    if (stmt.getKind() === SyntaxKind.ExpressionStatement) {
-      const expr = stmt.getExpression();
-      const exprText = expr.getText();
-      if (exprText === "'use client'" || exprText === '"use client"') {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-/**
- * mounted 패턴이 필요한 브라우저 API인지 확인
- * (window.innerWidth, matchMedia, navigator, layout measurement만)
- */
-function requiresMountedPattern(expression) {
-  const mountedOnlyPatterns = [
-    /window\.innerWidth/,
-    /window\.innerHeight/,
-    /window\.outerWidth/,
-    /window\.outerHeight/,
-    /window\.matchMedia/,
-    /matchMedia/,
-    /navigator\./,
-    /window\.screen/,
-    /getBoundingClientRect/,
-    /getComputedStyle/,
-    /offsetWidth/,
-    /offsetHeight/,
-    /clientWidth/,
-    /clientHeight/,
-  ];
-  
-  return mountedOnlyPatterns.some(pattern => pattern.test(expression));
-}
-
-/**
- * 변수 사용 그래프 분석
- * React 컴포넌트 내부에서 변수가 어떻게 사용되는지 분석
- */
-function analyzeVariableUsage(sourceFile, varName) {
-  const result = {
-    usedAsUseStateInitializer: false,
-    usedInJSX: false,
-    usedInRenderLogic: false,
-    usedInEventHandler: false,
-    useStateInfo: null,
-  };
-  
-  const functions = sourceFile.getFunctions();
-  
-  for (const func of functions) {
-    const body = func.getBody();
-    if (!body || body.getKind() !== SyntaxKind.Block) continue;
-    
-    const statements = body.getStatements();
-    
-    // useState 초기화자로 사용되는지 확인
-    for (let i = 0; i < statements.length; i++) {
-      const stmt = statements[i];
-      if (stmt.getKind() === SyntaxKind.VariableStatement) {
-        const declarations = stmt.getDeclarationList().getDeclarations();
-        
-        for (const decl of declarations) {
-          const init = decl.getInitializer();
-          if (!init) continue;
-          
-          // useState 호출인지 확인
-          if (init.getKind() === SyntaxKind.CallExpression) {
-            const callExpr = init;
-            const expr = callExpr.getExpression();
-            if (expr.getText() === 'useState') {
-              // useState의 인자 확인
-              const args = callExpr.getArguments();
-              for (const arg of args) {
-                const argText = arg.getText();
-                
-                // useState 인자에서 변수명이 사용되는지 확인
-                // 1. 정확히 변수명과 일치하는 경우: useState(lastEmail)
-                // 2. 변수명이 포함된 경우: useState(lastEmail || '')
-                // 3. Identifier 노드로 직접 확인
-                let isVarUsed = false;
-                
-                // Identifier 노드로 직접 확인 (가장 정확)
-                const identifiers = arg.getDescendantsOfKind(SyntaxKind.Identifier);
-                for (const identifier of identifiers) {
-                  if (identifier.getText() === varName) {
-                    isVarUsed = true;
-                    break;
-                  }
-                }
-                
-                // 텍스트 매칭도 확인 (fallback)
-                if (!isVarUsed) {
-                  // 정확히 일치하거나 변수명이 포함된 경우
-                  // 단, 다른 변수명의 일부가 아닌지 확인 (예: myLastEmail !== lastEmail)
-                  const regex = new RegExp(`\\b${varName}\\b`);
-                  if (regex.test(argText)) {
-                    isVarUsed = true;
-                  }
-                }
-                
-                if (isVarUsed) {
-                  result.usedAsUseStateInitializer = true;
-                  const stateVarName = decl.getName();
-                  
-                  // 배열 구조 분해에서 setter 추출
-                  let setterName = null;
-                  const nameNode = decl.getNameNode();
-                  if (nameNode.getKind() === SyntaxKind.ArrayBindingPattern) {
-                    const elements = nameNode.getElements();
-                    if (elements.length >= 2) {
-                      const secondElement = elements[1];
-                      if (secondElement.getKind() === SyntaxKind.BindingElement) {
-                        const setterNode = secondElement.getNameNode();
-                        if (setterNode.getKind() === SyntaxKind.Identifier) {
-                          setterName = setterNode.getText();
-                        }
-                      }
-                    }
-                  }
-                  
-                  result.useStateInfo = {
-                    func,
-                    useStateStmt: stmt,
-                    useStateIndex: i,
-                    stateVarName,
-                    declaration: decl,
-                    initializer: init,
-                    useStateArg: arg,
-                    setterName: setterName || `set${stateVarName.charAt(0).toUpperCase() + stateVarName.slice(1)}`
-                  };
-                  break;
-                }
-              }
-              if (result.usedAsUseStateInitializer) break;
-            }
-          }
-        }
-        if (result.usedAsUseStateInitializer) break;
-      }
-    }
-    
-    // JSX에서 사용되는지 확인
-    if (findJsxUsage(sourceFile, varName)) {
-      result.usedInJSX = true;
-    }
-    
-    // Render logic에서 사용되는지 확인 (return 문 이전의 계산)
-    const returnStmt = statements.find(s => s.getKind() === SyntaxKind.ReturnStatement);
-    if (returnStmt) {
-      const returnIndex = statements.indexOf(returnStmt);
-      for (let i = 0; i < returnIndex; i++) {
-        const stmt = statements[i];
-        const identifiers = stmt.getDescendantsOfKind(SyntaxKind.Identifier);
-        for (const identifier of identifiers) {
-          if (identifier.getText() === varName) {
-            result.usedInRenderLogic = true;
-            break;
-          }
-        }
-        if (result.usedInRenderLogic) break;
-      }
-    }
-    
-    // Event handler에서 사용되는지 확인
-    const jsxAttributes = sourceFile.getDescendantsOfKind(SyntaxKind.JsxAttribute);
-    for (const attr of jsxAttributes) {
-      const nameNode = attr.getNameNode();
-      const attrName = nameNode ? nameNode.getText() : '';
-      const attrValue = attr.getInitializer();
-      if (attrValue && attrValue.getText().includes(varName)) {
-        if (/^(on[A-Z]|onSubmit|onClick|onChange|onFocus|onBlur)/.test(attrName)) {
-          result.usedInEventHandler = true;
-          break;
-        }
-      }
-    }
-    
-    if (result.usedAsUseStateInitializer || result.usedInJSX || result.usedInRenderLogic || result.usedInEventHandler) {
-      break;
-    }
-  }
-  
-  return result;
-}
-
-/**
- * Semantic React Migration 수행
- * useState 초기화자로 사용되는 변수를 컴포넌트 내부로 마이그레이션
- */
-function performSemanticReactMigration(sourceFile, varName, initializerText, useStateInfo, topLevelVarStatement) {
-  try {
-    const { func, useStateStmt, useStateIndex, stateVarName, declaration, initializer, useStateArg, setterName } = useStateInfo;
-    const body = func.getBody();
-    
-    if (!body || body.getKind() !== SyntaxKind.Block) {
-      return { success: false, reason: 'Invalid function body' };
-    }
-    
-    // setter 이름 검증
-    if (!setterName || !/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(setterName)) {
-      return { success: false, reason: 'Invalid setter name' };
-    }
-    
-    // useState 인자를 결정론적 기본값으로 교체
-    const argText = useStateArg.getText();
-    let newArgText = argText;
-    
-    // localStorage/sessionStorage 읽기인 경우 빈 문자열 사용
-    if (/(localStorage|sessionStorage)\.getItem/.test(initializerText)) {
-      // 정확히 변수명과 일치하거나 변수명이 포함된 경우
-      const varRegex = new RegExp(`\\b${varName}\\b`);
-      if (argText === varName) {
-        newArgText = '""';
-      } else if (varRegex.test(argText)) {
-        // lastEmail || '' 같은 패턴 처리
-        newArgText = argText.replace(
-          new RegExp(`\\b${varName}(\\s*\\|\\|\\s*['"][^'"]*['"])?`, 'g'),
-          '""'
-        );
-      }
-    } else {
-      // 다른 브라우저 API의 경우 타입에 맞는 기본값 사용
-      const type = inferTypeFromExpression(initializerText);
-      const defaultValue = getDefaultValue(type);
-      const varRegex = new RegExp(`\\b${varName}\\b`);
-      if (argText === varName) {
-        newArgText = defaultValue;
-      } else if (varRegex.test(argText)) {
-        newArgText = argText.replace(
-          new RegExp(`\\b${varName}(\\s*\\|\\|\\s*[^,}]+)?`, 'g'),
-          defaultValue
-        );
-      }
-    }
-    
-    useStateArg.replaceWithText(newArgText);
-    
-    // useEffect 추가하여 브라우저 API 읽기
-    const useEffectCode = `useEffect(() => {\n  ${setterName}(${initializerText});\n}, []);`;
-    
-    body.insertStatements(useStateIndex + 1, writer => {
-      writer.writeLine(useEffectCode);
-    });
-    
-    addReactHookImports(sourceFile, ['useState', 'useEffect']);
-    
-    // 원래 최상단 선언 제거 (마이그레이션 후)
-    topLevelVarStatement.remove();
-    
-    return { success: true };
-  } catch (error) {
-    return { success: false, reason: error.message };
-  }
-}
-
-/**
- * 파일 찾기 (재귀)
- */
-function findFiles(dir, pattern, excludePatterns = []) {
+const BROWSER_GLOBALS = ['window', 'document', 'localStorage', 'sessionStorage', 'navigator'];
+
+// ---------------------------------------------------------------------------
+// 1) 대상 파일 수집
+// ---------------------------------------------------------------------------
+async function findTsFiles(dir) {
   const files = [];
-  
-  if (!fs.existsSync(dir)) {
-    return files;
-  }
+  if (!fs.existsSync(dir)) return files;
 
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-  
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    
-    if (entry.name === 'node_modules' || 
-        entry.name === '.next' || 
-        entry.name === 'dist' ||
-        entry.name === 'build') {
-      continue;
-    }
-    
-    if (entry.isDirectory()) {
-      files.push(...findFiles(fullPath, pattern, excludePatterns));
-    } else if (entry.isFile()) {
-      if (pattern.test(entry.name)) {
-        const shouldExclude = excludePatterns.some(excludePattern => {
-          if (typeof excludePattern === 'string') {
-            return entry.name.endsWith(excludePattern);
-          }
-          return excludePattern.test(entry.name);
-        });
-        
-        if (!shouldExclude) {
-          files.push(fullPath);
-        }
-      }
+  const items = await fs.readdir(dir, { withFileTypes: true });
+  for (const item of items) {
+    const fullPath = path.join(dir, item.name);
+    if (item.isDirectory()) {
+      if (item.name.startsWith('.') || item.name === 'node_modules') continue;
+      files.push(...(await findTsFiles(fullPath)));
+    } else if (/\.(ts|tsx|js|jsx)$/.test(item.name)) {
+      files.push(fullPath);
     }
   }
-  
   return files;
 }
 
-/**
- * 표현식에서 타입 추론
- */
-function inferTypeFromExpression(expr) {
-  const exprStr = String(expr);
-  
-  // 숫자 타입
-  if (/\d+/.test(exprStr) || 
-      exprStr.includes('innerWidth') || 
-      exprStr.includes('innerHeight') || 
-      exprStr.includes('outerWidth') || 
-      exprStr.includes('outerHeight') || 
-      exprStr.includes('scrollY') ||
-      exprStr.includes('scrollX')) {
-    return 'number';
-  }
-  
-  // 불린 타입 (비교 연산자 포함)
-  if (exprStr.includes('<') || exprStr.includes('>') || exprStr.includes('===') || 
-      exprStr.includes('!==') || exprStr.includes('&&') || exprStr.includes('||')) {
-    if (/window\.(innerWidth|innerHeight|outerWidth|outerHeight)/.test(exprStr) && 
-        (exprStr.includes('<') || exprStr.includes('>'))) {
-      return 'boolean';
+// ---------------------------------------------------------------------------
+// 2) 모듈 최상단 라인 인덱스 (함수/클래스 선언 전까지)
+// ---------------------------------------------------------------------------
+function getTopLevelLineIndices(content) {
+  const lines = content.split('\n');
+  const indices = [];
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed) {
+      indices.push(i);
+      continue;
     }
+    // import / 'use client' / 주석 → 최상단
+    if (/^(\/\/|\/\*|\*|'use strict'|"use client"|'use client')/.test(trimmed)) {
+      indices.push(i);
+      continue;
+    }
+    if (/^\s*import\s+/.test(lines[i])) {
+      indices.push(i);
+      continue;
+    }
+    // export const/let/var (모듈 최상단 변수) → 최상단
+    if (/^export\s+(const|let|var)\s+\w+/.test(trimmed) || /^(const|let|var)\s+\w+/.test(trimmed)) {
+      indices.push(i);
+      continue;
+    }
+    // 함수/클래스 선언 시작이면 여기서부터는 최상단 아님
+    if (/^(export\s+)?(default\s+)?(function|class|async\s+function)\s/.test(trimmed)) break;
+    if (/^(export\s+)?(default\s+)?\w+.*=\s*(\([^)]*\)\s*=>|async\s*\([^)]*\)\s*=>)/.test(trimmed)) break;
+    indices.push(i);
   }
-  
-  // 스토리지 타입
-  if (exprStr.includes('getItem') || exprStr.includes('setItem') || 
-      exprStr.includes('localStorage') || exprStr.includes('sessionStorage')) {
-    return 'storage';
-  }
-  
-  // DOM 요소 타입
-  if (exprStr.includes('querySelector') || exprStr.includes('getElementById') || 
-      exprStr.includes('getElementsBy')) {
-    return 'element';
-  }
-  
-  // 객체 타입
-  if (exprStr.includes('|| null') || exprStr.includes('|| undefined') ||
-      exprStr.includes('window.Swiper') || exprStr.includes('window.Chart') ||
-      exprStr.includes('window.Map') || exprStr.includes('window.Editor')) {
-    return 'null';
-  }
-  
-  // 불린 타입 (명시적)
-  if (exprStr.includes('true') || exprStr.includes('false')) {
-    return 'boolean';
-  }
-  
-  return 'string';
+  return indices;
 }
 
-/**
- * 타입에 따른 기본값 반환
- */
-function getDefaultValue(type) {
-  switch (type) {
-    case 'number':
-      return '0';
-    case 'storage':
-      return 'null';
-    case 'element':
-      return 'null';
-    case 'null':
-      return 'null';
-    case 'boolean':
-      return 'false';
-    case 'object':
-      return 'null';
-    case 'string':
-    default:
-      return '""';
-  }
-}
+// ---------------------------------------------------------------------------
+// 3) 최상단 브라우저 글로벌 접근 탐지
+// ---------------------------------------------------------------------------
+function analyzeTopLevelBrowserAccess(content, filePath) {
+  const issues = [];
+  const lines = content.split('\n');
+  const topLevel = new Set(getTopLevelLineIndices(content));
+  const fileName = path.basename(filePath);
 
-/**
- * JSX에서 변수 사용 여부 확인
- */
-function findJsxUsage(sourceFile, varName) {
-  const jsxElements = sourceFile.getDescendantsOfKind(SyntaxKind.JsxElement);
-  const jsxExpressions = sourceFile.getDescendantsOfKind(SyntaxKind.JsxExpression);
-  const jsxAttributes = sourceFile.getDescendantsOfKind(SyntaxKind.JsxAttribute);
-  
-  const allJsx = [...jsxElements, ...jsxExpressions, ...jsxAttributes];
-  
-  return allJsx.some(jsx => {
-    const text = jsx.getText();
-    return new RegExp(`\\b${varName}\\b`).test(text);
-  });
-}
+  for (let i = 0; i < lines.length; i++) {
+    if (!topLevel.has(i)) continue;
+    const line = lines[i];
 
-/**
- * React Hook import 추가 (중복 방지)
- */
-function addReactHookImports(sourceFile, hooks) {
-  const reactImport = sourceFile.getImportDeclaration(
-    decl => decl.getModuleSpecifierValue() === 'react'
-  );
-
-  if (reactImport) {
-    const namedImports = reactImport.getNamedImports();
-    const existingHooks = namedImports.map(n => n.getName());
-    
-    for (const hook of hooks) {
-      if (!existingHooks.includes(hook)) {
-        reactImport.addNamedImport(hook);
+    for (const g of BROWSER_GLOBALS) {
+      const re = new RegExp(`\\b${g}\\.`, 'g');
+      if (re.test(line)) {
+        issues.push({
+          type: 'top_level_browser_global',
+          global: g,
+          lineIndex: i,
+          line,
+          filePath,
+          fileName,
+        });
+        break;
       }
     }
-  } else {
-    sourceFile.addImportDeclaration({
-      namedImports: hooks,
-      moduleSpecifier: 'react',
-    });
+
+    if (/createRoot\s*\(\s*document\.getElementById/.test(line) && /main\.(tsx|jsx)$/.test(fileName)) {
+      issues.push({ type: 'create_root_document', lineIndex: i, line, filePath, fileName });
+    }
   }
+  return issues;
 }
 
-// ============================================================================
-// 메인 실행 함수
-// ============================================================================
+// ---------------------------------------------------------------------------
+// 4) 단순 읽기 한 줄 변환: const x = window.xxx → typeof guard ? xxx : default
+// ---------------------------------------------------------------------------
+function transformOneLineBrowserRead(line, globalName) {
+  const guard =
+    globalName === 'document'
+      ? "typeof document !== 'undefined'"
+      : "typeof window !== 'undefined'";
+  const defaultVal =
+    globalName === 'localStorage' || globalName === 'sessionStorage' ? "''" : '0';
 
-/**
- * 브라우저 전용 API 최상단 접근 제어 실행
- * @param {string} projectRoot - 프로젝트 루트 경로
- */
+  const match = line.match(/^(\s*)((?:export\s+)?)(const|let|var)\s+(\w+)\s*=\s*(.+?)\s*;?\s*$/);
+  if (!match) return line;
+  const [, indent, exportPrefix, keyword, name, expr] = match;
+  if (!new RegExp(`\\b${globalName}\\.`).test(expr)) return line;
+  const newExpr = `${guard} ? (${expr.replace(/;\s*$/, '').trim()}) : ${defaultVal}`;
+  return `${indent}${exportPrefix}${keyword} ${name} = ${newExpr};`;
+}
+
+// ---------------------------------------------------------------------------
+// 5) 상수 파일: SCREEN_WIDTH = window.innerWidth → IS_BROWSER ? ... : 0
+// ---------------------------------------------------------------------------
+function transformConstantsFile(content) {
+  let next = content;
+  const hasIsBrowser =
+    /IS_BROWSER\s*=\s*typeof\s+window/.test(next) || /export\s+const\s+IS_BROWSER/.test(next);
+  const guard = hasIsBrowser ? 'IS_BROWSER' : "typeof window !== 'undefined'";
+
+  next = next.replace(
+    /(\b)(window\.innerWidth|window\.innerHeight)(\s*\|\|\s*0)?/g,
+    (_, before, expr) => `${before}${guard} ? ${expr} : 0`
+  );
+  return next;
+}
+
+// ---------------------------------------------------------------------------
+// 6) main.tsx / main.jsx: createRoot(document.getElementById...) 래핑
+// ---------------------------------------------------------------------------
+function transformCreateRoot(content) {
+  if (/if\s*\(\s*typeof\s+window\s*!==\s*['"]undefined['"]\s*\)\s*\{[\s\S]*createRoot/.test(content))
+    return content;
+
+  const lines = content.split('\n');
+  let start = -1;
+  let end = -1;
+  let parenDepth = 0;
+  let renderCall = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/document\.getElementById\s*\([\s\S]*\)\s*!?;?/.test(line) && start === -1) {
+      start = i;
+    }
+    if (start === -1) continue;
+    if (/createRoot\s*\(/.test(line)) renderCall = true;
+    if (renderCall && /\.render\s*\(/.test(line)) {
+      end = i;
+      parenDepth = (line.match(/\(/g) || []).length - (line.match(/\)/g) || []).length;
+      for (let j = i + 1; j < lines.length; j++) {
+        const l = lines[j];
+        parenDepth += (l.match(/\(/g) || []).length - (l.match(/\)/g) || []).length;
+        if (parenDepth <= 0 && /\)\s*;?\s*$/.test(l)) {
+          end = j;
+          break;
+        }
+      }
+      break;
+    }
+  }
+
+  if (start < 0 || end < 0) return content;
+
+  const indent = lines[start].match(/^(\s*)/)[1];
+  const rootLine = lines[start];
+  const rootIdMatch = rootLine.match(/getElementById\s*\(\s*['"]([^'"]+)['"]\s*\)/);
+  const rootId = rootIdMatch ? rootIdMatch[1] : 'root';
+
+  const blockLines = lines.slice(start, end + 1);
+  const innerLines = blockLines.slice(1).map((l) => indent + '    ' + l.trimStart());
+  const innerContent = innerLines
+    .join('\n')
+    .replace(/createRoot\s*\(\s*\w+\s*\)/, 'createRoot(rootElement)');
+
+  const newBlock =
+    `${indent}if (typeof window !== 'undefined') {\n` +
+    `${indent}  const rootElement = document.getElementById('${rootId}');\n` +
+    `${indent}  if (rootElement) {\n` +
+    innerContent +
+    `\n${indent}  }\n` +
+    `${indent}}`;
+
+  const before = lines.slice(0, start).join('\n');
+  const after = lines.slice(end + 1).join('\n');
+  return before + '\n' + newBlock + (after ? '\n' + after : '');
+}
+
+// ---------------------------------------------------------------------------
+// 7) 파일별 변환 적용
+// ---------------------------------------------------------------------------
+function applyTransformations(content, issues, filePath) {
+  let next = content;
+  const fileName = path.basename(filePath);
+  const lines = next.split('\n');
+
+  const globalByLine = new Map();
+  for (const issue of issues) {
+    if (issue.type === 'top_level_browser_global') {
+      const idx = issue.lineIndex;
+      if (!globalByLine.has(idx)) globalByLine.set(idx, issue.global);
+    }
+  }
+
+  for (const [lineIndex, globalName] of globalByLine) {
+    lines[lineIndex] = transformOneLineBrowserRead(lines[lineIndex], globalName);
+  }
+  next = lines.join('\n');
+
+  if (fileName === 'constants.ts' || fileName === 'constants.js') {
+    next = transformConstantsFile(next);
+  }
+  if (fileName === 'main.tsx' || fileName === 'main.jsx') {
+    next = transformCreateRoot(next);
+  }
+  return next;
+}
+
+// ---------------------------------------------------------------------------
+// 8) 메인: migrateBrowserAPIs(projectRoot)
+// ---------------------------------------------------------------------------
 async function migrateBrowserAPIs(projectRoot) {
-  console.log('🌐 브라우저 전용 API 최상단 접근 제어 시작...');
+  const srcDir = path.join(projectRoot, 'src');
+  if (!fs.existsSync(srcDir)) {
+    return { totalFiles: 0, processedFiles: [], reported: [] };
+  }
 
-  // Case 1: Variable Declaration (.ts, .tsx)
-  handleVariableDeclaration(projectRoot);
+  const files = await findTsFiles(srcDir);
+  const processedFiles = [];
+  const reported = [];
 
-  // Case 2: Side Effect Logic (.ts)
-  handleSideEffectLogic(projectRoot);
+  for (const filePath of files) {
+    const content = await fs.readFile(filePath, 'utf-8');
+    const issues = analyzeTopLevelBrowserAccess(content, filePath);
+    if (issues.length === 0) continue;
 
-  // Case 3: Rendering Value (.tsx) - Hydration-safe
-  handleRenderingValue(projectRoot);
+    reported.push({ filePath: path.relative(projectRoot, filePath), issues });
+    const newContent = applyTransformations(content, issues, filePath);
+    if (newContent !== content) {
+      await fs.writeFile(filePath, newContent, 'utf-8');
+      processedFiles.push(path.relative(projectRoot, filePath));
+    }
+  }
 
-  // Case 4: DOM/Event Handler (.tsx)
-  handleDOMEventHandler(projectRoot);
-
-  // Case 5: Void/Reference
-  handleVoidReference(projectRoot);
-
-  // Case 6: Lib Initialization - Dynamic Import
-  handleLibInitialization(projectRoot);
-
-  console.log('✅ 브라우저 전용 API 최상단 접근 제어 완료!');
+  return { totalFiles: files.length, processedFiles, reported };
 }
 
 module.exports = {
-  handleVariableDeclaration,
-  handleSideEffectLogic,
-  handleRenderingValue,
-  handleDOMEventHandler,
-  handleVoidReference,
-  handleLibInitialization,
   migrateBrowserAPIs,
+  analyzeTopLevelBrowserAccess,
+  getTopLevelLineIndices,
 };
