@@ -1066,7 +1066,492 @@ export default nextConfig;
 }
 
 // =================================================================================================
-// 4. TypeScript 설정 정리 (cwd 인자 추가)
+// 4. Vite define 처리 (cwd 인자 추가)
+// =================================================================================================
+async function migrateViteDefine(cwd) {
+  // vite.config.ts 파일 읽기
+  const viteConfigPath = path.join(cwd, 'vite.config.ts');
+  if (!fs.existsSync(viteConfigPath)) {
+    return; // 파일이 없으면 종료
+  }
+
+  const viteConfigContent = await fs.readFile(viteConfigPath, 'utf-8');
+  // Case a: vite.config.ts에 define이 존재하지 않음
+  // define 객체 추출 시도 (중괄호 매칭으로 정확히 추출)
+  const defineStartMatch = viteConfigContent.match(/define\s*:\s*\{/);
+  if (!defineStartMatch) {
+    // define이 없으면 모든 파일에서 import.meta.env.VITE_* 패턴을 찾아서 변환
+    await migrateImportMetaEnvInAllFiles(cwd);
+    return;
+  }
+
+  const defineStartIndex = defineStartMatch.index + defineStartMatch[0].length;
+  let braceCount = 1;
+  let defineEndIndex = defineStartIndex;
+
+  for (let i = defineStartIndex; i < viteConfigContent.length && braceCount > 0; i++) {
+    if (viteConfigContent[i] === '{') braceCount++;
+    if (viteConfigContent[i] === '}') braceCount--;
+    if (braceCount === 0) {
+      defineEndIndex = i;
+      break;
+    }
+  }
+
+  if (braceCount !== 0) {
+    // 중괄호 매칭 실패
+    return;
+  }
+
+  const defineContent = viteConfigContent.substring(defineStartIndex, defineEndIndex);
+
+  // Case b: define.global = "window" 만 존재 (또는 포함)
+  const globalWindowMatch = defineContent.match(/global\s*:\s*["']window["']/);
+  if (globalWindowMatch) {
+    console.log(chalk.yellow('\n⚠️  define에 global: "window" 설정이 발견되었습니다.'));
+    console.log(chalk.yellow('   Next 환경에서 자동 치환 시 서버 런타임 오류가 발생할 수 있으므로 수동 확인이 필요합니다.'));
+    // 자동 변환하지 않고 경고만 출력
+  }
+
+  // Case c: define에 빌드 타임 상수 키가 존재 (___XXX___ 형태)
+  await migrateBuildTimeConstants(cwd, defineContent, viteConfigContent);
+
+  // Case d: define이 process.env.*를 하드 코딩 치환하는 형태
+  await migrateProcessEnvInDefine(cwd, defineContent);
+
+  // Case e: define 값이 복잡한 표현식/객체/함수/참조 포함
+  await handleComplexDefineExpressions(cwd, defineContent);
+
+  // Case f: define에 import.meta.env.* 직접 치환이 들어있는 경우
+  await migrateImportMetaEnvInDefine(cwd, defineContent);
+}
+
+// Case c: 빌드 타임 상수 마이그레이션
+async function migrateBuildTimeConstants(cwd, defineContent, viteConfigContent) {
+  // 1. define 객체의 각 키를 순회
+  const constantKeys = [];
+  const keyValuePattern = /["']?([^"':\s]+)["']?\s*:\s*([^,}]+)/g;
+  let match;
+
+  while ((match = keyValuePattern.exec(defineContent)) !== null) {
+    const key = match[1].trim();
+    const value = match[2].trim();
+
+    // 2. 키가 문자열 리터럴이 아니고 정규식에 매칭되면 상수 키로 분류
+    const constantKeyPattern = /^_[A-Z0-9_]+_$/;
+    if (constantKeyPattern.test(key)) {
+      // 3. 값 표현식이 다음 중 하나인지 확인
+      // JSON.stringify("...") 형태의 문자열 상수
+      // JSON.stringify(숫자 리터럴) 형태
+      // "..." 문자열 리터럴 자체
+      // 숫자 리터럴 자체
+      const isStringifyString = /JSON\.stringify\s*\(\s*["']([^"']+)["']\s*\)/.test(value);
+      const isStringifyNumber = /JSON\.stringify\s*\(\s*(\d+(?:\.\d+)?)\s*\)/.test(value);
+      const isStringLiteral = /^["']([^"']+)["']$/.test(value);
+      const isNumberLiteral = /^\d+(?:\.\d+)?$/.test(value);
+
+      if (isStringifyString || isStringifyNumber || isStringLiteral || isNumberLiteral) {
+        let constantValue;
+        if (isStringifyString) {
+          const strMatch = value.match(/JSON\.stringify\s*\(\s*["']([^"']+)["']\s*\)/);
+          constantValue = { type: 'string', value: strMatch[1] };
+        } else if (isStringifyNumber) {
+          const numMatch = value.match(/JSON\.stringify\s*\(\s*(\d+(?:\.\d+)?)\s*\)/);
+          constantValue = { type: 'number', value: parseFloat(numMatch[1]) };
+        } else if (isStringLiteral) {
+          const strMatch = value.match(/^["']([^"']+)["']$/);
+          constantValue = { type: 'string', value: strMatch[1] };
+        } else if (isNumberLiteral) {
+          constantValue = { type: 'number', value: parseFloat(value) };
+        }
+
+        constantKeys.push({
+          originalKey: key,
+          constantName: key.replace(/^_|_$/g, ''), // 양쪽 _ 제거
+          value: constantValue
+        });
+      }
+    }
+  }
+
+  if (constantKeys.length === 0) {
+    return; // 빌드 타임 상수가 없으면 종료
+  }
+
+  // 4. src/constants/build.ts 파일 생성
+  const constantsDir = path.join(cwd, 'src', 'constants');
+  const buildTsPath = path.join(constantsDir, 'build.ts');
+  await fs.ensureDir(constantsDir);
+
+  // 5. 각 상수 키에 대해 export 상수 생성
+  const constantsContent = constantKeys.map(constant => {
+    const valueStr = constant.value.type === 'string'
+      ? `"${constant.value.value}"`
+      : constant.value.value.toString();
+    return `export const ${constant.constantName} = ${valueStr};`;
+  }).join('\n');
+
+  await fs.writeFile(buildTsPath, constantsContent + '\n', 'utf-8');
+
+  // 6. 프로젝트 전체 .ts, .tsx에서 해당 define 키 식별자 사용 검색
+  const srcDir = path.join(cwd, 'src');
+  if (!fs.existsSync(srcDir)) {
+    return;
+  }
+
+  // tsconfig.json에서 paths 확인 (alias 경로 확인용)
+  const tsConfigPath = path.join(cwd, 'tsconfig.json');
+  let hasPathAlias = false;
+  let aliasPrefix = '@/';
+  if (fs.existsSync(tsConfigPath)) {
+    try {
+      const tsConfig = await readJsonSafe(tsConfigPath);
+      if (tsConfig?.compilerOptions?.paths) {
+        const paths = tsConfig.compilerOptions.paths;
+        const aliasKey = Object.keys(paths).find(key => key.startsWith('@/'));
+        if (aliasKey) {
+          hasPathAlias = true;
+          aliasPrefix = aliasKey;
+        }
+      }
+    } catch (e) {
+      // 무시
+    }
+  }
+
+  // 7. 파일에서 사용하는 define 키 치환
+  async function findTsFiles(dir) {
+    const files = [];
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory() && !['node_modules', '.next', '.git'].includes(entry.name)) {
+        files.push(...await findTsFiles(fullPath));
+      } else if (/\.(ts|tsx)$/.test(entry.name)) {
+        files.push(fullPath);
+      }
+    }
+    return files;
+  }
+
+  const tsFiles = await findTsFiles(srcDir);
+  const importPath = hasPathAlias ? `${aliasPrefix}constants/build` : '../constants/build';
+
+  for (const filePath of tsFiles) {
+    let content = await fs.readFile(filePath, 'utf-8');
+    let modified = false;
+    const importsToAdd = new Set();
+
+    for (const constant of constantKeys) {
+      // _APP_VERSION_ 같은 식별자를 APP_VERSION으로 치환
+      const regex = new RegExp(`\\b${constant.originalKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+      if (regex.test(content)) {
+        content = content.replace(regex, constant.constantName);
+        importsToAdd.add(constant.constantName);
+        modified = true;
+      }
+    }
+
+    if (modified) {
+      // 파일 상단에 import 추가
+      const importStatement = `import { ${Array.from(importsToAdd).join(', ')} } from "${importPath}";\n`;
+      
+      // 이미 import가 있는지 확인
+      if (!content.includes(`from "${importPath}"`) && !content.includes(`from '${importPath}'`)) {
+        // 첫 번째 import 문 다음에 추가
+        const firstImportMatch = content.match(/^import\s+.*?from\s+["'][^"']+["'];?\s*\n/m);
+        if (firstImportMatch) {
+          content = content.replace(
+            /^import\s+.*?from\s+["'][^"']+["'];?\s*\n/m,
+            match => match + importStatement
+          );
+        } else {
+          // import가 없으면 파일 맨 위에 추가
+          content = importStatement + content;
+        }
+      }
+
+      await fs.writeFile(filePath, content, 'utf-8');
+    }
+  }
+}
+
+// Case d: process.env.* 하드 코딩 치환 처리
+async function migrateProcessEnvInDefine(cwd, defineContent) {
+  // 1. define 객체의 키 중 문자열 리터럴로 작성된 키 찾기
+  const processEnvPattern = /["'](process\.env\.[A-Z_][A-Z0-9_]*)["']\s*:\s*([^,}]+)/g;
+  const matches = [];
+  let match;
+
+  while ((match = processEnvPattern.exec(defineContent)) !== null) {
+    const key = match[1]; // process.env.API_URL
+    const value = match[2].trim();
+
+    // 2. 키가 정확히 process.env. 접두사로 시작하는지 확인 (이미 확인됨)
+    // 3. 접두사 제거 후 나머지 환경변수명을 <ENV_NAME>으로 정의
+    const envName = key.replace(/^process\.env\./, '');
+
+    // 4. 값이 다음 형태인지 확인
+    const isStringifyString = /JSON\.stringify\s*\(\s*["']([^"']+)["']\s*\)/.test(value);
+    const isStringifyNumber = /JSON\.stringify\s*\(\s*(\d+(?:\.\d+)?)\s*\)/.test(value);
+    const isStringLiteral = /^["']([^"']+)["']$/.test(value);
+    const isNumberLiteral = /^\d+(?:\.\d+)?$/.test(value);
+
+    if (isStringifyString || isStringifyNumber || isStringLiteral || isNumberLiteral) {
+      // 5. 위 조건을 만족하면 코드 내 참조만 Next 표준으로 치환
+      // 단, NODE_ENV인 경우 자동 치환하지 않음
+      if (envName === 'NODE_ENV') {
+        console.log(chalk.yellow('\n⚠️  define에서 process.env.NODE_ENV 치환이 발견되었습니다.'));
+        console.log(chalk.yellow('   Next에서는 NODE_ENV가 빌드 시스템에 의해 자동 관리되므로 자동 변환하지 않습니다. 수동 확인이 필요합니다.'));
+        continue;
+      }
+
+      matches.push({
+        originalKey: key,
+        envName: envName,
+        nextPublicName: `NEXT_PUBLIC_${envName}`
+      });
+    }
+  }
+
+  if (matches.length === 0) {
+    return;
+  }
+
+  // 5.1. 프로젝트 전체 .ts, .tsx에서 process.env.<ENV_NAME> 검색
+  const srcDir = path.join(cwd, 'src');
+  if (!fs.existsSync(srcDir)) {
+    return;
+  }
+
+  async function findTsFiles(dir) {
+    const files = [];
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory() && !['node_modules', '.next', '.git'].includes(entry.name)) {
+        files.push(...await findTsFiles(fullPath));
+      } else if (/\.(ts|tsx)$/.test(entry.name)) {
+        files.push(fullPath);
+      }
+    }
+    return files;
+  }
+
+  const tsFiles = await findTsFiles(srcDir);
+
+  for (const filePath of tsFiles) {
+    let content = await fs.readFile(filePath, 'utf-8');
+    let modified = false;
+
+    for (const match of matches) {
+      // 5.2. process.env.<ENV_NAME>을 process.env.NEXT_PUBLIC_<ENV_NAME>으로 치환
+      const regex = new RegExp(`process\\.env\\.${match.envName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+      if (regex.test(content)) {
+        content = content.replace(regex, `process.env.${match.nextPublicName}`);
+        modified = true;
+      }
+    }
+
+    if (modified) {
+      await fs.writeFile(filePath, content, 'utf-8');
+    }
+  }
+
+  // 6. 터미널에 메시지 기록
+  for (const match of matches) {
+    console.log(chalk.cyan(`\n💡 ${match.nextPublicName} 값을 환경변수로 제공해야 함`));
+  }
+}
+
+// Case e: 복잡한 표현식 처리
+async function handleComplexDefineExpressions(cwd, defineContent) {
+  // 1. define 객체의 각 항목에 대해 값이 복잡 표현식인지 확인
+  const complexItems = [];
+  const keyValuePattern = /["']?([^"':\s]+)["']?\s*:\s*([^,}]+)/g;
+  let match;
+
+  while ((match = keyValuePattern.exec(defineContent)) !== null) {
+    const key = match[1].trim();
+    const value = match[2].trim();
+
+    // 복잡 표현식 확인:
+    // - 식별자 참조 (mode, import.meta, process)
+    // - 함수 호출 (loadConfig(), getValue())
+    // - 객체 리터럴 ({a:1})
+    // - 삼항 연산자/논리 연산자 (a?b:c, a && b)
+    const hasIdentifierRef = /\b(mode|import\.meta|process)\b/.test(value);
+    const hasFunctionCall = /\w+\s*\([^)]*\)/.test(value);
+    const hasObjectLiteral = /\{[^}]*\}/.test(value);
+    const hasTernaryOrLogical = /[?&|]/.test(value);
+
+    if (hasIdentifierRef || hasFunctionCall || hasObjectLiteral || hasTernaryOrLogical) {
+      complexItems.push({
+        key: key,
+        value: value
+      });
+    }
+  }
+
+  if (complexItems.length === 0) {
+    return;
+  }
+
+  // 2. 복잡 표현식 항목은 자동 이관하지 않음
+  // 3. 터미널에 정보 기록
+  console.log(chalk.yellow('\n⚠️  복잡한 define 표현식이 발견되었습니다.'));
+  console.log(chalk.yellow('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+
+  for (const item of complexItems) {
+    console.log(chalk.yellow(`\n  define 키: ${item.key}`));
+    console.log(chalk.yellow(`  원본 값 표현식: ${item.value}`));
+  }
+
+  console.log(chalk.cyan('\n📋 추천 대안 중 하나를 선택하세요:'));
+  console.log(chalk.gray('  1. 런타임 환경변수로 이동 (Next Public/Server 구분 필요)'));
+  console.log(chalk.gray('  2. src/config/*.ts 상수 모듈로 이동 (빌드 시 고정값이면)'));
+  console.log(chalk.gray('  3. 서버에서만 필요한 값이면 Server Component/Route Handler에서 계산하도록 이동'));
+  console.log(chalk.yellow('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'));
+}
+
+// Case a-1: define이 없을 때 모든 파일에서 import.meta.env.VITE_* 변환
+async function migrateImportMetaEnvInAllFiles(cwd) {
+  // 2.1. 프로젝트 루트 기준으로 src/ 디렉터리 하위의 .ts, .tsx 파일을 대상으로 검사
+  const srcDir = path.join(cwd, 'src');
+  if (!fs.existsSync(srcDir)) {
+    return;
+  }
+
+  async function findTsFiles(dir) {
+    const files = [];
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory() && !['node_modules', '.next', '.git'].includes(entry.name)) {
+        files.push(...await findTsFiles(fullPath));
+      } else if (/\.(ts|tsx)$/.test(entry.name)) {
+        files.push(fullPath);
+      }
+    }
+    return files;
+  }
+
+  const tsFiles = await findTsFiles(srcDir);
+  let processedCount = 0;
+
+  // 2.2. 각 파일에서 import.meta.env.VITE_ 패턴 찾아서 치환
+  for (const filePath of tsFiles) {
+    let content = await fs.readFile(filePath, 'utf-8');
+    
+    // import.meta.env.VITE_ 패턴이 있는지 확인
+    if (!content.includes('import.meta.env.VITE_')) {
+      continue;
+    }
+
+    // 2.3. import.meta.env.VITE_<NAME> 형태를 찾아서 process.env.NEXT_PUBLIC_<NAME>으로 치환
+    // 2.3.1. import.meta.env.VITE_<NAME> 형태를 찾는다
+    // 2.3.2. 찾은 각 항목의 <NAME> 값을 추출한다
+    // 2.3.3. 추출한 <NAME>에 대해 process.env.NEXT_PUBLIC_<NAME> 형태로 변경한다
+    const pattern = /import\.meta\.env\.VITE_([A-Za-z0-9_]+)/g;
+    const newContent = content.replace(pattern, (match, name) => {
+      return `process.env.NEXT_PUBLIC_${name}`;
+    });
+
+    // 2.4. 치환 후 파일 내에 import.meta.env.VITE_ 문자열이 남아있는지 확인
+    if (newContent !== content) {
+      if (newContent.includes('import.meta.env.VITE_')) {
+        console.warn(chalk.yellow(`⚠️  ${path.relative(cwd, filePath)}: 일부 import.meta.env.VITE_ 패턴이 남아있습니다.`));
+      }
+      await fs.writeFile(filePath, newContent, 'utf-8');
+      processedCount++;
+    }
+  }
+
+  if (processedCount > 0) {
+    console.log(chalk.cyan(`\n💡 ${processedCount}개 파일에서 import.meta.env.VITE_* 패턴을 process.env.NEXT_PUBLIC_*로 변환했습니다.`));
+  }
+}
+
+// Case f: import.meta.env.* 직접 치환 처리
+async function migrateImportMetaEnvInDefine(cwd, defineContent) {
+  // 1. define 객체의 키 중 문자열 리터럴로 작성된 키 찾기
+  const importMetaEnvPattern = /["'](import\.meta\.env\.[A-Z_][A-Z0-9_]*)["']\s*:\s*([^,}]+)/g;
+  const matches = [];
+  let match;
+
+  while ((match = importMetaEnvPattern.exec(defineContent)) !== null) {
+    const key = match[1]; // import.meta.env.VITE_API_URL
+    const value = match[2].trim();
+
+    // 2. 키가 정확히 import.meta.env. 접두사로 시작하는지 확인 (이미 확인됨)
+    // 3. 접두사 제거 후 나머지를 <VITE_NAME>으로 정의
+    const viteName = key.replace(/^import\.meta\.env\./, ''); // VITE_API_URL
+
+    // 4.1. VITE_ 접두사 제거하여 <PUBLIC_NAME> 정의
+    const publicName = viteName.replace(/^VITE_/, ''); // API_URL
+
+    // 4.2. 최종 변수명: NEXT_PUBLIC_<PUBLIC_NAME>
+    const nextPublicName = `NEXT_PUBLIC_${publicName}`; // NEXT_PUBLIC_API_URL
+
+    matches.push({
+      originalKey: key,
+      viteName: viteName,
+      nextPublicName: nextPublicName
+    });
+  }
+
+  if (matches.length === 0) {
+    return;
+  }
+
+  // 3. 프로젝트 전체 .ts, .tsx에서 import.meta.env.<VITE_NAME> 검색
+  const srcDir = path.join(cwd, 'src');
+  if (!fs.existsSync(srcDir)) {
+    return;
+  }
+
+  async function findTsFiles(dir) {
+    const files = [];
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory() && !['node_modules', '.next', '.git'].includes(entry.name)) {
+        files.push(...await findTsFiles(fullPath));
+      } else if (/\.(ts|tsx)$/.test(entry.name)) {
+        files.push(fullPath);
+      }
+    }
+    return files;
+  }
+
+  const tsFiles = await findTsFiles(srcDir);
+
+  for (const filePath of tsFiles) {
+    let content = await fs.readFile(filePath, 'utf-8');
+    let modified = false;
+
+    for (const match of matches) {
+      // 4. import.meta.env.<VITE_NAME>을 process.env.NEXT_PUBLIC_<PUBLIC_NAME>으로 치환
+      const regex = new RegExp(`import\\.meta\\.env\\.${match.viteName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+      if (regex.test(content)) {
+        content = content.replace(regex, `process.env.${match.nextPublicName}`);
+        modified = true;
+      }
+    }
+
+    if (modified) {
+      await fs.writeFile(filePath, content, 'utf-8');
+    }
+  }
+
+  // 5. 터미널에 메시지 기록 (.env는 생성하지 않음)
+  for (const match of matches) {
+    console.log(chalk.cyan(`\n💡 ${match.nextPublicName} 값을 환경변수로 제공해야 함`));
+  }
+}
+
+// =================================================================================================
+// 5. TypeScript 설정 정리 (cwd 인자 추가) - 4번에서 이동
 // =================================================================================================
 async function readJsonSafe(filePath) {
   if (!fs.existsSync(filePath)) return null;
@@ -1484,5 +1969,6 @@ module.exports = {
   updatePackageJson,
   setupConfigFiles,
   migrateViteConfig,
+  migrateViteDefine,
   updateTsConfig,
 };

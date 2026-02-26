@@ -4,6 +4,7 @@ const {
   updatePackageJson,
   setupConfigFiles,
   migrateViteConfig,
+  migrateViteDefine,
   updateTsConfig,
 } = require('./step1-env.cjs');
 const chalk = require('chalk');
@@ -29,7 +30,12 @@ async function runStep1(projectRoot) {
   await migrateViteConfig(projectRoot);
   console.log(chalk.blue.bold('--vite.config.ts 설정 마이그레이션 완료'));
 
-  // 4. TypeScript 설정 정리
+  // 4. Vite define 처리
+  console.log(chalk.blue.bold('--Vite define 처리 시작'));
+  await migrateViteDefine(projectRoot);
+  console.log(chalk.blue.bold('--Vite define 처리 완료'));
+
+  // 5. TypeScript 설정 정리
   console.log(chalk.blue.bold('--TypeScript 컴파일러 설정 정리 시작'));
   await updateTsConfig(projectRoot);
   console.log(chalk.blue.bold('--TypeScript 컴파일러 설정 정리 완료'));
