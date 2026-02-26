@@ -58,12 +58,23 @@ async function setupConfigFiles(cwd) {
 
 // Case a: Vite 관련 config 삭제 (tsconfig.node.json, vite-env.d.ts 삭제)
 // 프로젝트 루트 디렉토리에 있는 tsconfig.node.json과 vite-env.d.ts 파일을 삭제합니다.
+// vite-env.d.ts는 프로젝트 루트 또는 src/ 디렉터리에 있을 수 있습니다.
 async function removeViteConfigFiles(cwd) {
-  const filesToRemove = ['tsconfig.node.json', 'vite-env.d.ts'];
-  for (const file of filesToRemove) {
-    const filePath = path.join(cwd, file);
-    if (fs.existsSync(filePath)) {
-      await fs.remove(filePath);
+  // tsconfig.node.json은 프로젝트 루트에만 있음
+  const tsconfigNodePath = path.join(cwd, 'tsconfig.node.json');
+  if (fs.existsSync(tsconfigNodePath)) {
+    await fs.remove(tsconfigNodePath);
+  }
+
+  // vite-env.d.ts는 프로젝트 루트 또는 src/ 디렉터리에 있을 수 있음
+  const viteEnvPaths = [
+    path.join(cwd, 'vite-env.d.ts'),           // 루트
+    path.join(cwd, 'src', 'vite-env.d.ts'),   // src/
+  ];
+  
+  for (const viteEnvPath of viteEnvPaths) {
+    if (fs.existsSync(viteEnvPath)) {
+      await fs.remove(viteEnvPath);
     }
   }
 }
@@ -195,6 +206,9 @@ async function migrateViteConfig(cwd) {
 
   // Case f: SVG를 React 컴포넌트로 사용하는 경우 처리
   await migrateSvgAsReactComponent(cwd);
+
+  // Case g: Vite define 처리
+  await migrateViteDefineInternal(cwd);
 
   // Case h: vite.config.ts 파일 삭제
   // 위 case 수행 후, Vite 설정이 더 이상 필요하지 않은 상태이므로 삭제
@@ -1065,16 +1079,34 @@ export default nextConfig;
   await fs.writeFile(nextConfigPath, nextConfigContent);
 }
 
-// =================================================================================================
-// 4. Vite define 처리 (cwd 인자 추가)
-// =================================================================================================
+// Case g: Vite define 처리
+// migrateViteConfig 내부에서 호출되는 내부 함수
+async function migrateViteDefineInternal(cwd) {
+  // vite.config.ts 파일이 존재하는지 확인 (migrateViteConfig에서 이미 확인했지만 안전을 위해)
+  const viteConfigPath = path.join(cwd, 'vite.config.ts');
+  if (!fs.existsSync(viteConfigPath)) {
+    return;
+  }
+  
+  await migrateViteDefineLogic(cwd);
+}
+
+// 외부에서 호출 가능한 함수 (하위 호환성 유지)
 async function migrateViteDefine(cwd) {
   // vite.config.ts 파일 읽기
   const viteConfigPath = path.join(cwd, 'vite.config.ts');
   if (!fs.existsSync(viteConfigPath)) {
-    return; // 파일이 없으면 종료
+    // 파일이 없으면 본 모듈 수행하지 않고 다음 모듈로 넘어감
+    return;
   }
+  
+  await migrateViteDefineLogic(cwd);
+}
 
+// 실제 로직 함수
+async function migrateViteDefineLogic(cwd) {
+  // vite.config.ts 파일 읽기
+  const viteConfigPath = path.join(cwd, 'vite.config.ts');
   const viteConfigContent = await fs.readFile(viteConfigPath, 'utf-8');
   // Case a: vite.config.ts에 define이 존재하지 않음
   // define 객체 추출 시도 (중괄호 매칭으로 정확히 추출)
@@ -1419,8 +1451,11 @@ async function migrateImportMetaEnvInAllFiles(cwd) {
   // 2.1. 프로젝트 루트 기준으로 src/ 디렉터리 하위의 .ts, .tsx 파일을 대상으로 검사
   const srcDir = path.join(cwd, 'src');
   if (!fs.existsSync(srcDir)) {
+    console.log(chalk.yellow(`⚠️  src 디렉터리를 찾을 수 없습니다: ${srcDir}`));
     return;
   }
+  
+  console.log(chalk.blue('   import.meta.env.VITE_* 패턴 변환 시작...'));
 
   async function findTsFiles(dir) {
     const files = [];
@@ -1452,6 +1487,7 @@ async function migrateImportMetaEnvInAllFiles(cwd) {
     // 2.3.1. import.meta.env.VITE_<NAME> 형태를 찾는다
     // 2.3.2. 찾은 각 항목의 <NAME> 값을 추출한다
     // 2.3.3. 추출한 <NAME>에 대해 process.env.NEXT_PUBLIC_<NAME> 형태로 변경한다
+    // 패턴: import.meta.env.VITE_ 다음에 알파벳, 숫자, 언더스코어가 오는 경우
     const pattern = /import\.meta\.env\.VITE_([A-Za-z0-9_]+)/g;
     const newContent = content.replace(pattern, (match, name) => {
       return `process.env.NEXT_PUBLIC_${name}`;
@@ -1468,7 +1504,9 @@ async function migrateImportMetaEnvInAllFiles(cwd) {
   }
 
   if (processedCount > 0) {
-    console.log(chalk.cyan(`\n💡 ${processedCount}개 파일에서 import.meta.env.VITE_* 패턴을 process.env.NEXT_PUBLIC_*로 변환했습니다.`));
+    console.log(chalk.cyan(`   ✅ ${processedCount}개 파일에서 import.meta.env.VITE_* 패턴을 process.env.NEXT_PUBLIC_*로 변환했습니다.`));
+  } else {
+    console.log(chalk.gray(`   ℹ️  import.meta.env.VITE_* 패턴을 사용하는 파일이 없습니다.`));
   }
 }
 
