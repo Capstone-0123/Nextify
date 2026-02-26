@@ -49,7 +49,7 @@ async function setupConfigFiles(cwd) {
   // Case a: Vite 관련 config 삭제 (tsconfig.node.json, vite-env.d.ts 삭제)
   await removeViteConfigFiles(cwd);
 
-  // Case b: Next 관련 config 생성 (src/next.config.mjs 생성)
+  // Case b: Next 관련 config 생성 (next.config.mjs 생성)
   await createNextConfigInSrc(cwd);
 
   // Case c: .gitignore 업데이트
@@ -79,19 +79,14 @@ async function removeViteConfigFiles(cwd) {
   }
 }
 
-// Case b: Next 관련 config 생성 (src/next.config.mjs 생성)
-// 프로젝트 루트 기준으로 src/ 디렉터리 하위에 next.config.mjs 파일이 존재하지 않을 경우 생성합니다.
+// Case b: Next 관련 config 생성 (next.config.mjs 생성)
+// 프로젝트 루트에 next.config.mjs 파일이 존재하지 않을 경우 생성합니다.
 async function createNextConfigInSrc(cwd) {
-  const nextConfigPath = path.join(cwd, 'src', 'next.config.mjs');
+  const nextConfigPath = path.join(cwd, 'next.config.mjs');
   // 파일 존재 여부 확인
   if (!fs.existsSync(nextConfigPath)) {
-    // src 디렉토리가 없으면 생성
-    const srcDir = path.join(cwd, 'src');
-    if (!fs.existsSync(srcDir)) {
-      await fs.ensureDir(srcDir);
-    }
     // next.config.mjs 파일 생성
-  const nextConfigContent = `/** @type {import('next').NextConfig} */
+    const nextConfigContent = `/** @type {import('next').NextConfig} */
 const nextConfig = {};
 export default nextConfig;
 `;
@@ -281,15 +276,11 @@ async function migrateServerProxyToRewrites(cwd, viteConfigContent) {
     return; // 단순 문자열 형태의 proxy가 없으면 종료
   }
 
-  // src/next.config.mjs 파일 열기
-  const nextConfigPath = path.join(cwd, 'src', 'next.config.mjs');
+  // next.config.mjs 파일 열기
+  const nextConfigPath = path.join(cwd, 'next.config.mjs');
   
   if (!fs.existsSync(nextConfigPath)) {
     // 파일이 없으면 생성 (이미 setupConfigFiles에서 생성했지만 안전을 위해)
-    const srcDir = path.join(cwd, 'src');
-    if (!fs.existsSync(srcDir)) {
-      await fs.ensureDir(srcDir);
-    }
     const defaultContent = `/** @type {import('next').NextConfig} */
 const nextConfig = {};
 export default nextConfig;
@@ -519,14 +510,10 @@ async function migrateServerProxyObjectToRewrites(cwd, viteConfigContent) {
     return { migrated: [], skipped: [] }; // 이관 가능한 항목이 없으면 종료
   }
   
-  // 9. src/next.config.mjs 파일 열기
-  const nextConfigPath = path.join(cwd, 'src', 'next.config.mjs');
+  // 9. next.config.mjs 파일 열기
+  const nextConfigPath = path.join(cwd, 'next.config.mjs');
   
   if (!fs.existsSync(nextConfigPath)) {
-    const srcDir = path.join(cwd, 'src');
-    if (!fs.existsSync(srcDir)) {
-      await fs.ensureDir(srcDir);
-    }
     const defaultContent = `/** @type {import('next').NextConfig} */
 const nextConfig = {};
 export default nextConfig;
@@ -719,14 +706,10 @@ async function migrateBaseToNextConfig(cwd, viteConfigContent) {
     baseValue = baseValue.slice(0, -1);
   }
 
-  // 3. 프로젝트 루트 기준으로 src/next.config.mjs 파일 열기
-  const nextConfigPath = path.join(cwd, 'src', 'next.config.mjs');
+  // 3. 프로젝트 루트에 next.config.mjs 파일 열기
+  const nextConfigPath = path.join(cwd, 'next.config.mjs');
   if (!fs.existsSync(nextConfigPath)) {
     // 파일이 없으면 생성
-    const srcDir = path.join(cwd, 'src');
-    if (!fs.existsSync(srcDir)) {
-      await fs.ensureDir(srcDir);
-    }
     const defaultContent = `/** @type {import('next').NextConfig} */
 const nextConfig = {};
 export default nextConfig;
@@ -753,7 +736,7 @@ export default nextConfig;
       console.warn(chalk.gray('   - vite.config.ts의 base: Vite 프로젝트에서 사용하던 base 경로'));
       console.warn(chalk.gray('   - next.config.mjs의 basePath: Next.js 프로젝트에서 이미 설정된 경로'));
       console.warn(chalk.gray('\n2. 올바른 값을 결정한 후:'));
-      console.warn(chalk.gray('   - src/next.config.mjs 파일을 열어서 basePath 값을 수정하세요.'));
+      console.warn(chalk.gray('   - next.config.mjs 파일을 열어서 basePath 값을 수정하세요.'));
       console.warn(chalk.gray('   - 예시: basePath: "/your-correct-path"'));
       console.warn(chalk.gray('\n3. 만약 vite.config.ts의 base 값을 사용하려면:'));
       console.warn(chalk.white(`   basePath: "${baseValue}"`));
@@ -891,12 +874,8 @@ async function configureSvgForReactQuery(cwd) {
   }
 
   // 3.2. webpack 설정 추가
-  const nextConfigPath = path.join(cwd, 'src', 'next.config.mjs');
+  const nextConfigPath = path.join(cwd, 'next.config.mjs');
   if (!fs.existsSync(nextConfigPath)) {
-    const srcDir = path.join(cwd, 'src');
-    if (!fs.existsSync(srcDir)) {
-      await fs.ensureDir(srcDir);
-    }
     const defaultContent = `/** @type {import('next').NextConfig} */
 const nextConfig = {};
 export default nextConfig;
@@ -996,12 +975,8 @@ async function configureSvgWithoutReactQuery(cwd) {
   }
 
   // 4.2. webpack 설정 추가
-  const nextConfigPath = path.join(cwd, 'src', 'next.config.mjs');
+  const nextConfigPath = path.join(cwd, 'next.config.mjs');
   if (!fs.existsSync(nextConfigPath)) {
-    const srcDir = path.join(cwd, 'src');
-    if (!fs.existsSync(srcDir)) {
-      await fs.ensureDir(srcDir);
-    }
     const defaultContent = `/** @type {import('next').NextConfig} */
 const nextConfig = {};
 export default nextConfig;
