@@ -142,7 +142,7 @@ export default function RootLayout({
         ${convertedHead.trim().split('\n').join('\n        ')}
       </head>
       <body${bodyAttributes}>
-        <div id="root">{children}</div>
+        {children}
       </body>
     </html>
   );
