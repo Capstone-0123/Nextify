@@ -49,7 +49,7 @@ async function setupConfigFiles(cwd) {
   // Case a: Vite 관련 config 삭제 (tsconfig.node.json, vite-env.d.ts 삭제)
   await removeViteConfigFiles(cwd);
 
-  // Case b: Next 관련 config 생성 (src/next.config.mjs 생성)
+  // Case b: Next 관련 config 생성 (next.config.mjs 생성)
   await createNextConfigInSrc(cwd);
 
   // Case c: .gitignore 업데이트
@@ -58,29 +58,35 @@ async function setupConfigFiles(cwd) {
 
 // Case a: Vite 관련 config 삭제 (tsconfig.node.json, vite-env.d.ts 삭제)
 // 프로젝트 루트 디렉토리에 있는 tsconfig.node.json과 vite-env.d.ts 파일을 삭제합니다.
+// vite-env.d.ts는 프로젝트 루트 또는 src/ 디렉터리에 있을 수 있습니다.
 async function removeViteConfigFiles(cwd) {
-  const filesToRemove = ['tsconfig.node.json', 'vite-env.d.ts'];
-  for (const file of filesToRemove) {
-    const filePath = path.join(cwd, file);
-    if (fs.existsSync(filePath)) {
-      await fs.remove(filePath);
+  // tsconfig.node.json은 프로젝트 루트에만 있음
+  const tsconfigNodePath = path.join(cwd, 'tsconfig.node.json');
+  if (fs.existsSync(tsconfigNodePath)) {
+    await fs.remove(tsconfigNodePath);
+  }
+
+  // vite-env.d.ts는 프로젝트 루트 또는 src/ 디렉터리에 있을 수 있음
+  const viteEnvPaths = [
+    path.join(cwd, 'vite-env.d.ts'),           // 루트
+    path.join(cwd, 'src', 'vite-env.d.ts'),   // src/
+  ];
+  
+  for (const viteEnvPath of viteEnvPaths) {
+    if (fs.existsSync(viteEnvPath)) {
+      await fs.remove(viteEnvPath);
     }
   }
 }
 
-// Case b: Next 관련 config 생성 (src/next.config.mjs 생성)
-// 프로젝트 루트 기준으로 src/ 디렉터리 하위에 next.config.mjs 파일이 존재하지 않을 경우 생성합니다.
+// Case b: Next 관련 config 생성 (next.config.mjs 생성)
+// 프로젝트 루트에 next.config.mjs 파일이 존재하지 않을 경우 생성합니다.
 async function createNextConfigInSrc(cwd) {
-  const nextConfigPath = path.join(cwd, 'src', 'next.config.mjs');
+  const nextConfigPath = path.join(cwd, 'next.config.mjs');
   // 파일 존재 여부 확인
   if (!fs.existsSync(nextConfigPath)) {
-    // src 디렉토리가 없으면 생성
-    const srcDir = path.join(cwd, 'src');
-    if (!fs.existsSync(srcDir)) {
-      await fs.ensureDir(srcDir);
-    }
     // next.config.mjs 파일 생성
-  const nextConfigContent = `/** @type {import('next').NextConfig} */
+    const nextConfigContent = `/** @type {import('next').NextConfig} */
 const nextConfig = {};
 export default nextConfig;
 `;
@@ -196,6 +202,9 @@ async function migrateViteConfig(cwd) {
   // Case f: SVG를 React 컴포넌트로 사용하는 경우 처리
   await migrateSvgAsReactComponent(cwd);
 
+  // Case g: Vite define 처리
+  await migrateViteDefineInternal(cwd);
+
   // Case h: vite.config.ts 파일 삭제
   // 위 case 수행 후, Vite 설정이 더 이상 필요하지 않은 상태이므로 삭제
   // basePath 충돌이 발생했거나 proxy 수동 처리가 필요한 경우, 사용자가 계속 진행하기로 한 경우에만 삭제
@@ -267,15 +276,11 @@ async function migrateServerProxyToRewrites(cwd, viteConfigContent) {
     return; // 단순 문자열 형태의 proxy가 없으면 종료
   }
 
-  // src/next.config.mjs 파일 열기
-  const nextConfigPath = path.join(cwd, 'src', 'next.config.mjs');
+  // next.config.mjs 파일 열기
+  const nextConfigPath = path.join(cwd, 'next.config.mjs');
   
   if (!fs.existsSync(nextConfigPath)) {
     // 파일이 없으면 생성 (이미 setupConfigFiles에서 생성했지만 안전을 위해)
-    const srcDir = path.join(cwd, 'src');
-    if (!fs.existsSync(srcDir)) {
-      await fs.ensureDir(srcDir);
-    }
     const defaultContent = `/** @type {import('next').NextConfig} */
 const nextConfig = {};
 export default nextConfig;
@@ -505,14 +510,10 @@ async function migrateServerProxyObjectToRewrites(cwd, viteConfigContent) {
     return { migrated: [], skipped: [] }; // 이관 가능한 항목이 없으면 종료
   }
   
-  // 9. src/next.config.mjs 파일 열기
-  const nextConfigPath = path.join(cwd, 'src', 'next.config.mjs');
+  // 9. next.config.mjs 파일 열기
+  const nextConfigPath = path.join(cwd, 'next.config.mjs');
   
   if (!fs.existsSync(nextConfigPath)) {
-    const srcDir = path.join(cwd, 'src');
-    if (!fs.existsSync(srcDir)) {
-      await fs.ensureDir(srcDir);
-    }
     const defaultContent = `/** @type {import('next').NextConfig} */
 const nextConfig = {};
 export default nextConfig;
@@ -705,14 +706,10 @@ async function migrateBaseToNextConfig(cwd, viteConfigContent) {
     baseValue = baseValue.slice(0, -1);
   }
 
-  // 3. 프로젝트 루트 기준으로 src/next.config.mjs 파일 열기
-  const nextConfigPath = path.join(cwd, 'src', 'next.config.mjs');
+  // 3. 프로젝트 루트에 next.config.mjs 파일 열기
+  const nextConfigPath = path.join(cwd, 'next.config.mjs');
   if (!fs.existsSync(nextConfigPath)) {
     // 파일이 없으면 생성
-    const srcDir = path.join(cwd, 'src');
-    if (!fs.existsSync(srcDir)) {
-      await fs.ensureDir(srcDir);
-    }
     const defaultContent = `/** @type {import('next').NextConfig} */
 const nextConfig = {};
 export default nextConfig;
@@ -739,7 +736,7 @@ export default nextConfig;
       console.warn(chalk.gray('   - vite.config.ts의 base: Vite 프로젝트에서 사용하던 base 경로'));
       console.warn(chalk.gray('   - next.config.mjs의 basePath: Next.js 프로젝트에서 이미 설정된 경로'));
       console.warn(chalk.gray('\n2. 올바른 값을 결정한 후:'));
-      console.warn(chalk.gray('   - src/next.config.mjs 파일을 열어서 basePath 값을 수정하세요.'));
+      console.warn(chalk.gray('   - next.config.mjs 파일을 열어서 basePath 값을 수정하세요.'));
       console.warn(chalk.gray('   - 예시: basePath: "/your-correct-path"'));
       console.warn(chalk.gray('\n3. 만약 vite.config.ts의 base 값을 사용하려면:'));
       console.warn(chalk.white(`   basePath: "${baseValue}"`));
@@ -877,12 +874,8 @@ async function configureSvgForReactQuery(cwd) {
   }
 
   // 3.2. webpack 설정 추가
-  const nextConfigPath = path.join(cwd, 'src', 'next.config.mjs');
+  const nextConfigPath = path.join(cwd, 'next.config.mjs');
   if (!fs.existsSync(nextConfigPath)) {
-    const srcDir = path.join(cwd, 'src');
-    if (!fs.existsSync(srcDir)) {
-      await fs.ensureDir(srcDir);
-    }
     const defaultContent = `/** @type {import('next').NextConfig} */
 const nextConfig = {};
 export default nextConfig;
@@ -982,12 +975,8 @@ async function configureSvgWithoutReactQuery(cwd) {
   }
 
   // 4.2. webpack 설정 추가
-  const nextConfigPath = path.join(cwd, 'src', 'next.config.mjs');
+  const nextConfigPath = path.join(cwd, 'next.config.mjs');
   if (!fs.existsSync(nextConfigPath)) {
-    const srcDir = path.join(cwd, 'src');
-    if (!fs.existsSync(srcDir)) {
-      await fs.ensureDir(srcDir);
-    }
     const defaultContent = `/** @type {import('next').NextConfig} */
 const nextConfig = {};
 export default nextConfig;
@@ -1065,16 +1054,34 @@ export default nextConfig;
   await fs.writeFile(nextConfigPath, nextConfigContent);
 }
 
-// =================================================================================================
-// 4. Vite define 처리 (cwd 인자 추가)
-// =================================================================================================
+// Case g: Vite define 처리
+// migrateViteConfig 내부에서 호출되는 내부 함수
+async function migrateViteDefineInternal(cwd) {
+  // vite.config.ts 파일이 존재하는지 확인 (migrateViteConfig에서 이미 확인했지만 안전을 위해)
+  const viteConfigPath = path.join(cwd, 'vite.config.ts');
+  if (!fs.existsSync(viteConfigPath)) {
+    return;
+  }
+  
+  await migrateViteDefineLogic(cwd);
+}
+
+// 외부에서 호출 가능한 함수 (하위 호환성 유지)
 async function migrateViteDefine(cwd) {
   // vite.config.ts 파일 읽기
   const viteConfigPath = path.join(cwd, 'vite.config.ts');
   if (!fs.existsSync(viteConfigPath)) {
-    return; // 파일이 없으면 종료
+    // 파일이 없으면 본 모듈 수행하지 않고 다음 모듈로 넘어감
+    return;
   }
+  
+  await migrateViteDefineLogic(cwd);
+}
 
+// 실제 로직 함수
+async function migrateViteDefineLogic(cwd) {
+  // vite.config.ts 파일 읽기
+  const viteConfigPath = path.join(cwd, 'vite.config.ts');
   const viteConfigContent = await fs.readFile(viteConfigPath, 'utf-8');
   // Case a: vite.config.ts에 define이 존재하지 않음
   // define 객체 추출 시도 (중괄호 매칭으로 정확히 추출)
@@ -1419,8 +1426,11 @@ async function migrateImportMetaEnvInAllFiles(cwd) {
   // 2.1. 프로젝트 루트 기준으로 src/ 디렉터리 하위의 .ts, .tsx 파일을 대상으로 검사
   const srcDir = path.join(cwd, 'src');
   if (!fs.existsSync(srcDir)) {
+    console.log(chalk.yellow(`⚠️  src 디렉터리를 찾을 수 없습니다: ${srcDir}`));
     return;
   }
+  
+  console.log(chalk.blue('   import.meta.env.VITE_* 패턴 변환 시작...'));
 
   async function findTsFiles(dir) {
     const files = [];
@@ -1452,6 +1462,7 @@ async function migrateImportMetaEnvInAllFiles(cwd) {
     // 2.3.1. import.meta.env.VITE_<NAME> 형태를 찾는다
     // 2.3.2. 찾은 각 항목의 <NAME> 값을 추출한다
     // 2.3.3. 추출한 <NAME>에 대해 process.env.NEXT_PUBLIC_<NAME> 형태로 변경한다
+    // 패턴: import.meta.env.VITE_ 다음에 알파벳, 숫자, 언더스코어가 오는 경우
     const pattern = /import\.meta\.env\.VITE_([A-Za-z0-9_]+)/g;
     const newContent = content.replace(pattern, (match, name) => {
       return `process.env.NEXT_PUBLIC_${name}`;
@@ -1468,7 +1479,9 @@ async function migrateImportMetaEnvInAllFiles(cwd) {
   }
 
   if (processedCount > 0) {
-    console.log(chalk.cyan(`\n💡 ${processedCount}개 파일에서 import.meta.env.VITE_* 패턴을 process.env.NEXT_PUBLIC_*로 변환했습니다.`));
+    console.log(chalk.cyan(`   ✅ ${processedCount}개 파일에서 import.meta.env.VITE_* 패턴을 process.env.NEXT_PUBLIC_*로 변환했습니다.`));
+  } else {
+    console.log(chalk.gray(`   ℹ️  import.meta.env.VITE_* 패턴을 사용하는 파일이 없습니다.`));
   }
 }
 
