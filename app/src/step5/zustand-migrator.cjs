@@ -25,7 +25,6 @@ async function findStoreFiles(projectRoot) {
   const storesDir = path.join(projectRoot, 'src/stores');
   
   if (!fs.existsSync(storesDir)) {
-    console.log('   ⚠️ src/stores 디렉토리가 없습니다.');
     return [];
   }
 
@@ -140,8 +139,6 @@ function extractStateKeys(content) {
  * 영구 데이터 스토어 변환 (Case a) - ts-morph 사용
  */
 async function transformPersistenceStore(filePath, projectRoot) {
-  console.log(`   📄 영구 데이터 스토어 변환: ${path.relative(projectRoot, filePath)}`);
-
   const project = new Project({
     useInMemoryFileSystem: false,
   });
@@ -178,7 +175,6 @@ async function transformPersistenceStore(filePath, projectRoot) {
 
   // 파일 저장
   await fs.writeFile(filePath, content);
-  console.log(`   ✅ 변환 완료: ${storeName}`);
 
   return { storeName, filePath, type: 'persistence' };
 }
@@ -827,8 +823,6 @@ ${hydrateStatements.join('\n')}
  * Persist 미들웨어 스토어 변환 (Case c)
  */
 async function transformPersistMiddlewareStore(filePath, projectRoot) {
-  console.log(`   📄 Persist 미들웨어 스토어 변환: ${path.relative(projectRoot, filePath)}`);
-
   let content = await fs.readFile(filePath, 'utf-8');
   const storeName = extractStoreName(content, filePath);
 
@@ -836,7 +830,6 @@ async function transformPersistMiddlewareStore(filePath, projectRoot) {
   content = addSkipHydration(content);
 
   await fs.writeFile(filePath, content);
-  console.log(`   ✅ 변환 완료: ${storeName} (skipHydration 설정)`);
 
   return { storeName, filePath, type: 'persistMiddleware' };
 }
@@ -908,11 +901,8 @@ async function injectHydrateToProvider(projectRoot, stores) {
   const providerPath = findProviderFile(projectRoot);
   
   if (!providerPath) {
-    console.log('   ⚠️ Provider 파일을 찾을 수 없습니다. 수동으로 hydrate 호출을 추가하세요.');
     return;
   }
-
-  console.log(`   📄 Provider에 hydrate 트리거 주입: ${path.relative(projectRoot, providerPath)}`);
 
   const project = new Project({
     useInMemoryFileSystem: false,
@@ -979,7 +969,6 @@ async function injectHydrateToProvider(projectRoot, stores) {
         let content = await fs.readFile(providerPath, 'utf-8');
         content = injectUseEffectTextBased(content, stores);
         await fs.writeFile(providerPath, content);
-        console.log(`   ✅ Provider hydrate 트리거 주입 완료`);
         return;
       }
     }
@@ -990,7 +979,6 @@ async function injectHydrateToProvider(projectRoot, stores) {
   let content = await fs.readFile(providerPath, 'utf-8');
   content = injectUseEffectTextBased(content, stores);
   await fs.writeFile(providerPath, content);
-  console.log(`   ✅ Provider hydrate 트리거 주입 완료`);
 }
 
 /**
@@ -1063,12 +1051,6 @@ ${hydrateCalls.join('\n')}
 
 function reportVolatileStores(stores, projectRoot) {
   if (stores.length === 0) return;
-
-  console.log(`\n   ℹ️ 휘발성 스토어 (변경 없음):`);
-  for (const filePath of stores) {
-    console.log(`      - ${path.relative(projectRoot, filePath)}`);
-  }
-  console.log(`      → 이 스토어들은 'use client' 컴포넌트에서만 사용해야 합니다.`);
 }
 
 // ============================================================================
@@ -1076,25 +1058,15 @@ function reportVolatileStores(stores, projectRoot) {
 // ============================================================================
 
 async function migrateZustandStores(projectRoot) {
-  console.log('🐻 Zustand 스토어 마이그레이션 시작...');
-
   // 1. 스토어 파일 찾기
   const storeFiles = await findStoreFiles(projectRoot);
   
   if (storeFiles.length === 0) {
-    console.log('   ⚠️ Zustand 스토어 파일이 없습니다.');
     return;
   }
 
-  console.log(`   📁 발견된 스토어 파일: ${storeFiles.length}개`);
-
   // 2. 스토어 분류
   const classified = await classifyStoreFiles(storeFiles);
-  
-  console.log(`   📊 분류 결과:`);
-  console.log(`      - 영구 데이터 (localStorage): ${classified.persistence.length}개`);
-  console.log(`      - 휘발성 데이터 (UI State): ${classified.volatile.length}개`);
-  console.log(`      - Persist 미들웨어: ${classified.persistMiddleware.length}개`);
 
   const transformedStores = [];
 

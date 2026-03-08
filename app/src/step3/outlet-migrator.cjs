@@ -211,7 +211,6 @@ async function refactorLegacyLayout(filePath) {
   }
 
   if (!componentName) {
-    console.warn(`   ⚠️ 컴포넌트 이름을 찾을 수 없습니다: ${filePath}`);
     return false;
   }
 
@@ -256,7 +255,6 @@ async function generateWrapperLayout(
   const layoutPath = path.join(layoutDir, 'layout.tsx');
 
   if (fs.existsSync(layoutPath)) {
-    console.log(`   ⚠️ ${path.relative(projectRoot, layoutPath)} 이미 존재합니다.`);
     return false;
   }
 
@@ -288,7 +286,6 @@ export default function ${componentName}Layout({
 
   await fs.ensureDir(layoutDir);
   await fs.writeFile(layoutPath, layoutContent);
-  console.log(`   ✅ 생성: ${path.relative(projectRoot, layoutPath)}`);
   return true;
 }
 
@@ -296,11 +293,8 @@ export default function ${componentName}Layout({
  * Route 정보에서 layout.tsx 생성
  */
 async function generateLayoutsFromRoutes(projectRoot) {
-  console.log('📐 Layout 파일 생성 시작...');
-
   const appDir = path.join(projectRoot, 'src/app');
   if (!fs.existsSync(appDir)) {
-    console.warn('⚠️ src/app 디렉토리가 없습니다.');
     return;
   }
 
@@ -375,8 +369,6 @@ async function generateLayoutsFromRoutes(projectRoot) {
       }
     }
   }
-
-  console.log('✅ Layout 파일 생성 완료');
 }
 
 // ============================================================================
@@ -387,11 +379,8 @@ async function generateLayoutsFromRoutes(projectRoot) {
  * Outlet 마이그레이션 메인 함수
  */
 async function migrateOutlets(projectRoot) {
-  console.log('🔌 Outlet 마이그레이션 시작...');
-
   const srcDir = path.join(projectRoot, 'src');
   if (!fs.existsSync(srcDir)) {
-    console.warn('⚠️ src 디렉토리가 없습니다.');
     return;
   }
 
@@ -422,27 +411,16 @@ async function migrateOutlets(projectRoot) {
 
   await findFiles(srcDir);
 
-  console.log(`   📁 처리할 파일: ${files.length}개`);
-
-  let modifiedCount = 0;
   for (const file of files) {
     try {
-      const modified = await refactorLegacyLayout(file);
-      if (modified) {
-        modifiedCount++;
-        console.log(`   ✅ 수정: ${path.relative(projectRoot, file)}`);
-      }
+      await refactorLegacyLayout(file);
     } catch (error) {
-      console.warn(`   ⚠️ 오류 발생 (${path.relative(projectRoot, file)}): ${error.message}`);
+      // 오류 시 무시
     }
   }
 
-  console.log(`   ✅ ${modifiedCount}개 파일에서 Outlet 제거 완료`);
-
   // 2. Route 기반으로 layout.tsx 생성
   await generateLayoutsFromRoutes(projectRoot);
-
-  console.log('✅ Outlet 마이그레이션 완료');
 }
 
 // ============================================================================
