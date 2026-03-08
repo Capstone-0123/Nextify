@@ -17,7 +17,6 @@ function detectTailwindVersion(projectRoot) {
   const packageJsonPath = path.join(projectRoot, 'package.json');
   
   if (!fs.existsSync(packageJsonPath)) {
-    console.log('   ⚠️ package.json을 찾을 수 없습니다.');
     return null;
   }
 
@@ -27,12 +26,10 @@ function detectTailwindVersion(projectRoot) {
     
     // tailwindcss 의존성 확인
     if (!dependencies.tailwindcss) {
-      console.log('   ℹ️ tailwindcss가 설치되어 있지 않습니다.');
       return null;
     }
 
     const version = dependencies.tailwindcss;
-    console.log(`   📦 발견된 tailwindcss 버전: ${version}`);
 
     // 버전 파싱
     // ^3.4.1, ~3.4.1, 3.4.1 등의 형식 처리
@@ -40,26 +37,16 @@ function detectTailwindVersion(projectRoot) {
     const majorVersion = parseInt(cleanVersion.split('.')[0], 10);
 
     if (majorVersion === 3) {
-      console.log('   ✅ Tailwind CSS v3 감지됨');
       return 'v3';
     } else if (majorVersion === 4) {
-      console.log('   ✅ Tailwind CSS v4 감지됨');
       return 'v4';
     } else {
       // 버전이 애매한 경우 (^, ~ 등): tailwind.config.js 존재 여부로 판단
       const configPath = path.join(projectRoot, 'tailwind.config.js');
       const configExists = fs.existsSync(configPath);
-      
-      if (configExists) {
-        console.log('   ✅ tailwind.config.js 존재 → Tailwind CSS v3으로 판단');
-        return 'v3';
-      } else {
-        console.log('   ✅ tailwind.config.js 없음 → Tailwind CSS v4로 판단');
-        return 'v4';
-      }
+      return configExists ? 'v3' : 'v4';
     }
   } catch (error) {
-    console.error(`   ❌ Tailwind 버전 감지 실패: ${error.message}`);
     return null;
   }
 }
@@ -77,7 +64,6 @@ function updateTailwindConfigV3(projectRoot) {
   const configPath = path.join(projectRoot, 'tailwind.config.js');
   
   if (!fs.existsSync(configPath)) {
-    console.log('   ⚠️ tailwind.config.js를 찾을 수 없습니다.');
     return false;
   }
 
@@ -91,7 +77,6 @@ function updateTailwindConfigV3(projectRoot) {
     const match = configContent.match(contentPattern);
 
     if (!match) {
-      console.log('   ⚠️ content 배열을 찾을 수 없습니다.');
       return false;
     }
 
@@ -115,7 +100,6 @@ function updateTailwindConfigV3(projectRoot) {
     });
 
     if (hasComprehensivePattern) {
-      console.log('   ℹ️ 이미 포괄적인 content 패턴이 존재합니다.');
       return false;
     }
 
@@ -144,13 +128,11 @@ function updateTailwindConfigV3(projectRoot) {
 
     if (configContent !== originalContent) {
       fs.writeFileSync(configPath, configContent, 'utf8');
-      console.log('   ✅ tailwind.config.js의 content 배열에 "./src/**/*.{ts,tsx}" 추가됨');
       return true;
     }
 
     return false;
   } catch (error) {
-    console.error(`   ❌ Tailwind v3 설정 업데이트 실패: ${error.message}`);
     return false;
   }
 }
@@ -176,7 +158,6 @@ function updateTailwindCSSV4(projectRoot) {
   for (const filePath of possiblePaths) {
     if (fs.existsSync(filePath)) {
       targetPath = filePath;
-      console.log(`   📄 대상 파일 발견: ${path.relative(projectRoot, filePath)}`);
       break;
     }
   }
@@ -187,7 +168,6 @@ function updateTailwindCSSV4(projectRoot) {
     const dirPath = path.dirname(targetPath);
     fs.ensureDirSync(dirPath);
     fs.writeFileSync(targetPath, '', 'utf8');
-    console.log(`   📄 새 파일 생성: ${path.relative(projectRoot, targetPath)}`);
   }
 
   try {
@@ -200,9 +180,6 @@ function updateTailwindCSSV4(projectRoot) {
       // 파일 맨 위에 추가 (기존 내용이 있으면 그 위에)
       cssContent = '@import "tailwindcss";\n' + cssContent;
       modified = true;
-      console.log('   ✅ @import "tailwindcss"; 추가됨');
-    } else {
-      console.log('   ℹ️ @import "tailwindcss"; 이미 존재함');
     }
 
     // @source "../src"; 확인 및 추가 (필요시)
@@ -215,7 +192,6 @@ function updateTailwindCSSV4(projectRoot) {
         '$1\n@source "../src";'
       );
       modified = true;
-      console.log('   ✅ @source "../src"; 추가됨');
     }
 
     if (modified && cssContent !== originalContent) {
@@ -225,7 +201,6 @@ function updateTailwindCSSV4(projectRoot) {
 
     return false;
   } catch (error) {
-    console.error(`   ❌ Tailwind v4 설정 업데이트 실패: ${error.message}`);
     return false;
   }
 }
@@ -244,7 +219,6 @@ function updateNextConfigForStyled(projectRoot) {
   
   // 1. package.json에서 styled-components 의존성 확인
   if (!fs.existsSync(packageJsonPath)) {
-    console.log('   ⚠️ package.json을 찾을 수 없습니다.');
     return false;
   }
 
@@ -253,11 +227,8 @@ function updateNextConfigForStyled(projectRoot) {
     const dependencies = { ...packageJson.dependencies, ...packageJson.devDependencies };
     
     if (!dependencies['styled-components']) {
-      console.log('   ℹ️ styled-components가 설치되어 있지 않습니다.');
       return false;
     }
-
-    console.log(`   📦 발견된 styled-components 버전: ${dependencies['styled-components']}`);
 
     // 2. next.config.js 또는 next.config.mjs 파일 확인
     const configPaths = [
@@ -272,7 +243,6 @@ function updateNextConfigForStyled(projectRoot) {
       if (fs.existsSync(filePath)) {
         configPath = filePath;
         isMjs = filePath.endsWith('.mjs');
-        console.log(`   📄 설정 파일 발견: ${path.basename(filePath)}`);
         break;
       }
     }
@@ -288,7 +258,6 @@ function updateNextConfigForStyled(projectRoot) {
 }
 `;
       fs.writeFileSync(configPath, defaultConfig, 'utf8');
-      console.log('   ✅ next.config.js 생성 및 styledComponents 설정 추가됨');
       return true;
     }
 
@@ -300,7 +269,6 @@ function updateNextConfigForStyled(projectRoot) {
     const hasStyledComponents = /styledComponents\s*:\s*true/.test(configContent);
     
     if (hasStyledComponents) {
-      console.log('   ℹ️ compiler.styledComponents 설정이 이미 존재합니다.');
       return false;
     }
 
@@ -387,13 +355,11 @@ function updateNextConfigForStyled(projectRoot) {
 
     if (configContent !== originalContent) {
       fs.writeFileSync(configPath, configContent, 'utf8');
-      console.log('   ✅ next.config.js에 compiler.styledComponents 설정 추가됨');
       return true;
     }
 
     return false;
   } catch (error) {
-    console.error(`   ❌ Styled Components 설정 실패: ${error.message}`);
     return false;
   }
 }
@@ -407,24 +373,17 @@ function updateNextConfigForStyled(projectRoot) {
  * @param {string} projectRoot - 프로젝트 루트 경로
  */
 async function migrateTailwindAndStyled(projectRoot) {
-  console.log('🎨 Tailwind CSS 및 Styled Components 설정 시작...');
-
   // 1. Tailwind CSS 처리
   const tailwindVersion = detectTailwindVersion(projectRoot);
   
   if (tailwindVersion === 'v3') {
-    console.log('   📝 Tailwind CSS v3 설정 업데이트 중...');
     updateTailwindConfigV3(projectRoot);
   } else if (tailwindVersion === 'v4') {
-    console.log('   📝 Tailwind CSS v4 설정 업데이트 중...');
     updateTailwindCSSV4(projectRoot);
   }
 
   // 2. Styled Components 처리
-  console.log('   📝 Styled Components SSR 설정 중...');
   updateNextConfigForStyled(projectRoot);
-
-  console.log('✅ Tailwind CSS 및 Styled Components 설정 완료!');
 }
 
 module.exports = {

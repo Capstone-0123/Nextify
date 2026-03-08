@@ -674,7 +674,6 @@ async function addMetadataToPage(pageFilePath, metadataCode) {
 
   // 이미 metadata export가 있는지 확인
   if (content.includes('export const metadata') || content.includes('export async function generateMetadata')) {
-    console.log(`   ⚠️ 이미 메타데이터가 존재합니다: ${path.basename(pageFilePath)}`);
     return false;
   }
 
@@ -843,17 +842,13 @@ async function migrateRootLayoutMetadata(projectRoot) {
   const rootLayoutPath = path.join(projectRoot, 'src/app/layout.tsx');
 
   if (!fs.existsSync(rootLayoutPath)) {
-    console.log('   ℹ️ src/app/layout.tsx 파일이 없습니다.');
     return { success: false, reason: 'no_root_layout' };
   }
-
-  console.log('   📄 루트 layout.tsx 메타데이터 처리 중...');
 
   let content = await fs.readFile(rootLayoutPath, 'utf-8');
 
   // 이미 metadata export가 있는지 확인
   if (content.includes('export const metadata') || content.includes('export async function generateMetadata')) {
-    console.log('   ⚠️ 루트 layout.tsx에 이미 메타데이터가 존재합니다.');
     return { success: false, reason: 'already_has_metadata' };
   }
 
@@ -861,7 +856,6 @@ async function migrateRootLayoutMetadata(projectRoot) {
   const headMatch = content.match(/<head[^>]*>([\s\S]*?)<\/head>/i);
 
   if (!headMatch) {
-    console.log('   ℹ️ <head> 태그가 없습니다.');
     return { success: false, reason: 'no_head_tag' };
   }
 
@@ -879,7 +873,6 @@ async function migrateRootLayoutMetadata(projectRoot) {
   const hasTwitter = Object.keys(metadata.twitter).length > 0;
 
   if (!hasTitle && !hasBasicMeta && !hasIcons && !hasViewport && !hasOpenGraph && !hasTwitter) {
-    console.log('   ℹ️ 추출할 메타데이터가 없습니다.');
     return { success: false, reason: 'no_metadata' };
   }
 
@@ -982,12 +975,6 @@ async function migrateRootLayoutMetadata(projectRoot) {
 
   await fs.writeFile(rootLayoutPath, content, 'utf-8');
 
-  console.log('   ✅ 루트 layout.tsx 메타데이터 분리 완료');
-  console.log(`      - title: ${title || '없음'}`);
-  console.log(`      - description: ${metadata.basic.description || '없음'}`);
-  console.log(`      - viewport: ${hasViewport ? '있음' : '없음'}`);
-  console.log(`      - icons: ${hasIcons ? '있음' : '없음'}`);
-
   return {
     success: true,
     title,
@@ -1004,8 +991,6 @@ async function migrateRootLayoutMetadata(projectRoot) {
  * 단일 페이지의 메타데이터 마이그레이션
  */
 async function migratePageMetadata(projectRoot, pageFilePath, componentFilePath) {
-  console.log(`   📄 처리 중: ${path.relative(projectRoot, pageFilePath)}`);
-
   // ts-morph 프로젝트 설정
   const tsConfigPath = path.join(projectRoot, 'tsconfig.json');
   const project = new Project({
@@ -1015,7 +1000,6 @@ async function migratePageMetadata(projectRoot, pageFilePath, componentFilePath)
 
   // 컴포넌트 파일 파싱
   if (!fs.existsSync(componentFilePath)) {
-    console.log(`   ⚠️ 컴포넌트 파일을 찾을 수 없습니다: ${componentFilePath}`);
     return { success: false, reason: 'component_not_found' };
   }
 
@@ -1025,7 +1009,6 @@ async function migratePageMetadata(projectRoot, pageFilePath, componentFilePath)
   const helmetContent = findHelmetContent(componentFile);
 
   if (!helmetContent) {
-    console.log(`   ℹ️ Helmet/Head 태그가 없습니다.`);
     return { success: true, reason: 'no_helmet' };
   }
 
@@ -1060,7 +1043,6 @@ async function migratePageMetadata(projectRoot, pageFilePath, componentFilePath)
   } else if (dynamicPatterns.hasTitleTemplate) {
     // 타이틀 템플릿 (layout.tsx용)
     metadataType = 'template';
-    console.log(`   ℹ️ titleTemplate 감지됨`);
     metadataCode = generateTitleTemplateCode(dynamicPatterns.titleTemplate);
   } else {
     // 정적 메타데이터
@@ -1068,7 +1050,6 @@ async function migratePageMetadata(projectRoot, pageFilePath, componentFilePath)
   }
 
   if (!metadataCode) {
-    console.log(`   ℹ️ 추출할 메타데이터가 없습니다.`);
     return { success: true, reason: 'no_metadata' };
   }
 
@@ -1076,11 +1057,8 @@ async function migratePageMetadata(projectRoot, pageFilePath, componentFilePath)
   const added = await addMetadataToPage(pageFilePath, metadataCode);
 
   if (added) {
-    console.log(`   ✅ 메타데이터 추가 완료 (${metadataType})`);
-
     // 원본 Helmet 주석 처리
     await commentOutHelmet(componentFilePath, helmetContent);
-    console.log(`   ✅ 원본 Helmet 주석 처리 완료`);
   }
 
   return {
@@ -1172,17 +1150,13 @@ function extractAllImports(fileContent) {
  * 프로젝트 전체 메타데이터 마이그레이션
  */
 async function migrateMetadata(projectRoot) {
-  console.log('🏷️  메타데이터 마이그레이션 시작...');
-
   const appDir = path.join(projectRoot, 'src/app');
 
   if (!fs.existsSync(appDir)) {
-    console.warn('⚠️ src/app 디렉토리가 없습니다. Step 2를 먼저 실행하세요.');
     return;
   }
 
   // 0. 루트 layout.tsx의 <head> 태그 메타데이터 처리
-  console.log('\n📌 루트 layout.tsx 메타데이터 처리...');
   const rootLayoutResult = await migrateRootLayoutMetadata(projectRoot);
 
   // app 디렉토리 내 모든 page.tsx 및 layout.tsx 파일 찾기
@@ -1213,9 +1187,6 @@ async function migrateMetadata(projectRoot) {
 
   await findTargetFiles(appDir);
 
-  console.log(`   📁 발견된 페이지 파일: ${targetFiles.pages.length}개`);
-  console.log(`   📁 발견된 레이아웃 파일: ${targetFiles.layouts.length}개`);
-
   const results = [];
 
   // 1. page.tsx 파일 처리
@@ -1240,8 +1211,6 @@ async function migrateMetadata(projectRoot) {
 
   // 2. layout.tsx 파일 처리
   for (const layoutFile of targetFiles.layouts) {
-    console.log(`   📄 레이아웃 처리 중: ${path.relative(projectRoot, layoutFile)}`);
-    
     const layoutContent = await fs.readFile(layoutFile, 'utf-8');
     const imports = extractAllImports(layoutContent);
 
@@ -1282,16 +1251,6 @@ async function migrateMetadata(projectRoot) {
   const successful = results.filter(r => r.success && r.metadataType);
   const staticCount = successful.filter(r => r.metadataType === 'static').length;
   const dynamicCount = successful.filter(r => r.metadataType === 'dynamic').length;
-  const pageCount = successful.filter(r => r.targetType === 'page').length;
-  const layoutCount = successful.filter(r => r.targetType === 'layout').length;
-
-  console.log(`\n✅ 메타데이터 마이그레이션 완료:`);
-  console.log(`   - 루트 layout.tsx: ${rootLayoutResult.success ? '처리 완료' : '없음/이미 처리됨'}`);
-  console.log(`   - 페이지 메타데이터: ${pageCount}개`);
-  console.log(`   - 레이아웃 메타데이터: ${layoutCount}개`);
-  console.log(`   - 정적 메타데이터: ${staticCount}개`);
-  console.log(`   - 동적 메타데이터: ${dynamicCount}개`);
-
   return { rootLayoutResult, results };
 }
 

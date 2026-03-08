@@ -97,7 +97,6 @@ function extractRouteInfo(routeNode, routeElement = null) {
       // JsxSelfClosingElement인 경우 (<Route />)
       if (kind === SyntaxKind.JsxSelfClosingElement) {
         const tagName = node.getTagNameNode().getText();
-        console.log(`      🔎 SelfClosingElement 확인: 태그="${tagName}"`);
         if (tagName === 'Route') {
           hasChildren = true;
           const childInfo = extractRouteInfo(node);
@@ -106,7 +105,6 @@ function extractRouteInfo(routeNode, routeElement = null) {
             element: null,
             ...childInfo,
           });
-          console.log(`   🔍 자식 Route 발견 (self-closing): path="${childInfo.path}", 부모 path="${pathValue || '/'}"`);
           return; // Route를 찾았으므로 더 깊이 들어가지 않음
         }
       }
@@ -123,7 +121,6 @@ function extractRouteInfo(routeNode, routeElement = null) {
             element: node,
             ...childInfo,
           });
-          console.log(`   🔍 자식 Route 발견: path="${childInfo.path}", 부모 path="${pathValue || '/'}"`);
           return; // Route를 찾았으므로 더 깊이 들어가지 않음
         }
         
@@ -161,21 +158,10 @@ function extractRouteInfo(routeNode, routeElement = null) {
     
     // Route Element의 직접 자식부터 탐색 시작
     const directChildren = routeElement.getJsxChildren();
-    console.log(`   🔎 Route "${pathValue || '/'}"의 직접 자식 ${directChildren.length}개 확인 중...`);
     for (let i = 0; i < directChildren.length; i++) {
       const child = directChildren[i];
-      const kind = child.getKind();
-      let tagInfo = '';
-      if (kind === SyntaxKind.JsxSelfClosingElement) {
-        tagInfo = ` (태그: ${child.getTagNameNode().getText()})`;
-      } else if (kind === SyntaxKind.JsxElement) {
-        tagInfo = ` (태그: ${child.getOpeningElement().getTagNameNode().getText()})`;
-      }
-      console.log(`      자식 ${i + 1}: ${SyntaxKind[kind]}${tagInfo}`);
       findChildRoutes(child, 1);
     }
-  } else {
-    console.log(`   ⚠️ Route "${pathValue || '/'}"는 Element가 없음 (self-closing)`);
   }
 
   return {
@@ -250,9 +236,6 @@ function findAllRoutes(sourceFile) {
 
   // 3단계: 자식 Route가 아닌 최상위 Route만 반환
   const topLevelRoutes = routes.filter(route => !childRouteNodes.has(route.node));
-  
-  console.log(`   📊 전체 Route: ${routes.length}개, 자식 Route: ${childRouteNodes.size}개, 최상위 Route: ${topLevelRoutes.length}개`);
-  
   return topLevelRoutes;
 }
 
@@ -754,14 +737,12 @@ async function generatePageAndFolder(projectRoot, routeInfo, sourceFile, sourceF
       if (parentPath) {
         // 부모 경로가 있으면 결합 (예: "/dashboard" + "/" + "post" = "/dashboard/post")
         routePath = parentPath + '/' + routePath;
-        console.log(`   🔗 상대 경로 결합: "${routeInfo.path}" + 부모 "${parentPath}" = "${routePath}"`);
       } else {
         // 부모 경로가 없으면 절대 경로로 변환
         routePath = '/' + routePath;
       }
     } else {
       // 절대 경로는 그대로 사용
-      console.log(`   📍 절대 경로: "${routePath}"`);
     }
   } else if (parentPath) {
     // path가 없지만 부모가 있으면 부모 경로 사용 (index route)
@@ -781,7 +762,6 @@ async function generatePageAndFolder(projectRoot, routeInfo, sourceFile, sourceF
       if (!fs.existsSync(layoutPath)) {
         const layoutContent = generateLayoutContent(routeInfo, sourceFile, layoutPath);
         await fs.writeFile(layoutPath, layoutContent);
-        console.log(`   ✅ 생성: src/app/layout.tsx`);
       }
 
       // ✅ 수정: 부모 Route가 중첩 라우트이면서 index Route를 함께 가지는 경우 (명세 2.3)
@@ -795,14 +775,12 @@ async function generatePageAndFolder(projectRoot, routeInfo, sourceFile, sourceF
           const isConditional = !!conditionalInfo;
           const content = generatePageContent(indexRoute, sourceFile, pagePath, isConditional, conditionalInfo);
           await fs.writeFile(pagePath, content);
-          console.log(`   ✅ 생성: src/app/page.tsx (index route)`);
         }
       }
     } else {
       // 자식이 없으면 page.tsx 생성
       const pagePath = path.join(appDir, 'page.tsx');
       if (fs.existsSync(pagePath)) {
-        console.log(`   ⚠️ ${pagePath} 이미 존재합니다. 건너뜁니다.`);
         return;
       }
 
@@ -812,7 +790,6 @@ async function generatePageAndFolder(projectRoot, routeInfo, sourceFile, sourceF
 
       await fs.ensureDir(appDir);
       await fs.writeFile(pagePath, content);
-      console.log(`   ✅ 생성: src/app/page.tsx`);
     }
     return;
   }
@@ -827,7 +804,6 @@ async function generatePageAndFolder(projectRoot, routeInfo, sourceFile, sourceF
     const pagePath = path.join(parentDir, 'page.tsx');
     
     if (fs.existsSync(pagePath)) {
-      console.log(`   ⚠️ ${path.relative(projectRoot, pagePath)} 이미 존재합니다.`);
       return;
     }
 
@@ -837,7 +813,6 @@ async function generatePageAndFolder(projectRoot, routeInfo, sourceFile, sourceF
 
     await fs.ensureDir(parentDir);
     await fs.writeFile(pagePath, content);
-    console.log(`   ✅ 생성: ${path.relative(projectRoot, pagePath)} (index route)`);
     return;
   }
 
@@ -848,7 +823,6 @@ async function generatePageAndFolder(projectRoot, routeInfo, sourceFile, sourceF
       const layoutContent = generateLayoutContent(routeInfo, sourceFile, layoutPath);
       await fs.ensureDir(targetDir);
       await fs.writeFile(layoutPath, layoutContent);
-      console.log(`   ✅ 생성: ${path.relative(projectRoot, layoutPath)}`);
     }
 
     // ✅ 수정: 부모 Route가 중첩 라우트이면서 index Route를 함께 가지는 경우 (명세 2.3)
@@ -861,18 +835,15 @@ async function generatePageAndFolder(projectRoot, routeInfo, sourceFile, sourceF
         const isConditional = !!conditionalInfo;
         const content = generatePageContent(indexRoute, sourceFile, pagePath, isConditional, conditionalInfo);
         await fs.writeFile(pagePath, content);
-        console.log(`   ✅ 생성: ${path.relative(projectRoot, pagePath)} (index route)`);
       }
     }
 
     // 자식 Route들 재귀적으로 처리 (index Route 제외)
-    console.log(`   📁 ${routePath}의 자식 Route ${routeInfo.childRoutes.length}개 처리 시작`);
     for (const childRoute of routeInfo.childRoutes) {
       // index Route는 이미 처리했으므로 제외
       if (childRoute.isIndex && !childRoute.path) {
         continue;
       }
-      console.log(`      → 자식 Route: path="${childRoute.path || 'index'}", 부모="${routePath}"`);
       await generatePageAndFolder(
         projectRoot,
         childRoute,
@@ -886,7 +857,6 @@ async function generatePageAndFolder(projectRoot, routeInfo, sourceFile, sourceF
     const pagePath = path.join(targetDir, 'page.tsx');
 
     if (fs.existsSync(pagePath)) {
-      console.log(`   ⚠️ ${path.relative(projectRoot, pagePath)} 이미 존재합니다.`);
       return;
     }
 
@@ -896,7 +866,6 @@ async function generatePageAndFolder(projectRoot, routeInfo, sourceFile, sourceF
 
     await fs.ensureDir(targetDir);
     await fs.writeFile(pagePath, content);
-    console.log(`   ✅ 생성: ${path.relative(projectRoot, pagePath)}`);
   }
 }
 
@@ -949,8 +918,6 @@ function parseRouteObjectArray(arrayNode) {
  */
 async function convertUseRoutes(projectRoot, useRoutesCall, sourceFile, sourceFilePath) {
   const routeObjects = parseRouteObjectArray(useRoutesCall.arrayArg);
-
-  console.log(`   📋 useRoutes에서 ${routeObjects.length}개 라우트 발견`);
 
   for (const routeObj of routeObjects) {
     if (!routeObj.componentName) continue;
@@ -1011,11 +978,8 @@ async function findAllRouteFiles(projectRoot) {
  * Route 마이그레이션 메인 함수
  */
 async function migrateRoutes(projectRoot) {
-  console.log('🛣️  Route 마이그레이션 시작...');
-
   // ✅ 수정: src 내 모든 파일에서 Route 태그 탐색 (명세 1번)
   const allFiles = await findAllRouteFiles(projectRoot);
-  console.log(`   📁 탐색할 파일: ${allFiles.length}개`);
 
   const tsConfigPath = path.join(projectRoot, 'tsconfig.json');
   const project = new Project({
@@ -1030,20 +994,17 @@ async function migrateRoutes(projectRoot) {
       const sourceFile = project.addSourceFileAtPath(filePath);
       const routes = findAllRoutes(sourceFile);
       if (routes.length > 0) {
-        console.log(`   📄 ${path.relative(projectRoot, filePath)}: ${routes.length}개 Route 발견`);
-        // 파일 경로 정보 추가
         routes.forEach(route => {
           route.sourceFilePath = filePath;
         });
         allRoutesFromAllFiles.push(...routes);
       }
     } catch (error) {
-      console.warn(`   ⚠️ 파일 처리 오류 (${path.relative(projectRoot, filePath)}): ${error.message}`);
+      // 파일 처리 오류 시 무시
     }
   }
 
   if (allRoutesFromAllFiles.length === 0) {
-    console.warn('⚠️ Route 태그를 찾을 수 없습니다.');
     return;
   }
 
@@ -1055,49 +1016,38 @@ async function migrateRoutes(projectRoot) {
   const processedChildNodes = new Set();
   
   // 모든 Route의 자식 Route 노드를 수집
-  console.log(`   🔍 자식 Route 수집 중...`);
   for (const route of allRoutes) {
     if (route.childRoutes && route.childRoutes.length > 0) {
-      console.log(`   📦 ${route.path || '/'}의 자식 ${route.childRoutes.length}개 발견`);
       for (const childRoute of route.childRoutes) {
         processedChildNodes.add(childRoute.node);
-        console.log(`      → 자식: ${childRoute.path || '/'} (노드 추가됨)`);
       }
     }
   }
-  
-  console.log(`   📊 총 ${processedChildNodes.size}개의 자식 Route 노드 수집됨`);
-  
+
   const topLevelRoutes = allRoutes.filter(route => {
     const routePath = route.path || '/';
-    
+
     // 이미 다른 Route의 자식으로 포함되어 있는지 확인
     if (processedChildNodes.has(route.node)) {
-      console.log(`   ⏭️  자식 Route 제외: ${routePath}`);
       return false;
     }
-    
+
     // 부모가 Route Element인지 확인
     const parent = route.node.getParent();
     if (!parent) {
-      console.log(`   ✅ 최상위 Route (부모 없음): ${routePath}`);
       return true;
     }
-    
+
     const grandParent = parent.getParent();
     if (grandParent && grandParent.getKind() === SyntaxKind.JsxElement) {
       const grandParentOpening = grandParent.getOpeningElement();
       if (grandParentOpening && grandParentOpening.getTagNameNode().getText() === 'Route') {
-        console.log(`   ⏭️  부모 Route의 자식 제외: ${routePath}`);
         return false; // 부모 Route의 자식이므로 제외
       }
     }
-    
-    console.log(`   ✅ 최상위 Route: ${routePath}`);
+
     return true;
   });
-
-  console.log(`   📋 최상위 Route 태그 ${topLevelRoutes.length}개 발견`);
 
   for (const route of topLevelRoutes) {
     const sourceFile = project.addSourceFileAtPath(route.sourceFilePath);
@@ -1111,7 +1061,6 @@ async function migrateRoutes(projectRoot) {
       const sourceFile = project.addSourceFileAtPath(filePath);
       const useRoutesCalls = findUseRoutesCalls(sourceFile);
       if (useRoutesCalls.length > 0) {
-        console.log(`   📋 ${path.relative(projectRoot, filePath)}: useRoutes 호출 ${useRoutesCalls.length}개 발견`);
         for (const call of useRoutesCalls) {
           await convertUseRoutes(projectRoot, call, sourceFile, filePath);
           totalUseRoutesCalls++;
@@ -1121,9 +1070,6 @@ async function migrateRoutes(projectRoot) {
       // 에러 무시
     }
   }
-  console.log(`   📋 총 useRoutes 호출 ${totalUseRoutesCalls}개 처리 완료`);
-
-  console.log('✅ Route 마이그레이션 완료');
 }
 
 // ============================================================================
