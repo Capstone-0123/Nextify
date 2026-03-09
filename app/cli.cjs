@@ -11,6 +11,7 @@ const { runStep3 } = require('./src/step3/index.cjs');
 const { runStep4 } = require('./src/step4/index.cjs');
 const { runStep5 } = require('./src/step5/index.cjs');
 const { runStep6 } = require('./src/step6/index.cjs');
+const { runStep7 } = require('./src/step7/index.cjs');
 
 const {
   detectPackageManager,
@@ -242,6 +243,22 @@ program
       await runStep6(process.cwd());
     } catch (error) {
       console.error(chalk.red('\n❌ Step 6 오류 발생:'), error);
+      process.exit(1);
+    }
+  });
+
+// =========================================================
+// Command: Step 7
+// =========================================================
+program
+  .command('step7')
+  .description('7단계: next/image, next/font, Dynamic Import 적용 및 React 흔적 정리')
+  .action(async () => {
+    try {
+      // Step 7 실행
+      await runStep7(process.cwd());
+    } catch (error) {
+      console.error(chalk.red('\n❌ Step 7 오류 발생:'), error);
       process.exit(1);
     }
   });
