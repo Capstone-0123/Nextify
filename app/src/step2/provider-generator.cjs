@@ -435,8 +435,6 @@ function resolveComponentPath(projectRoot, importPath, fromFilePath) {
  * @param {string} projectRoot - 프로젝트 루트 경로
  */
 async function extractProviderTree(projectRoot) {
-  console.log('🔍 Provider 트리 탐색 시작...');
-
   const possibleEntries = [
     path.join(projectRoot, 'src/main.tsx'),
     path.join(projectRoot, 'src/main.jsx'),
@@ -453,11 +451,8 @@ async function extractProviderTree(projectRoot) {
   }
 
   if (!entryFilePath) {
-    console.warn('⚠️ 진입점 파일(main.tsx 또는 index.tsx)을 찾을 수 없습니다.');
     return { providers: [], entryFile: null, importMap: new Map() };
   }
-
-  console.log(`📁 진입점 파일: ${path.relative(projectRoot, entryFilePath)}`);
 
   const tsConfigPath = path.join(projectRoot, 'tsconfig.json');
   const project = new Project({
@@ -478,7 +473,6 @@ async function extractProviderTree(projectRoot) {
   if (renderJsx) {
     const entryProviders = extractProvidersFromJsx(renderJsx, entryImportMap);
     allProviders.push(...entryProviders);
-    console.log(`   📄 ${path.basename(entryFilePath)}: ${entryProviders.length}개 Provider 발견`);
 
     // 2. main.tsx에서 렌더링하는 루트 컴포넌트 찾기 (예: App)
     const rootComponentName = findRootComponentName(renderJsx);
@@ -495,8 +489,6 @@ async function extractProviderTree(projectRoot) {
         );
 
         if (rootComponentFilePath && fs.existsSync(rootComponentFilePath)) {
-          console.log(`📁 루트 컴포넌트 파일: ${path.relative(projectRoot, rootComponentFilePath)}`);
-
           // 3. App.tsx (루트 컴포넌트) 분석
           const rootSourceFile = project.addSourceFileAtPath(rootComponentFilePath);
           const rootImportMap = buildImportMap(rootSourceFile);
@@ -512,7 +504,6 @@ async function extractProviderTree(projectRoot) {
 
           if (rootReturnJsx) {
             const rootProviders = extractProvidersFromJsx(rootReturnJsx, rootImportMap);
-            console.log(`   📄 ${path.basename(rootComponentFilePath)}: ${rootProviders.length}개 Provider 발견`);
 
             // nestLevel 조정 (main.tsx Provider 다음에 위치)
             const maxEntryLevel = allProviders.length > 0
@@ -529,8 +520,6 @@ async function extractProviderTree(projectRoot) {
         }
       }
     }
-  } else {
-    console.warn('⚠️ render() 호출을 찾을 수 없습니다.');
   }
 
   // 4. 추가로 App.tsx 직접 확인 (main.tsx에서 찾지 못한 경우)
@@ -544,8 +533,6 @@ async function extractProviderTree(projectRoot) {
 
     for (const appPath of appFilePaths) {
       if (fs.existsSync(appPath)) {
-        console.log(`📁 App 파일 직접 탐색: ${path.relative(projectRoot, appPath)}`);
-
         const appSourceFile = project.addSourceFileAtPath(appPath);
         const appImportMap = buildImportMap(appSourceFile);
         allSourceFiles.push(appSourceFile);
@@ -557,7 +544,6 @@ async function extractProviderTree(projectRoot) {
         const appReturnJsx = findComponentReturnJsx(appSourceFile);
         if (appReturnJsx) {
           const appProviders = extractProvidersFromJsx(appReturnJsx, appImportMap);
-          console.log(`   📄 ${path.basename(appPath)}: ${appProviders.length}개 Provider 발견`);
 
           for (const provider of appProviders) {
             provider.sourceFile = appPath;
@@ -582,11 +568,6 @@ async function extractProviderTree(projectRoot) {
 
   // nestLevel 기준 정렬
   uniqueProviders.sort((a, b) => a.nestLevel - b.nestLevel);
-
-  console.log(`✅ 총 ${uniqueProviders.length}개의 Provider 컴포넌트 발견`);
-  for (const p of uniqueProviders) {
-    console.log(`   - ${p.name} (${p.category}) [Level ${p.nestLevel}]`);
-  }
 
   return {
     providers: uniqueProviders,
@@ -874,8 +855,6 @@ function generateConfigCode(dependencies) {
  * @param {Object[]} sourceFiles - 분석할 소스 파일들 (main.tsx, App.tsx 등)
  */
 async function migrateProviderImports(projectRoot, providers, sourceFiles, entryFile) {
-  console.log('📦 Import 및 설정 이관 시작...');
-
   const targetFilePath = path.join(projectRoot, 'src/app/providers.tsx');
 
   // 배열이 아니면 배열로 변환 (하위 호환성)
@@ -897,10 +876,6 @@ async function migrateProviderImports(projectRoot, providers, sourceFiles, entry
     allDependencyImports.push(...dependencyImports);
   }
 
-  console.log(`   - Provider import ${allProviderImports.length}개 수집`);
-  console.log(`   - 설정 변수 ${allDependencies.length}개 추적`);
-  console.log(`   - 의존성 import ${allDependencyImports.length}개 수집`);
-
   const allImports = [...allProviderImports, ...allDependencyImports];
   const importStatements = generateImportStatements(allImports);
 
@@ -912,8 +887,6 @@ async function migrateProviderImports(projectRoot, providers, sourceFiles, entry
   }
 
   const configCodes = generateConfigCode(allDependencies);
-
-  console.log('✅ Import 및 설정 이관 완료');
 
   return {
     imports: importStatements,
@@ -1014,8 +987,6 @@ function generateSelfClosingProviders(providers) {
  * providers.tsx 파일 생성 메인 함수
  */
 async function generateProvidersFile(projectRoot, providers, options = {}) {
-  console.log('📝 providers.tsx 파일 생성 시작...');
-
   const { imports = [], configCodes = [] } = options;
   const targetPath = path.join(projectRoot, 'src/app/providers.tsx');
 
@@ -1030,7 +1001,6 @@ async function generateProvidersFile(projectRoot, providers, options = {}) {
 
     await fs.ensureDir(path.dirname(registryFilePath));
     await fs.writeFile(registryFilePath, config.registryCode.trim());
-    console.log(`✅ SSR Registry 생성: src/app/registry.tsx (${styleLibrary})`);
   }
 
   const providerJsx = generateProviderJsx(providers);
@@ -1078,8 +1048,6 @@ export function Providers({ children }: { children: React.ReactNode }) {
   await fs.ensureDir(path.dirname(targetPath));
   await fs.writeFile(targetPath, fileContent.trim());
 
-  console.log('✅ 생성 완료: src/app/providers.tsx');
-
   return {
     providersPath: targetPath,
     registryPath: registryFilePath,
@@ -1095,18 +1063,14 @@ export function Providers({ children }: { children: React.ReactNode }) {
  * layout.tsx에 Providers 적용 메인 함수
  */
 async function applyProvidersToLayout(projectRoot) {
-  console.log('🔧 RootLayout에 Providers 적용 시작...');
-
   const layoutPath = path.join(projectRoot, 'src/app/layout.tsx');
   const providersPath = path.join(projectRoot, 'src/app/providers.tsx');
 
   if (!fs.existsSync(layoutPath)) {
-    console.warn('⚠️ src/app/layout.tsx가 없습니다. Providers 적용을 건너뜁니다.');
     return false;
   }
 
   if (!fs.existsSync(providersPath)) {
-    console.warn('⚠️ src/app/providers.tsx가 없습니다. Providers 적용을 건너뜁니다.');
     return false;
   }
 
@@ -1128,13 +1092,11 @@ async function applyProvidersToLayout(projectRoot) {
       namedImports: ['Providers'],
       moduleSpecifier: './providers',
     });
-    console.log('   - import { Providers } 구문 추가');
   }
 
   let layoutContent = layoutFile.getFullText();
 
   if (layoutContent.includes('<Providers>')) {
-    console.log('   - Providers가 이미 적용되어 있습니다.');
     return true;
   }
 
@@ -1180,13 +1142,10 @@ async function applyProvidersToLayout(projectRoot) {
   }
 
   if (!modified) {
-    console.warn('⚠️ {children} 패턴을 찾지 못했습니다. 수동 수정이 필요합니다.');
     return false;
   }
 
   await fs.writeFile(layoutPath, layoutContent);
-
-  console.log('✅ RootLayout에 Providers 적용 완료');
   return true;
 }
 
@@ -1202,7 +1161,6 @@ async function migrateProviders(projectRoot) {
   const { providers, entryFile, sourceFiles } = await extractProviderTree(projectRoot);
 
   if (providers.length === 0) {
-    console.log('⚠️ 마이그레이션할 Provider가 없습니다.');
     return;
   }
 

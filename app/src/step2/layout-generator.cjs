@@ -98,14 +98,10 @@ function convertHtmlToJsx(htmlString) {
  * layout.tsx 생성 메인 함수
  */
 async function generateLayout(projectRoot) {
-  console.log('📄 index.html을 분석하여 layout.tsx 생성을 시도합니다...');
-
   const indexHtmlPath = path.join(projectRoot, 'index.html');
   const targetLayoutPath = path.join(projectRoot, 'src/app/layout.tsx');
 
   if (!fs.existsSync(indexHtmlPath)) {
-    console.warn('⚠️ index.html 파일을 찾을 수 없습니다. 기본 레이아웃을 생성합니다.');
-    // 파일이 없을 경우 기본 템플릿 반환
     return;
   }
 
@@ -153,8 +149,6 @@ export default function RootLayout({
   const appDir = path.dirname(targetLayoutPath);
   await fs.ensureDir(appDir);
   await fs.writeFile(targetLayoutPath, layoutContent.trim());
-
-  console.log(`✅ 생성 완료: src/app/layout.tsx`);
 }
 
 module.exports = { generateLayout };

@@ -210,11 +210,8 @@ function migrateNavLink(sourceFile) {
             }
           }
 
-          // hrefValue가 없으면 경고하고 건너뛰기
+          // hrefValue가 없으면 건너뛰기
           if (!hrefValue) {
-            console.warn(
-              `   ⚠️ ${isNavLink ? 'NavLink' : 'Link'}에서 href 값을 찾을 수 없습니다. className 변환을 건너뜁니다.`,
-            );
             continue;
           }
           // 부모 함수 찾기
@@ -425,7 +422,7 @@ function migrateNavLink(sourceFile) {
                   initializer.replaceWithText(`{${newClassName}}`);
                   modified = true;
                 } catch (e) {
-                  console.warn(`   ⚠️ className 변환 실패: ${e.message}`);
+                  // 변환 실패 시 무시
                 }
               }
             }
@@ -692,11 +689,8 @@ async function migrateFileLinks(filePath) {
  * Link 마이그레이션 메인 함수
  */
 async function migrateLinks(projectRoot) {
-  console.log('🔗 Link 마이그레이션 시작...');
-
   const srcDir = path.join(projectRoot, 'src');
   if (!fs.existsSync(srcDir)) {
-    console.warn('⚠️ src 디렉토리가 없습니다.');
     return;
   }
 
@@ -727,22 +721,13 @@ async function migrateLinks(projectRoot) {
 
   await findFiles(srcDir);
 
-  console.log(`   📁 처리할 파일: ${files.length}개`);
-
-  let modifiedCount = 0;
   for (const file of files) {
     try {
-      const modified = await migrateFileLinks(file);
-      if (modified) {
-        modifiedCount++;
-        console.log(`   ✅ 수정: ${path.relative(projectRoot, file)}`);
-      }
+      await migrateFileLinks(file);
     } catch (error) {
-      console.warn(`   ⚠️ 오류 발생 (${path.relative(projectRoot, file)}): ${error.message}`);
+      // 오류 시 무시
     }
   }
-
-  console.log(`✅ Link 마이그레이션 완료 (${modifiedCount}개 파일 수정)`);
 }
 
 // ============================================================================

@@ -1430,8 +1430,6 @@ async function migrateImportMetaEnvInAllFiles(cwd) {
     return;
   }
   
-  console.log(chalk.blue('   import.meta.env.VITE_* 패턴 변환 시작...'));
-
   async function findTsFiles(dir) {
     const files = [];
     const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -1478,11 +1476,6 @@ async function migrateImportMetaEnvInAllFiles(cwd) {
     }
   }
 
-  if (processedCount > 0) {
-    console.log(chalk.cyan(`   ✅ ${processedCount}개 파일에서 import.meta.env.VITE_* 패턴을 process.env.NEXT_PUBLIC_*로 변환했습니다.`));
-  } else {
-    console.log(chalk.gray(`   ℹ️  import.meta.env.VITE_* 패턴을 사용하는 파일이 없습니다.`));
-  }
 }
 
 // Case f: import.meta.env.* 직접 치환 처리
