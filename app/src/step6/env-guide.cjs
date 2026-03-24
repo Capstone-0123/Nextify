@@ -16,6 +16,7 @@ const chalk = require('chalk');
  * - VITE_ → NEXT_PUBLIC_ 접두어 변경 안내
  */
 async function guideEnvMigration(projectRoot) {
+  // .env 파일명·접두어 안내만 제공 (충돌·환경 가이드와 동일하게 AI 자동 수정 없음)
   console.log(chalk.blue.bold('\n📋 환경 변수 마이그레이션 가이드'));
   console.log(chalk.gray('─'.repeat(50)));
 

@@ -3,7 +3,26 @@
 
 const fs = require('fs-extra');
 const path = require('path');
-const chalk = require('chalk');
+const { stopAndOfferGeminiApply } = require('../utils/manual-flow.cjs');
+
+function relFromRoot(projectRoot, absPath) {
+  return path.relative(projectRoot, absPath).split(path.sep).join('/');
+}
+
+function collectFontAiCandidates(projectRoot, primaryRel) {
+  const set = new Set([primaryRel]);
+  const extras = [
+    'src/app/layout.tsx',
+    'src/app/globals.css',
+    'src/index.html',
+    'src/App.css',
+    'index.html',
+  ];
+  for (const e of extras) {
+    if (fs.existsSync(path.join(projectRoot, e))) set.add(e);
+  }
+  return [...set];
+}
 
 //=========================================================
 // next/font 적용 메인 함수
@@ -41,10 +60,15 @@ async function checkManualProcessingCases(projectRoot) {
     
     // CSS 변수 사용 체크
     if (cssContent.includes('--font-') && cssContent.match(/font-family\s*:\s*var\(--font-[^)]+\)/g)) {
-      throw new Error(
-        chalk.red.bold('\n❌ 수동 처리 필요: CSS 변수(--font-...) 또는 font-family fallback 체인이 복잡하게 구성되어 있습니다.\n') +
-        chalk.yellow('   개발자가 직접 next/font/google 또는 next/font/local로 변환해야 합니다.\n')
-      );
+      const rel = relFromRoot(projectRoot, cssFilePath);
+      await stopAndOfferGeminiApply({
+        projectRoot,
+        discoveryLine:
+          'CSS 변수(--font-...) 또는 font-family fallback 체인이 복잡하게 구성된 스타일이 발견되었습니다.',
+        instructionForAi: `Next.js App Router로 마이그레이션합니다. ${rel} 및 layout에서 --font- CSS 변수와 font-family를 next/font 패턴에 맞게 수정하세요.`,
+        candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
+      });
+      return;
     }
   }
 
@@ -75,18 +99,25 @@ async function checkManualProcessingCases(projectRoot) {
     
     // FontFace API 사용 체크
     if (content.includes('new FontFace') || content.includes('FontFace(')) {
-      throw new Error(
-        chalk.red.bold('\n❌ 수동 처리 필요: JS 코드에서 동적으로 폰트를 로드하는 경우 (FontFace API 사용)\n') +
-        chalk.yellow('   개발자가 직접 next/font/local로 변환해야 합니다.\n')
-      );
+      const rel = relFromRoot(projectRoot, filePath);
+      await stopAndOfferGeminiApply({
+        projectRoot,
+        discoveryLine: 'FontFace API로 동적 폰트를 로드하는 코드가 발견되었습니다.',
+        instructionForAi: `Next.js에서 ${rel}의 FontFace 사용을 next/font/local 기반으로 바꾸세요.`,
+        candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
+      });
+      return;
     }
-    
-    // document.fonts.load() 사용 체크
+
     if (content.includes('document.fonts.load') || content.includes('fonts.load(')) {
-      throw new Error(
-        chalk.red.bold('\n❌ 수동 처리 필요: JS 코드에서 동적으로 폰트를 로드하는 경우 (document.fonts.load 사용)\n') +
-        chalk.yellow('   개발자가 직접 next/font/local로 변환해야 합니다.\n')
-      );
+      const rel = relFromRoot(projectRoot, filePath);
+      await stopAndOfferGeminiApply({
+        projectRoot,
+        discoveryLine: 'document.fonts.load 등으로 동적 폰트를 로드하는 코드가 발견되었습니다.',
+        instructionForAi: `Next.js에서 ${rel}의 fonts.load 사용을 next/font/local 기반으로 바꾸세요.`,
+        candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
+      });
+      return;
     }
   }
 
@@ -105,10 +136,14 @@ async function checkManualProcessingCases(projectRoot) {
       if (fontLinks) {
         for (const link of fontLinks) {
           if (!link.includes('fonts.googleapis.com') && !link.includes('fonts.gstatic.com')) {
-            throw new Error(
-              chalk.red.bold('\n❌ 수동 처리 필요: 외부 CDN에서 폰트를 직접 로드하는 경우\n') +
-              chalk.yellow('   개발자가 직접 next/font/local로 변환해야 합니다.\n')
-            );
+            const rel = relFromRoot(projectRoot, htmlPath);
+            await stopAndOfferGeminiApply({
+              projectRoot,
+              discoveryLine: 'Google Fonts가 아닌 외부 CDN 폰트 링크가 발견되었습니다.',
+              instructionForAi: `Next.js로 마이그레이션합니다. ${rel}의 외부 폰트 링크를 next/font/local 또는 적절한 next/font 사용으로 바꾸세요.`,
+              candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
+            });
+            return;
           }
         }
       }
@@ -176,10 +211,14 @@ async function migrateGoogleFontsFromIndexHtml(projectRoot) {
   // 여러 개의 family 파라미터가 동시에 존재하는 경우 수동 처리 대상
   const familyMatches = htmlContent.match(/family=([^:&]+)/g);
   if (familyMatches && familyMatches.length > 1) {
-    throw new Error(
-      chalk.red.bold('\n❌ 수동 처리 필요: Google Fonts URL에서 여러 개의 family 파라미터가 동시에 존재합니다.\n') +
-      chalk.yellow('   개발자가 직접 next/font/google로 변환해야 합니다.\n')
-    );
+    const rel = relFromRoot(projectRoot, indexHtmlPath);
+    await stopAndOfferGeminiApply({
+      projectRoot,
+      discoveryLine: 'Google Fonts URL에 family 파라미터가 여러 개인 링크가 발견되었습니다.',
+      instructionForAi: `${rel}의 Google Fonts를 여러 next/font/google 임포트로 나누고 layout에 반영한 뒤 링크를 제거하세요.`,
+      candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
+    });
+    return;
   }
 
   if (!fontFamilyIdentifier) {
@@ -236,10 +275,14 @@ async function migrateGoogleFontsFromCssImport(projectRoot) {
     // 여러 개의 family 파라미터가 동시에 존재하는 경우 수동 처리 대상
     const familyMatches = cssContent.match(/family=([^:&]+)/g);
     if (familyMatches && familyMatches.length > 1) {
-      throw new Error(
-        chalk.red.bold('\n❌ 수동 처리 필요: Google Fonts URL에서 여러 개의 family 파라미터가 동시에 존재합니다.\n') +
-        chalk.yellow('   개발자가 직접 next/font/google로 변환해야 합니다.\n')
-      );
+      const rel = relFromRoot(projectRoot, cssFilePath);
+      await stopAndOfferGeminiApply({
+        projectRoot,
+        discoveryLine: 'CSS @import Google Fonts에 family 파라미터가 여러 개인 구문이 발견되었습니다.',
+        instructionForAi: `${rel}의 @import Google Fonts를 next/font/google로 옮기고 CSS를 정리하세요.`,
+        candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
+      });
+      return;
     }
 
     // 3. import URL에서 FontFamilyIdentifier, WeightList, DisplayOption 추출
@@ -369,11 +412,14 @@ async function migrateLocalFontsFromFontFace(projectRoot) {
     }
 
     if (fontFamilyNames.size === 1 && fontFaceMatches.length > 1) {
-      // 같은 font-family로 여러 @font-face가 묶여 있음
-      throw new Error(
-        chalk.red.bold('\n❌ 수동 처리 필요: CSS에서 여러 @font-face 선언이 하나의 font-family로 묶여 있습니다.\n') +
-        chalk.yellow('   개발자가 직접 next/font/local로 변환해야 합니다.\n')
-      );
+      const rel = relFromRoot(projectRoot, cssFilePath);
+      await stopAndOfferGeminiApply({
+        projectRoot,
+        discoveryLine: '동일 font-family에 @font-face 선언이 여러 개 묶여 있는 CSS가 발견되었습니다.',
+        instructionForAi: `${rel}의 @font-face들을 next/font/local 한 번으로 정리하고 layout/className을 맞추세요.`,
+        candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
+      });
+      return;
     }
 
     // 3. @font-face 블록에서 값 추출
