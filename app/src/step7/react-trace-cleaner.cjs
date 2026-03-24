@@ -278,6 +278,29 @@ async function removeReactHelmetImports(projectRoot) {
     return files;
   }
 
+  // Step3 commentOutHelmet이 남긴 JSX 블록 주석( Migrated to Next.js Metadata API … ) 안의
+  // <Helmet> 문자열은 텍스트일 뿐인데, helmetPattern이 다시 잡으면 TODO용 JSX 주석을
+  // 안쪽에 넣어 주석이 깨지고 닫는 토큰( star + slash + } ) 중복 등 구문 오류가 난다.
+  // 블록 주석 안에 star-slash 를 쓰면 편집기가 주석을 중간에 끊으므로 여기서는 // 로만 설명한다.
+  function indexInsideMigratedMetadataJsxComment(src, idx) {
+    const marker = 'Migrated to Next.js Metadata API';
+    let from = 0;
+    while (from < src.length) {
+      const mPos = src.indexOf(marker, from);
+      if (mPos === -1) return false;
+      const commentOpen = src.lastIndexOf('{/*', mPos);
+      if (commentOpen === -1 || commentOpen > mPos) {
+        from = mPos + marker.length;
+        continue;
+      }
+      const close = src.indexOf('*/}', commentOpen);
+      if (close === -1) return false;
+      if (idx >= commentOpen && idx <= close + 2) return true;
+      from = close + 3;
+    }
+    return false;
+  }
+
   // 파일 내 React Helmet import 삭제 및 사용 코드 제거
   async function processFile(filePath) {
     let content = await fs.readFile(filePath, 'utf-8');
@@ -301,22 +324,25 @@ async function removeReactHelmetImports(projectRoot) {
     // HelmetProvider 사용 코드 제거
     // <HelmetProvider>...</HelmetProvider> 패턴 찾기 및 제거
     const helmetProviderPattern = /<HelmetProvider[^>]*>([\s\S]*?)<\/HelmetProvider>/g;
-    if (helmetProviderPattern.test(content)) {
-      content = content.replace(helmetProviderPattern, (match, children) => {
-        // HelmetProvider 내부의 children만 남기기
-        return children.trim();
-      });
+    const afterProvider = content.replace(helmetProviderPattern, (match, children) =>
+      children.trim()
+    );
+    if (afterProvider !== content) {
+      content = afterProvider;
       hasChanges = true;
     }
 
     // Helmet 사용 코드도 주석 처리 (metadata로 변환되었을 수 있으므로)
     // <Helmet>...</Helmet> 패턴 찾기 및 주석 처리
     const helmetPattern = /<Helmet[^>]*>([\s\S]*?)<\/Helmet>/g;
-    if (helmetPattern.test(content)) {
-      content = content.replace(helmetPattern, (match) => {
-        // 주석으로 처리
-        return `{/* TODO: Helmet을 Next.js metadata로 변환 필요\n${match}\n*/}`;
-      });
+    const afterHelmet = content.replace(helmetPattern, (match, _inner, offset) => {
+      if (indexInsideMigratedMetadataJsxComment(content, offset)) {
+        return match;
+      }
+      return `{/* TODO: Helmet을 Next.js metadata로 변환 필요\n${match}\n*/}`;
+    });
+    if (afterHelmet !== content) {
+      content = afterHelmet;
       hasChanges = true;
     }
     
@@ -465,4 +491,3 @@ async function removeReactRouterHistoryImports(projectRoot) {
 module.exports = {
   cleanReactTrace,
 };
-
