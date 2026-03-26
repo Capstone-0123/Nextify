@@ -3,7 +3,41 @@
 const fs = require('fs-extra');
 const path = require('path');
 const chalk = require('chalk');
-const readline = require('readline');
+const {
+  askContinueAfterManualGuide,
+  stopAndOfferGeminiApply,
+  collectMigrationCandidateRelPaths,
+} = require('../utils/manual-flow.cjs');
+
+/** define → 코드 치환 후 .env/.env.local 은 사용자가 직접 관리 */
+function printEnvFilesManualGuide(contextTitle, nextPublicNames) {
+  console.log(chalk.cyan.bold(`\n📋 .env / .env.local 수동 처리 (${contextTitle})`));
+  console.log(chalk.gray('  이 단계는 소스 코드의 환경변수 참조만 Next.js 규칙에 맞게 바꿉니다.'));
+  console.log(
+    chalk.gray('  .env, .env.local 파일의 생성·수정·변수 값 입력은 모두 직접 하세요. (자동 생성/자동 편집 없음)')
+  );
+  console.log(
+    chalk.gray('  브라우저에서 필요한 값은 NEXT_PUBLIC_* 이름으로 .env.local 등에 넣는 것을 권장합니다.')
+  );
+  if (nextPublicNames && nextPublicNames.length > 0) {
+    console.log(chalk.yellow('\n  코드에서 사용하게 된 변수(확인 후 .env.local 에 맞게 설정):'));
+    [...new Set(nextPublicNames)].forEach((n) => console.log(chalk.white(`    - ${n}`)));
+  }
+}
+
+function printBasePathConflictManualGuide(existingBasePath, viteBaseRaw, normalizedViteBase) {
+  console.log(chalk.yellow.bold('\n⚠️  basePath 충돌 — 작업 중단'));
+  console.log(chalk.yellow(`  next.config.mjs  basePath: "${existingBasePath}"`));
+  console.log(chalk.yellow(`  vite.config.ts   base:      "${viteBaseRaw}"`));
+  console.log(chalk.cyan('\n📋 수동 처리 가이드:'));
+  console.log(chalk.gray('  1. 실제 배포/접근 URL 기준으로 하나의 base 경로만 남길지 정합니다.'));
+  console.log(
+    chalk.gray(
+      `  2. next.config.mjs 의 basePath 를 최종 값으로 수정합니다. (Vite 반영 예: "${normalizedViteBase}" 또는 기존 Next 값 유지: "${existingBasePath}")`
+    )
+  );
+  console.log(chalk.gray('  3. 저장한 뒤 마이그레이션(step1)을 다시 실행하세요.'));
+}
 
 // [중요] 기존의 const CWD = process.cwd(); 는 삭제하거나 주석 처리합니다.
 // 함수들이 이제 인자로 경로를 받아서 처리하기 때문입니다.
@@ -190,14 +224,14 @@ async function migrateViteConfig(cwd) {
   const hasManualProxyItems = c2Result && c2Result.skipped && c2Result.skipped.length > 0;
   let shouldContinueWithProxy = true; // 기본값은 계속 진행
   if (hasManualProxyItems) {
-    shouldContinueWithProxy = await printManualProxyMigrationGuide(c2Result.skipped);
+    shouldContinueWithProxy = await printManualProxyMigrationGuide(cwd, c2Result.skipped);
   }
 
   // Case d: server.port 존재 시 package.json dev 스크립트 반영
   await migrateServerPortToPackageJson(cwd, viteConfigContent);
 
-  // Case e: base 존재 시 next.config.mjs basePath 반영
-  const basePathConflict = await migrateBaseToNextConfig(cwd, viteConfigContent);
+  // Case e: base 존재 시 next.config.mjs basePath 반영 (충돌 시 해소될 때까지 재확인 루프)
+  await migrateBaseToNextConfig(cwd);
 
   // Case f: SVG를 React 컴포넌트로 사용하는 경우 처리
   await migrateSvgAsReactComponent(cwd);
@@ -206,46 +240,13 @@ async function migrateViteConfig(cwd) {
   await migrateViteDefineInternal(cwd);
 
   // Case h: vite.config.ts 파일 삭제
-  // 위 case 수행 후, Vite 설정이 더 이상 필요하지 않은 상태이므로 삭제
-  // basePath 충돌이 발생했거나 proxy 수동 처리가 필요한 경우, 사용자가 계속 진행하기로 한 경우에만 삭제
-  // basePath 충돌에서 사용자가 n을 입력한 경우 basePathConflict가 true로 반환되어 여기 도달하지 않음
-  if (basePathConflict === false && shouldContinueWithProxy) {
-    // 충돌이 없고 proxy도 계속 진행하기로 한 경우 바로 삭제
+  if (shouldContinueWithProxy) {
     if (fs.existsSync(viteConfigPath)) {
       await fs.remove(viteConfigPath);
     }
-  } else if (!shouldContinueWithProxy) {
-    // proxy 수동 처리에서 사용자가 n을 입력한 경우 삭제하지 않음
-    console.log(chalk.yellow('\n⚠️  vite.config.ts 파일이 유지되었습니다. 수동으로 확인 후 삭제해주세요.\n'));
-  } else if (basePathConflict === true) {
-    // basePath 충돌에서 사용자가 n을 입력한 경우 (이론적으로는 도달하지 않지만 안전을 위해)
+  } else {
     console.log(chalk.yellow('\n⚠️  vite.config.ts 파일이 유지되었습니다. 수동으로 확인 후 삭제해주세요.\n'));
   }
-}
-
-// 사용자 확인 함수
-function askUserConfirmation(basePathConflict, hasManualProxyItems) {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-
-    let message = '\n⚠️  작업 중단 사항이 발생했습니다.\n';
-    if (basePathConflict) {
-      message += '   - basePath 충돌 발생\n';
-    }
-    if (hasManualProxyItems) {
-      message += '   - 수동 처리 필요한 server.proxy 항목 존재\n';
-    }
-    message += '\n계속 진행하시겠습니까? (y/n): ';
-
-    rl.question(chalk.yellow(message), (answer) => {
-      rl.close();
-      const shouldContinue = answer.toLowerCase().trim() === 'y' || answer.toLowerCase().trim() === 'yes';
-      resolve(shouldContinue);
-    });
-  });
 }
 
 // Case c-1: server.proxy를 Next.js rewrites로 마이그레이션
@@ -592,74 +593,23 @@ ${rewritesObjects.join(',\n')}
   return { migrated: proxyItems, skipped: skippedItems };
 }
 
-// Case c-3: server.proxy 값이 객체이며 rewrites로 이관 불가한 경우 - 사용자 안내
-async function printManualProxyMigrationGuide(skippedItems) {
-  console.log('\n' + chalk.yellow.bold('⚠️  수동 처리 필요: server.proxy 설정'));
-  console.log(chalk.yellow('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-  
-  console.log(chalk.yellow('\n다음 proxy 설정은 자동으로 Next.js rewrites로 이관할 수 없습니다:'));
-  console.log('');
-  
+// Case c-3: server.proxy 값이 객체이며 rewrites로 이관 불가한 경우 — Gemini만 (긴 수동 가이드 없음)
+async function printManualProxyMigrationGuide(cwd, skippedItems) {
+  console.log(chalk.gray('\n자동 이관에서 제외된 proxy 항목:'));
   skippedItems.forEach((item, index) => {
-    console.log(chalk.yellow(`  ${index + 1}. ${chalk.bold(item.proxyKey)}`));
-    if (item.targetUrl) {
-      console.log(chalk.gray(`     → Target: ${item.targetUrl}`));
-    }
-    console.log(chalk.gray(`     → 사유: ${item.reason}`));
-    if (item.forbiddenOptions && item.forbiddenOptions.length > 0) {
-      console.log(chalk.gray(`     → 발견된 옵션: ${item.forbiddenOptions.join(', ')}`));
-    }
-    console.log('');
+    const extra = item.targetUrl ? ` → ${item.targetUrl}` : '';
+    console.log(chalk.gray(`  ${index + 1}. ${item.proxyKey}${extra} (${item.reason})`));
   });
-  
-  console.log(chalk.cyan.bold('\n📋 수동 처리 방법:'));
-  console.log('');
-  console.log(chalk.cyan('방법 1: Next.js API Routes 사용 (권장)'));
-  console.log(chalk.gray('  Next.js API Routes를 사용하여 서버 사이드에서 외부 API를 호출합니다.'));
-  console.log('');
-  console.log(chalk.gray('  예시:'));
-  console.log(chalk.white('  // src/app/api/proxy/[...path]/route.ts'));
-  console.log(chalk.white('  export async function GET(request: Request) {'));
-  console.log(chalk.white('    const { path } = await request.json();'));
-  console.log(chalk.white('    const targetUrl = "http://localhost:8080";'));
-  console.log(chalk.white('    const response = await fetch(`${targetUrl}${path}`);'));
-  console.log(chalk.white('    return new Response(response.body, {'));
-  console.log(chalk.white('      status: response.status,'));
-  console.log(chalk.white('      headers: response.headers,'));
-  console.log(chalk.white('    });'));
-  console.log(chalk.white('  }'));
-  console.log('');
-  console.log(chalk.cyan('방법 2: 별도의 프록시 서버 구성'));
-  console.log(chalk.gray('  http-proxy-middleware나 다른 프록시 서버를 별도로 구성합니다.'));
-  console.log('');
-  console.log(chalk.gray('  예시:'));
-  console.log(chalk.white('  // 별도 프록시 서버 (예: express + http-proxy-middleware)'));
-  console.log(chalk.white('  const express = require("express");'));
-  console.log(chalk.white('  const { createProxyMiddleware } = require("http-proxy-middleware");'));
-  console.log(chalk.white('  const app = express();'));
-  console.log(chalk.white('  app.use("/api", createProxyMiddleware({'));
-  console.log(chalk.white('    target: "http://localhost:8080",'));
-  console.log(chalk.white('    changeOrigin: true,'));
-  console.log(chalk.white('    // 필요한 추가 옵션 설정'));
-  console.log(chalk.white('  }));'));
-  console.log('');
-  console.log(chalk.cyan('방법 3: 클라이언트 사이드에서 직접 호출'));
-  console.log(chalk.gray('  복잡한 프록시 설정이 필요한 경우, 클라이언트에서 직접 외부 API를 호출합니다.'));
-  console.log(chalk.gray('  (CORS 설정이 필요할 수 있습니다)'));
-  console.log('');
-  console.log(chalk.yellow('💡 참고:'));
-  console.log(chalk.gray('  - WebSocket(ws) 지원이 필요한 경우: Next.js API Routes에서 WebSocket을 직접 처리하거나'));
-  console.log(chalk.gray('    별도의 WebSocket 서버를 구성해야 합니다.'));
-  console.log(chalk.gray('  - 헤더 조작이 필요한 경우: Next.js API Routes의 request/response 객체를 사용하여'));
-  console.log(chalk.gray('    헤더를 수정할 수 있습니다.'));
-  console.log(chalk.gray('  - 쿠키 도메인/경로 재작성이 필요한 경우: Next.js API Routes에서 쿠키를 직접 처리해야 합니다.'));
-  console.log('');
-  console.log(chalk.yellow('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-  console.log('');
-  
-  // 사용자 확인
-  const shouldContinue = await askUserConfirmation(false, true);
-  return shouldContinue;
+
+  const candidateRelPaths = await collectMigrationCandidateRelPaths(cwd);
+  const skippedJson = JSON.stringify(skippedItems, null, 2);
+  await stopAndOfferGeminiApply({
+    projectRoot: cwd,
+    discoveryLine: '자동으로 Next.js rewrites로 옮길 수 없는 server.proxy 설정이 발견되었습니다.',
+    instructionForAi: `Vite/React 앱을 Next.js(App Router)로 옮기는 중입니다. 자동 변환에서 제외된 server.proxy 항목:\n${skippedJson}\n\n제공된 파일들을 기준으로 next.config.mjs의 rewrites와/또는 src/app/api Route Handler 등으로 동등한 프록시·리라이트를 구현하세요. vite 의도를 유지하고 빌드 가능하게 만드세요.`,
+    candidateRelPaths,
+  });
+  return true;
 }
 
 // Case d: server.port 존재 시 package.json dev 스크립트 반영
@@ -692,89 +642,83 @@ async function migrateServerPortToPackageJson(cwd, viteConfigContent) {
 }
 
 // Case e: base 존재 시 next.config.mjs basePath 반영
-// 반환값: true = 충돌 발생, false = 정상 처리 또는 base 없음
-async function migrateBaseToNextConfig(cwd, viteConfigContent) {
-  // 1. base 항목이 vite.config.ts에 존재하는지 확인
-  const baseMatch = viteConfigContent.match(/base\s*:\s*["']([^"']+)["']/);
-  if (!baseMatch) {
-    return false; // base가 없으면 false 반환 (충돌 없음)
-  }
-
-  // 2. base 값 확인 (마지막 슬래시 제거)
-  let baseValue = baseMatch[1];
-  if (baseValue.endsWith('/')) {
-    baseValue = baseValue.slice(0, -1);
-  }
-
-  // 3. 프로젝트 루트에 next.config.mjs 파일 열기
+// 반환값: true = 충돌 미해결로 vite 유지, false = 정상 처리 또는 base 없음
+async function migrateBaseToNextConfig(cwd) {
   const nextConfigPath = path.join(cwd, 'next.config.mjs');
-  if (!fs.existsSync(nextConfigPath)) {
-    // 파일이 없으면 생성
-    const defaultContent = `/** @type {import('next').NextConfig} */
+  const viteConfigPath = path.join(cwd, 'vite.config.ts');
+  let hadConflictRound = false;
+
+  while (true) {
+    if (!fs.existsSync(viteConfigPath)) {
+      return false;
+    }
+
+    const viteConfigContent = await fs.readFile(viteConfigPath, 'utf-8');
+    const baseMatch = viteConfigContent.match(/base\s*:\s*["']([^"']+)["']/);
+    if (!baseMatch) {
+      return false;
+    }
+
+    let baseValue = baseMatch[1];
+    if (baseValue.endsWith('/')) {
+      baseValue = baseValue.slice(0, -1);
+    }
+
+    if (!fs.existsSync(nextConfigPath)) {
+      const defaultContent = `/** @type {import('next').NextConfig} */
 const nextConfig = {};
 export default nextConfig;
 `;
-    await fs.writeFile(nextConfigPath, defaultContent);
-  }
-
-  // 4. nextConfig 객체에 basePath 항목이 존재하는지 확인
-  let nextConfigContent = await fs.readFile(nextConfigPath, 'utf-8');
-
-  // basePath 존재 여부 확인
-  const basePathMatch = nextConfigContent.match(/basePath\s*:\s*["']([^"']+)["']/);
-  
-  if (basePathMatch) {
-    // 7. basePath가 이미 존재하고 값이 다른 경우 충돌 처리
-    const existingBasePath = basePathMatch[1];
-    if (existingBasePath !== baseValue) {
-      console.warn(chalk.yellow('\n⚠️  basePath 충돌 발생'));
-      console.warn(chalk.yellow('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-      console.warn(chalk.yellow(`\nnext.config.mjs에 이미 basePath="${existingBasePath}"가 존재합니다.`));
-      console.warn(chalk.yellow(`vite.config.ts의 base="${baseMatch[1]}"와 값이 다릅니다.`));
-      console.warn(chalk.cyan('\n📋 수동 처리 방법:'));
-      console.warn(chalk.gray('\n1. 두 값 중 어느 것이 올바른지 확인하세요.'));
-      console.warn(chalk.gray('   - vite.config.ts의 base: Vite 프로젝트에서 사용하던 base 경로'));
-      console.warn(chalk.gray('   - next.config.mjs의 basePath: Next.js 프로젝트에서 이미 설정된 경로'));
-      console.warn(chalk.gray('\n2. 올바른 값을 결정한 후:'));
-      console.warn(chalk.gray('   - next.config.mjs 파일을 열어서 basePath 값을 수정하세요.'));
-      console.warn(chalk.gray('   - 예시: basePath: "/your-correct-path"'));
-      console.warn(chalk.gray('\n3. 만약 vite.config.ts의 base 값을 사용하려면:'));
-      console.warn(chalk.white(`   basePath: "${baseValue}"`));
-      console.warn(chalk.gray('\n4. 만약 기존 next.config.mjs의 basePath 값을 유지하려면:'));
-      console.warn(chalk.white(`   basePath: "${existingBasePath}" (현재 값 유지)`));
-      console.warn(chalk.yellow('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'));
-      
-      // 사용자 확인
-      const shouldContinue = await askUserConfirmation(true, false);
-      if (!shouldContinue) {
-        return true; // 사용자가 n을 입력한 경우 충돌로 반환 (작업 중단)
-      }
-      // 사용자가 y를 입력한 경우 계속 진행
-      return false; // 충돌이 있지만 사용자가 계속 진행하기로 함
+      await fs.writeFile(nextConfigPath, defaultContent);
     }
-    // 값이 같으면 유지 (아무것도 하지 않음)
-    return false; // 충돌 없음
-  }
 
-  // 5. basePath가 존재하지 않으면 추가
-  // nextConfig 객체에 basePath 추가
-  if (nextConfigContent.includes('const nextConfig = {}')) {
-    // 빈 객체인 경우
-    nextConfigContent = nextConfigContent.replace(
-      'const nextConfig = {}',
-      `const nextConfig = {\n  basePath: "${baseValue}",\n}`
-    );
-  } else if (nextConfigContent.match(/const nextConfig\s*=\s*\{/)) {
-    // 이미 내용이 있는 경우
-    nextConfigContent = nextConfigContent.replace(
-      /(const nextConfig\s*=\s*\{)/,
-      `$1\n  basePath: "${baseValue}",`
-    );
-  }
+    let nextConfigContent = await fs.readFile(nextConfigPath, 'utf-8');
+    const basePathMatch = nextConfigContent.match(/basePath\s*:\s*["']([^"']+)["']/);
 
-  // 파일 저장
-  await fs.writeFile(nextConfigPath, nextConfigContent);
-  return false; // 정상 처리 완료 (충돌 없음)
+    if (basePathMatch) {
+      const existingBasePath = basePathMatch[1];
+      if (existingBasePath !== baseValue) {
+        if (hadConflictRound) {
+          console.log(
+            chalk.yellow(
+              '\n⚠️  basePath 충돌이 아직 해결되지 않았습니다. next.config.mjs 의 basePath 와 vite.config 의 base 를 동일하게 맞춘 뒤 다시 시도하세요.'
+            )
+          );
+        }
+        hadConflictRound = true;
+        printBasePathConflictManualGuide(existingBasePath, baseMatch[1], baseValue);
+        await askContinueAfterManualGuide();
+        console.log(chalk.cyan('\n설정 파일을 다시 읽어 충돌 해소 여부를 확인합니다.'));
+        continue;
+      }
+      if (hadConflictRound) {
+        console.log(
+          chalk.green('\n✓ basePath 충돌이 해소되었습니다. 마이그레이션을 계속 진행합니다.')
+        );
+      }
+      return false;
+    }
+
+    if (nextConfigContent.includes('const nextConfig = {}')) {
+      nextConfigContent = nextConfigContent.replace(
+        'const nextConfig = {}',
+        `const nextConfig = {\n  basePath: "${baseValue}",\n}`
+      );
+    } else if (nextConfigContent.match(/const nextConfig\s*=\s*\{/)) {
+      nextConfigContent = nextConfigContent.replace(
+        /(const nextConfig\s*=\s*\{)/,
+        `$1\n  basePath: "${baseValue}",`
+      );
+    }
+
+    await fs.writeFile(nextConfigPath, nextConfigContent);
+    if (hadConflictRound) {
+      console.log(
+        chalk.green('\n✓ basePath 충돌이 해소되었습니다. 마이그레이션을 계속 진행합니다.')
+      );
+    }
+    return false;
+  }
 }
 
 // Case f: SVG를 React 컴포넌트로 사용하는 경우 처리
@@ -1115,9 +1059,13 @@ async function migrateViteDefineLogic(cwd) {
   // Case b: define.global = "window" 만 존재 (또는 포함)
   const globalWindowMatch = defineContent.match(/global\s*:\s*["']window["']/);
   if (globalWindowMatch) {
-    console.log(chalk.yellow('\n⚠️  define에 global: "window" 설정이 발견되었습니다.'));
-    console.log(chalk.yellow('   Next 환경에서 자동 치환 시 서버 런타임 오류가 발생할 수 있으므로 수동 확인이 필요합니다.'));
-    // 자동 변환하지 않고 경고만 출력
+    const candidateRelPaths = await collectMigrationCandidateRelPaths(cwd);
+    await stopAndOfferGeminiApply({
+      projectRoot: cwd,
+      discoveryLine: 'vite define에 global: "window" 설정이 발견되었습니다.',
+      instructionForAi: `Next.js(App Router) 마이그레이션입니다. vite define의 global: "window" 에 의존하는 부분을 제거하거나, 클라이언트 전용 패턴으로 안전하게 바꾸세요.`,
+      candidateRelPaths,
+    });
   }
 
   // Case c: define에 빌드 타임 상수 키가 존재 (___XXX___ 형태)
@@ -1308,8 +1256,7 @@ async function migrateProcessEnvInDefine(cwd, defineContent) {
       // 5. 위 조건을 만족하면 코드 내 참조만 Next 표준으로 치환
       // 단, NODE_ENV인 경우 자동 치환하지 않음
       if (envName === 'NODE_ENV') {
-        console.log(chalk.yellow('\n⚠️  define에서 process.env.NODE_ENV 치환이 발견되었습니다.'));
-        console.log(chalk.yellow('   Next에서는 NODE_ENV가 빌드 시스템에 의해 자동 관리되므로 자동 변환하지 않습니다. 수동 확인이 필요합니다.'));
+        console.log(chalk.gray('define의 process.env.NODE_ENV 는 Next가 관리하므로 건너뜁니다.'));
         continue;
       }
 
@@ -1325,9 +1272,12 @@ async function migrateProcessEnvInDefine(cwd, defineContent) {
     return;
   }
 
+  const envGuideNames = matches.map((m) => m.nextPublicName);
+
   // 5.1. 프로젝트 전체 .ts, .tsx에서 process.env.<ENV_NAME> 검색
   const srcDir = path.join(cwd, 'src');
   if (!fs.existsSync(srcDir)) {
+    printEnvFilesManualGuide('define의 process.env.* 하드코딩 치환', envGuideNames);
     return;
   }
 
@@ -1365,10 +1315,8 @@ async function migrateProcessEnvInDefine(cwd, defineContent) {
     }
   }
 
-  // 6. 터미널에 메시지 기록
-  for (const match of matches) {
-    console.log(chalk.cyan(`\n💡 ${match.nextPublicName} 값을 환경변수로 제공해야 함`));
-  }
+  printEnvFilesManualGuide('define의 process.env.* 하드코딩 치환', envGuideNames);
+  await askContinueAfterManualGuide();
 }
 
 // Case e: 복잡한 표현식 처리
@@ -1404,21 +1352,14 @@ async function handleComplexDefineExpressions(cwd, defineContent) {
     return;
   }
 
-  // 2. 복잡 표현식 항목은 자동 이관하지 않음
-  // 3. 터미널에 정보 기록
-  console.log(chalk.yellow('\n⚠️  복잡한 define 표현식이 발견되었습니다.'));
-  console.log(chalk.yellow('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-
-  for (const item of complexItems) {
-    console.log(chalk.yellow(`\n  define 키: ${item.key}`));
-    console.log(chalk.yellow(`  원본 값 표현식: ${item.value}`));
-  }
-
-  console.log(chalk.cyan('\n📋 추천 대안 중 하나를 선택하세요:'));
-  console.log(chalk.gray('  1. 런타임 환경변수로 이동 (Next Public/Server 구분 필요)'));
-  console.log(chalk.gray('  2. src/config/*.ts 상수 모듈로 이동 (빌드 시 고정값이면)'));
-  console.log(chalk.gray('  3. 서버에서만 필요한 값이면 Server Component/Route Handler에서 계산하도록 이동'));
-  console.log(chalk.yellow('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'));
+  const complexJson = JSON.stringify(complexItems, null, 2);
+  const candidateRelPaths = await collectMigrationCandidateRelPaths(cwd);
+  await stopAndOfferGeminiApply({
+    projectRoot: cwd,
+    discoveryLine: `vite define에 자동 변환하기 어려운 복잡한 표현식이 ${complexItems.length}건 발견되었습니다.`,
+    instructionForAi: `Next.js 마이그레이션입니다. vite.config.ts define의 다음 항목을 Next.js에 맞게 옮기세요 (NEXT_PUBLIC_ 환경변수, src/config 모듈, 서버 전용 코드 등 적절히 구분).\n항목:\n${complexJson}`,
+    candidateRelPaths,
+  });
 }
 
 // Case a-1: define이 없을 때 모든 파일에서 import.meta.env.VITE_* 변환
@@ -1510,9 +1451,13 @@ async function migrateImportMetaEnvInDefine(cwd, defineContent) {
     return;
   }
 
+  const envGuideNamesMeta = matches.map((m) => m.nextPublicName);
+
   // 3. 프로젝트 전체 .ts, .tsx에서 import.meta.env.<VITE_NAME> 검색
   const srcDir = path.join(cwd, 'src');
   if (!fs.existsSync(srcDir)) {
+    printEnvFilesManualGuide('define의 import.meta.env.* 직접 치환', envGuideNamesMeta);
+    await askContinueAfterManualGuide();
     return;
   }
 
@@ -1550,10 +1495,8 @@ async function migrateImportMetaEnvInDefine(cwd, defineContent) {
     }
   }
 
-  // 5. 터미널에 메시지 기록 (.env는 생성하지 않음)
-  for (const match of matches) {
-    console.log(chalk.cyan(`\n💡 ${match.nextPublicName} 값을 환경변수로 제공해야 함`));
-  }
+  printEnvFilesManualGuide('define의 import.meta.env.* 직접 치환', envGuideNamesMeta);
+  await askContinueAfterManualGuide();
 }
 
 // =================================================================================================
@@ -1662,23 +1605,7 @@ async function migrateTsConfigApp(cwd) {
   }
 
   try {
-    const tsConfig = await readJsonSafe(tsConfigPath);
-    if (!tsConfig) {
-      throw new Error('tsconfig.json 파싱 실패');
-    }
-
-    const appConfig = await readJsonSafe(tsConfigAppPath);
-    if (!appConfig) {
-      throw new Error('tsconfig.app.json 파싱 실패');
-    }
-
     // 2. tsconfig.app.json compilerOptions 설정을 Next 기준 tsconfig.json compilerOptions으로 재구성
-    // 2.1. tsconfig.json compilerOptions 객체 생성
-    if (!tsConfig.compilerOptions) {
-      tsConfig.compilerOptions = {};
-    }
-
-    // 2.2. tsconfig.app.json의 compilerOptions 선별 및 복사
     // 2.2.1 유지 키 목록
     const keepKeys = [
       'target',
@@ -1695,46 +1622,76 @@ async function migrateTsConfigApp(cwd) {
       'noFallthroughCasesInSwitch'
     ];
 
-    // 2.2.2, 2.2.3: 위 유지 키 중 tsconfig.app.json에 존재하는 항목만 복사
-    const appCompilerOptions = appConfig.compilerOptions || {};
-    keepKeys.forEach((key) => {
-      if (appCompilerOptions[key] !== undefined) {
-        // tsconfig.json에 이미 존재하지 않는 경우에만 복사
-        if (tsConfig.compilerOptions[key] === undefined) {
-          tsConfig.compilerOptions[key] = appCompilerOptions[key];
+    let tsConfig;
+    let hadConflictRound = false;
+
+    while (true) {
+      tsConfig = await readJsonSafe(tsConfigPath);
+      if (!tsConfig) {
+        throw new Error('tsconfig.json 파싱 실패');
+      }
+
+      const appConfig = await readJsonSafe(tsConfigAppPath);
+      if (!appConfig) {
+        throw new Error('tsconfig.app.json 파싱 실패');
+      }
+
+      // 2.1. tsconfig.json compilerOptions 객체 생성
+      if (!tsConfig.compilerOptions) {
+        tsConfig.compilerOptions = {};
+      }
+
+      // 2.2.2, 2.2.3: 위 유지 키 중 tsconfig.app.json에 존재하는 항목만 복사
+      const appCompilerOptions = appConfig.compilerOptions || {};
+      keepKeys.forEach((key) => {
+        if (appCompilerOptions[key] !== undefined) {
+          if (tsConfig.compilerOptions[key] === undefined) {
+            tsConfig.compilerOptions[key] = appCompilerOptions[key];
+          }
         }
+      });
+
+      // 2.3. Vite 전용 키 제외 (이미 위에서 제외됨 - keepKeys에 포함되지 않음)
+      // 제외할 키: tsBuildInfoFile, types, allowImportingTsExtensions, verbatimModuleSyntax,
+      // moduleDetection, erasableSyntaxOnly, noUncheckedSideEffectImports
+
+      // 2.4. Next.js 기준 compilerOptions 생성
+      tsConfig.compilerOptions.allowJs = true;
+      tsConfig.compilerOptions.resolveJsonModule = true;
+      tsConfig.compilerOptions.isolatedModules = true;
+      tsConfig.compilerOptions.forceConsistentCasingInFileNames = true;
+      tsConfig.compilerOptions.esModuleInterop = true;
+      tsConfig.compilerOptions.incremental = true;
+
+      // 3. compilerOptions.jsx 값을 preserve로 변경
+      if (tsConfig.compilerOptions.jsx === 'react-jsx') {
+        tsConfig.compilerOptions.jsx = 'preserve';
       }
-    });
 
-    // 2.3. Vite 전용 키 제외 (이미 위에서 제외됨 - keepKeys에 포함되지 않음)
-    // 제외할 키: tsBuildInfoFile, types, allowImportingTsExtensions, verbatimModuleSyntax, 
-    // moduleDetection, erasableSyntaxOnly, noUncheckedSideEffectImports
-
-    // 2.4. Next.js 기준 compilerOptions 생성
-    tsConfig.compilerOptions.allowJs = true;
-    tsConfig.compilerOptions.resolveJsonModule = true;
-    tsConfig.compilerOptions.isolatedModules = true;
-    tsConfig.compilerOptions.forceConsistentCasingInFileNames = true;
-    tsConfig.compilerOptions.esModuleInterop = true;
-    tsConfig.compilerOptions.incremental = true;
-
-    // 3. compilerOptions.jsx 값을 preserve로 변경
-    // 3.1. tsconfig.json의 compilerOptions.jsx 값이 "react-jsx"인 경우 "preserve"로 변경한다
-    if (tsConfig.compilerOptions.jsx === 'react-jsx') {
-      tsConfig.compilerOptions.jsx = 'preserve';
-    }
-    // 이미 "preserve"이면 변경하지 않는다
-
-    // 4. baseUrl, paths 설정 이관
-    const conflictResult = await migrateBaseUrlAndPaths(cwd, tsConfig, appCompilerOptions);
-    if (conflictResult.hasConflict) {
-      // 충돌 발생 시 사용자에게 확인
-      const shouldContinue = await askUserConfirmationForTsConfig(conflictResult.conflictType, conflictResult.conflictDetails);
-      if (!shouldContinue) {
-        // 사용자가 n을 입력한 경우 작업 중단
-        return false;
+      // 4. baseUrl, paths 설정 이관
+      const conflictResult = await migrateBaseUrlAndPaths(cwd, tsConfig, appCompilerOptions);
+      if (!conflictResult.hasConflict) {
+        if (hadConflictRound) {
+          console.log(
+            chalk.green(
+              '\n✓ TypeScript baseUrl/paths 충돌이 해소되었습니다. 마이그레이션을 계속 진행합니다.'
+            )
+          );
+        }
+        break;
       }
-      // 사용자가 y를 입력한 경우 계속 진행 (충돌이 있어도 경고만 표시하고 진행)
+
+      if (hadConflictRound) {
+        console.log(
+          chalk.yellow(
+            '\n⚠️  baseUrl/paths 충돌이 아직 해결되지 않았습니다. tsconfig.json 과 tsconfig.app.json (및 필요 시 vite alias)을 아래 가이드대로 맞춘 뒤 다시 시도하세요.'
+          )
+        );
+      }
+      hadConflictRound = true;
+      printTsConfigConflictGuide(conflictResult.conflictType, conflictResult.conflictDetails);
+      await askContinueAfterManualGuide();
+      console.log(chalk.cyan('\n설정 파일을 다시 읽어 충돌 해소 여부를 확인합니다.'));
     }
 
     // 5. include / exclude 설정 (Next 기준)
@@ -1921,54 +1878,42 @@ async function deleteTsConfigApp(cwd) {
   }
 }
 
-// TypeScript 설정 충돌 시 사용자 확인 함수
-function askUserConfirmationForTsConfig(conflictType, conflictDetails) {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
+// TypeScript baseUrl/paths 충돌 — 작업 중단 후 수동 가이드 (AI 없음)
+function printTsConfigConflictGuide(conflictType, conflictDetails) {
+  console.log(chalk.yellow.bold('\n⚠️  TypeScript baseUrl/paths 충돌 — 작업 중단'));
 
-    // 충돌 타입에 따라 메시지 생성
-    let message = '\n⚠️  TypeScript 설정 충돌 발생\n';
-    message += '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+  if (conflictType === 'baseUrl') {
+    console.log(chalk.yellow(`  tsconfig.json baseUrl: "${conflictDetails.existing}"`));
+    console.log(chalk.yellow(`  tsconfig.app.json baseUrl: "${conflictDetails.new}"`));
+  } else if (conflictType === 'paths') {
+    console.log(chalk.yellow(`  tsconfig.json paths 와 tsconfig.app.json paths 가 다릅니다.`));
+    console.log(chalk.gray(`    tsconfig.json: ${JSON.stringify(conflictDetails.existing)}`));
+    console.log(chalk.gray(`    tsconfig.app.json: ${JSON.stringify(conflictDetails.new)}`));
+  } else if (conflictType === 'alias-paths') {
+    console.log(chalk.yellow(`  vite resolve.alias 와 tsconfig.app.json paths 가 같은 키에서 다릅니다.`));
+    console.log(chalk.gray(`    키 "${conflictDetails.key}"`));
+    console.log(chalk.gray(`    vite alias: ${conflictDetails.viteAlias}`));
+    console.log(chalk.gray(`    app paths: ${JSON.stringify(conflictDetails.tsconfigAppPaths)}`));
+  } else if (conflictType === 'alias-paths-existing') {
+    console.log(chalk.yellow(`  vite resolve.alias 와 tsconfig.json 기존 paths 가 같은 키에서 다릅니다.`));
+    console.log(chalk.gray(`    키 "${conflictDetails.key}"`));
+    console.log(chalk.gray(`    vite alias: ${conflictDetails.viteAlias}`));
+    console.log(chalk.gray(`    tsconfig paths: ${JSON.stringify(conflictDetails.tsconfigPaths)}`));
+  }
 
-    if (conflictType === 'baseUrl') {
-      message += `baseUrl 충돌:\n`;
-      message += `  - tsconfig.json 기존: "${conflictDetails.existing}"\n`;
-      message += `  - tsconfig.app.json: "${conflictDetails.new}"\n`;
-    } else if (conflictType === 'paths') {
-      message += `paths 충돌:\n`;
-      message += `  - tsconfig.json 기존: ${JSON.stringify(conflictDetails.existing)}\n`;
-      message += `  - tsconfig.app.json: ${JSON.stringify(conflictDetails.new)}\n`;
-    } else if (conflictType === 'alias-paths') {
-      message += `alias/paths 충돌:\n`;
-      message += `  - 같은 키 "${conflictDetails.key}"에 대해 다른 값이 설정되어 있습니다.\n`;
-      message += `  - vite.config.ts의 resolve.alias: "${conflictDetails.key}": "${conflictDetails.viteAlias}"\n`;
-      message += `  - tsconfig.app.json의 paths: "${conflictDetails.key}": ${JSON.stringify(conflictDetails.tsconfigAppPaths)}\n`;
-      message += `\n💡 참고:\n`;
-      message += `  - vite.config.ts의 alias는 여기서 tsconfig.json으로 옮기지 않습니다.\n`;
-      message += `  - tsconfig.app.json의 paths 값이 tsconfig.json에 적용됩니다.\n`;
-      message += `  - vite.config.ts의 alias는 삭제되므로, 필요시 수동으로 tsconfig.json의 paths에 추가해주세요.\n`;
-    } else if (conflictType === 'alias-paths-existing') {
-      message += `alias/paths 충돌:\n`;
-      message += `  - 같은 키 "${conflictDetails.key}"에 대해 다른 값이 설정되어 있습니다.\n`;
-      message += `  - vite.config.ts의 resolve.alias: "${conflictDetails.key}": "${conflictDetails.viteAlias}"\n`;
-      message += `  - tsconfig.json의 기존 paths: "${conflictDetails.key}": ${JSON.stringify(conflictDetails.tsconfigPaths)}\n`;
-      message += `\n💡 참고:\n`;
-      message += `  - vite.config.ts의 alias는 여기서 tsconfig.json으로 옮기지 않습니다.\n`;
-      message += `  - tsconfig.json의 기존 paths 값이 유지됩니다.\n`;
-      message += `  - vite.config.ts의 alias는 삭제되므로, 필요시 수동으로 tsconfig.json의 paths에 추가해주세요.\n`;
-    }
-
-    message += '\n계속 진행하시겠습니까? (y/n): ';
-
-    rl.question(chalk.yellow(message), (answer) => {
-      rl.close();
-      const shouldContinue = answer.toLowerCase().trim() === 'y' || answer.toLowerCase().trim() === 'yes';
-      resolve(shouldContinue);
-    });
-  });
+  console.log(chalk.cyan('\n📋 수동 처리 가이드:'));
+  console.log(chalk.gray('  1. 프로젝트에 맞는 최종 baseUrl / paths 한 벌만 남기도록 tsconfig.json 을 직접 수정하세요.'));
+  console.log(
+    chalk.gray(
+      '  2. tsconfig.app.json 의 값을 tsconfig.json 과 맞추거나, 반대로 app 을 기준으로 json 을 통일하세요.'
+    )
+  );
+  console.log(
+    chalk.gray(
+      '  3. vite alias 와 충돌한 경우: 마이그레이션 후 vite.config 는 제거되므로, 채택할 경로는 tsconfig.json 의 paths 에만 두는 것을 권장합니다.'
+    )
+  );
+  console.log(chalk.gray('  4. 저장 후 마이그레이션(step1)을 다시 실행하세요.'));
 }
 
 module.exports = {

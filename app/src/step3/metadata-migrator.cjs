@@ -4,6 +4,10 @@
 const { Project, SyntaxKind } = require('ts-morph');
 const path = require('path');
 const fs = require('fs-extra');
+const {
+  stopAndOfferGeminiApply,
+  collectMigrationCandidateRelPaths,
+} = require('../utils/manual-flow.cjs');
 
 // ============================================================================
 // 상수 정의
@@ -499,129 +503,64 @@ function generateStaticMetadataCode(title, metadata, viewport) {
 }
 
 /**
- * 동적 메타데이터 generateMetadata 함수 코드 생성
- * - 동적 표현식은 주석으로 처리하여 개발자가 참고할 수 있도록 함
+ * 동적 메타데이터용 최소 뼈대.
+ * 직후 stopAndOfferGeminiApply(step1과 동일 흐름)로 채움.
  */
-function generateDynamicMetadataCode(patterns, componentInfo, dynamicExpressions = null) {
-  let code = `import type { Metadata } from 'next';\n`;
+function generateDynamicMetadataStub(patterns) {
+  let code = `import type { Metadata } from 'next';\n\n`;
 
-  // 데이터 패칭 함수 import (필요시)
-  if (patterns.hasDataFetching && patterns.fetchFunction) {
-    code += `// TODO: API 함수 import 경로 확인 필요\n`;
-    code += `// import { ${patterns.fetchFunction} } from '@/api/...';\n\n`;
-  }
-
-  // 데이터 변수명 추출
-  const dataVar = dynamicExpressions ? extractDataVariableName(dynamicExpressions) : 'data';
-
-  // 원본 Helmet 메타데이터를 주석으로 보존
-  if (dynamicExpressions) {
-    code += `\n/*\n`;
-    code += ` * 원본 Helmet에서 추출된 동적 메타데이터:\n`;
-    code += ` * 아래 표현식들을 참고하여 generateMetadata 함수를 완성하세요.\n`;
-    code += ` *\n`;
-    if (dynamicExpressions.title) {
-      const titleExpr = dynamicExpressions.titleSuffix 
-        ? `\${${dynamicExpressions.title}} - ${dynamicExpressions.titleSuffix}`
-        : dynamicExpressions.title;
-      code += ` * title: ${titleExpr}\n`;
-    }
-    if (dynamicExpressions.description) {
-      code += ` * description: ${dynamicExpressions.description}\n`;
-    }
-    if (Object.keys(dynamicExpressions.openGraph).length > 0) {
-      code += ` * openGraph:\n`;
-      for (const [key, value] of Object.entries(dynamicExpressions.openGraph)) {
-        code += ` *   - ${key}: ${value}\n`;
-      }
-    }
-    if (Object.keys(dynamicExpressions.twitter).length > 0) {
-      code += ` * twitter:\n`;
-      for (const [key, value] of Object.entries(dynamicExpressions.twitter)) {
-        code += ` *   - ${key}: ${value}\n`;
-      }
-    }
-    code += ` *\n`;
-    code += ` * 예시 구현:\n`;
-    code += ` * const ${dataVar} = await fetch${dataVar.charAt(0).toUpperCase() + dataVar.slice(1)}(id);\n`;
-    code += ` * return {\n`;
-    if (dynamicExpressions.title) {
-      const titleCode = dynamicExpressions.titleSuffix 
-        ? `\`\${${dynamicExpressions.title}} - ${dynamicExpressions.titleSuffix}\``
-        : dynamicExpressions.title;
-      code += ` *   title: ${titleCode},\n`;
-    }
-    if (dynamicExpressions.description) {
-      code += ` *   description: ${dynamicExpressions.description},\n`;
-    }
-    if (Object.keys(dynamicExpressions.openGraph).length > 0) {
-      code += ` *   openGraph: {\n`;
-      for (const [key, value] of Object.entries(dynamicExpressions.openGraph)) {
-        code += ` *     ${key}: ${value},\n`;
-      }
-      code += ` *   },\n`;
-    }
-    code += ` * };\n`;
-    code += ` */\n\n`;
-  }
-
-  // generateMetadata 함수 생성
   code += `export async function generateMetadata(`;
 
-  const params = [];
+  const sigParts = [];
   if (patterns.paramUsage.includes('params')) {
-    params.push('{ params }');
+    sigParts.push('{ params }');
   }
   if (patterns.paramUsage.includes('searchParams')) {
-    params.push('{ searchParams }');
+    sigParts.push('{ searchParams }');
   }
 
-  if (params.length > 0) {
-    code += `\n  ${params.join(',\n  ')}\n`;
+  if (sigParts.length > 0) {
+    code += `\n  ${sigParts.join(',\n  ')}\n`;
   }
 
   code += `): Promise<Metadata> {\n`;
 
-  // params 추출 (Next.js 15+ 비동기 방식)
   if (patterns.paramUsage.includes('params')) {
-    code += `  const { id } = await params;\n`;
+    code += `  void (await params);\n`;
   }
   if (patterns.paramUsage.includes('searchParams')) {
-    code += `  const query = (await searchParams).q;\n`;
+    code += `  void (await searchParams);\n`;
   }
 
-  // 데이터 패칭 (주석 처리)
-  code += `\n  // TODO: 데이터 패칭 로직 구현\n`;
-  code += `  // const ${dataVar} = await fetch${dataVar.charAt(0).toUpperCase() + dataVar.slice(1)}(id);\n`;
-  code += `  // if (!${dataVar}) {\n`;
-  code += `  //   return { title: 'Not Found' };\n`;
-  code += `  // }\n`;
-
-  // 반환값 생성 (기본 템플릿)
-  code += `\n  return {\n`;
-  code += `    title: '', // TODO: 위 주석의 표현식 참고\n`;
-  code += `    description: '', // TODO: 위 주석의 표현식 참고\n`;
-  code += `  };\n`;
+  code += `  return {\n    title: '',\n    description: '',\n  };\n`;
   code += `}\n`;
 
   return code;
 }
 
-/**
- * titleTemplate 메타데이터 코드 생성 (layout.tsx용)
- */
-function generateTitleTemplateCode(template, defaultTitle = 'My Site') {
-  // "%s | MySite" 형식에서 패턴 추출
-  const match = template.match(/%s\s*([-|])\s*(.+)/);
+// NOTE:
+// 동적 메타데이터는 이제 전부 Gemini 경로로 처리한다.
+// 아래 레거시 함수는 참고용으로만 보존한다(실행 경로에서 미사용).
+/*
+function generateDynamicMetadataCode(patterns, componentInfo, dynamicExpressions = null) {
+  let code = `import type { Metadata } from 'next';\n`;
+  ...
+  return code;
+}
+*/
 
+// NOTE:
+// titleTemplate 동적 변환 또한 Gemini 경로로 통합했다.
+// 아래 레거시 함수는 참고용으로만 보존한다(실행 경로에서 미사용).
+/*
+function generateTitleTemplateCode(template, defaultTitle = 'My Site') {
+  const match = template.match(/%s\s*([-|])\s*(.+)/);
   let templateStr = template;
   let suffix = defaultTitle;
-
   if (match) {
     suffix = match[2];
     templateStr = `%s ${match[1]} ${suffix}`;
   }
-
   return `import type { Metadata } from 'next';
 
 export const metadata: Metadata = {
@@ -632,6 +571,7 @@ export const metadata: Metadata = {
 };
 `;
 }
+*/
 
 // ============================================================================
 // 파일 처리 함수
@@ -947,12 +887,19 @@ async function migrateRootLayoutMetadata(projectRoot) {
     .trim();
 
   // preconnect 등 남은 태그가 있으면 유지, 없으면 간단하게
+  // React: <head> 직후 줄바꿈/공백만 있는 텍스트 노드는 hydration 오류가 나므로,
+  // `>` 다음에 공백 없이 주석·태그만 오도록 한 줄로 붙인다.
   if (otherTags.length > 0 || newHeadContent.includes('<link')) {
-    // 남은 태그들 유지
-    newHeadContent = `\n        {/* 기타 head 태그 (preconnect 등) */}\n        ${newHeadContent.split('\n').map(l => l.trim()).filter(l => l).join('\n        ')}\n      `;
+    const tagsCompact = newHeadContent
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .join('')
+      // <head> 안에서 태그 사이 공백 텍스트 노드가 생기지 않도록 강제 압축
+      .replace(/>\s+</g, '><');
+    newHeadContent = `{/* 기타 head 태그 (preconnect 등) */}${tagsCompact}`;
   } else {
-    // 빈 head 태그
-    newHeadContent = '\n        {/* 메타데이터는 export const metadata로 이동됨 */}\n      ';
+    newHeadContent = '{/* 메타데이터는 export const metadata로 이동됨 */}';
   }
 
   // 파일 내용 수정
@@ -1021,31 +968,28 @@ async function migratePageMetadata(projectRoot, pageFilePath, componentFilePath)
   // 동적 메타데이터 표현식 추출
   const dynamicExpressions = extractDynamicMetadataExpressions(helmetContent.content);
 
+  const hasDynamicExpressions =
+    !!(
+      dynamicExpressions.title ||
+      dynamicExpressions.description ||
+      Object.keys(dynamicExpressions.openGraph).length > 0 ||
+      Object.keys(dynamicExpressions.twitter).length > 0
+    );
+
   let metadataCode = '';
   let metadataType = 'static';
+  const useAiForDynamicMetadata =
+    dynamicPatterns.hasDataFetching ||
+    dynamicPatterns.hasSearchParams ||
+    dynamicPatterns.hasTitleTemplate ||
+    hasDynamicContent ||
+    hasDynamicExpressions;
 
   // 메타데이터 유형 결정 및 코드 생성
-  if (dynamicPatterns.hasDataFetching || dynamicPatterns.hasSearchParams || hasDynamicContent) {
-    // 동적 메타데이터
+  if (useAiForDynamicMetadata) {
     metadataType = 'dynamic';
-    
-    // 동적 표현식이 있으면 전달
-    const hasDynamicExpressions = dynamicExpressions.title || 
-      dynamicExpressions.description || 
-      Object.keys(dynamicExpressions.openGraph).length > 0 ||
-      Object.keys(dynamicExpressions.twitter).length > 0;
-
-    metadataCode = generateDynamicMetadataCode(
-      dynamicPatterns, 
-      { title, metadata },
-      hasDynamicExpressions ? dynamicExpressions : null
-    );
-  } else if (dynamicPatterns.hasTitleTemplate) {
-    // 타이틀 템플릿 (layout.tsx용)
-    metadataType = 'template';
-    metadataCode = generateTitleTemplateCode(dynamicPatterns.titleTemplate);
+    metadataCode = generateDynamicMetadataStub(dynamicPatterns);
   } else {
-    // 정적 메타데이터
     metadataCode = generateStaticMetadataCode(title, metadata, viewport);
   }
 
@@ -1057,7 +1001,58 @@ async function migratePageMetadata(projectRoot, pageFilePath, componentFilePath)
   const added = await addMetadataToPage(pageFilePath, metadataCode);
 
   if (added) {
-    // 원본 Helmet 주석 처리
+    if (useAiForDynamicMetadata) {
+      const pageRel = path.relative(projectRoot, pageFilePath).split(path.sep).join('/');
+      const componentRel = path.relative(projectRoot, componentFilePath).split(path.sep).join('/');
+      const patternsJson = JSON.stringify(
+        {
+          hasDataFetching: dynamicPatterns.hasDataFetching,
+          fetchFunction: dynamicPatterns.fetchFunction,
+          hasSearchParams: dynamicPatterns.hasSearchParams,
+          hasTitleTemplate: dynamicPatterns.hasTitleTemplate,
+          titleTemplate: dynamicPatterns.titleTemplate,
+          paramUsage: dynamicPatterns.paramUsage,
+          hasDynamicContent,
+          hasDynamicExpressions,
+        },
+        null,
+        2
+      );
+      const helmetSnippet =
+        helmetContent.content.length > 6000
+          ? `${helmetContent.content.slice(0, 6000)}\n... (truncated)`
+          : helmetContent.content;
+      const dataVarHint = extractDataVariableName(dynamicExpressions);
+
+      const candidateRelPaths = await collectMigrationCandidateRelPaths(projectRoot);
+
+      await stopAndOfferGeminiApply({
+        projectRoot,
+        discoveryLine: `${pageRel} 에서 동적 메타데이터(generateMetadata)가 감지되었습니다.`,
+        instructionForAi: `Next.js App Router 마이그레이션입니다. 동적 메타데이터를 generateMetadata로 완성하세요.
+
+- 수정 대상: ${pageRel} 의 export async function generateMetadata — 빈 title/description 및 서버에서 실행 가능한 데이터 로딩을 이 저장소의 기존 패턴(API 모듈, fetch 등)에 맞게 완성하세요.
+- 참고: ${componentRel} 의 Helmet/Head 내부 JSX (아래 발췌). 동적 title·description·openGraph·twitter 등을 Metadata 타입에 맞게 반영하세요.
+
+요구사항:
+- 서버에서 실행 가능한 코드만 사용하세요. window, document 등 브라우저 전용 API는 쓰지 마세요.
+- 파일에 이미 있는 generateMetadata 인자(params, searchParams)는 유지하고, 실제 동적 세그먼트·쿼리에 맞게 본문을 수정하세요.
+- TODO 주석을 새로 넣지 마세요.
+
+감지된 패턴(JSON):
+${patternsJson}
+
+추출된 동적 표현식(JSON):
+${JSON.stringify(dynamicExpressions, null, 2)}
+
+표현식 기준 데이터 루트 변수 추정(참고): "${dataVarHint}"
+
+Helmet 내부 발췌:
+${helmetSnippet}`,
+        candidateRelPaths,
+      });
+    }
+
     await commentOutHelmet(componentFilePath, helmetContent);
   }
 
@@ -1266,8 +1261,9 @@ module.exports = {
   extractMetadataFromHead,
   detectDynamicMetadataPattern,
   generateStaticMetadataCode,
-  generateDynamicMetadataCode,
-  generateTitleTemplateCode,
+  generateDynamicMetadataStub,
+  // generateDynamicMetadataCode, // 레거시: 동적 메타데이터 AI 통합으로 미사용
+  // generateTitleTemplateCode, // 레거시: 동적 메타데이터 AI 통합으로 미사용
   META_TAG_MAPPING,
   LINK_TAG_MAPPING,
 };
