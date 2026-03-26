@@ -22,6 +22,7 @@ const {
   getInstallCommand,
 } = require('./src/utils/project-info.cjs');
 const { cloneProject } = require('./src/utils/copy.cjs');
+const { createStepReviewSession, openReviewDiff } = require('./src/utils/review-session.cjs');
 
 const program = new Command();
 
@@ -35,6 +36,7 @@ program
   .description('1단계: 초기 환경 설정 (패키지, 설정파일)')
   .option('-o, --output <path>', '복사본을 생성할 경로 (지정 시 복사 모드로 자동 실행)')
   .option('--inplace', '원본 폴더에서 직접 마이그레이션 (복사 안 함)')
+  .option('--review', '원본은 유지하고 .ai-migration diff 세션을 생성해 IDE에서 검토')
   .action(async (options) => {
     console.log(chalk.blue.bold('🚀 Next.js 마이그레이션 Step 1을 시작합니다...'));
 
@@ -71,7 +73,9 @@ program
       let targetPath = cwd;
 
       // CLI 옵션으로 모드 결정
-      if (options.output) {
+      if (options.review) {
+        mode = 'review';
+      } else if (options.output) {
         mode = 'copy';
         // 입력값 정리 (공백 제거)
         const cleanedPath = options.output.trim();
@@ -143,6 +147,32 @@ program
       if (mode === 'copy') {
         await cloneProject(cwd, targetPath);
         console.log(chalk.blue(`\n📂 작업 경로가 변경되었습니다: ${targetPath}`));
+      }
+
+      if (mode === 'review') {
+        console.log(chalk.blue('\n리뷰 세션을 준비하는 중입니다...'));
+        const reviewSession = await createStepReviewSession(cwd, 'step1', runStep1);
+
+        if (reviewSession.manifest.changes.length === 0) {
+          console.log(chalk.green('\n변경 사항이 없어 리뷰 세션을 만들지 않았습니다.'));
+          return;
+        }
+
+        console.log(chalk.green(`\n✔ Step 1 preview 생성 완료 (${reviewSession.manifest.changes.length}개 변경)`));
+        const openResult = openReviewDiff(reviewSession.firstChange);
+
+        if (openResult.opened) {
+          console.log(chalk.blue(`첫 번째 diff를 ${openResult.command}에서 열었습니다.`));
+        } else {
+          console.log(chalk.yellow('자동으로 diff를 열지 못했습니다. Nextify Review 패널이나 session.json을 통해 수동으로 열어주세요.'));
+        }
+
+        console.log(chalk.yellow('\n⏸ Step 1은 리뷰 대기 상태에서 멈췄습니다.'));
+        console.log(chalk.white('   - 왼쪽: 원본 파일'));
+        console.log(chalk.white('   - 오른쪽: .ai-migration 안의 migrated 파일'));
+        console.log(chalk.white('   - Cursor/VSCode의 Nextify Review 패널에서 Accept / Reject 하세요.'));
+        console.log(chalk.white(`   - 세션 파일: ${reviewSession.manifestPath}`));
+        return;
       }
 
       //  Step 1 실행
