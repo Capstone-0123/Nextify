@@ -72,6 +72,7 @@ async function minimizeUseClientForBundle(projectRoot) {
   await stopAndOfferGeminiApply({
     projectRoot,
     discoveryLine: `"use client" 지시문이 ${useClientFiles.length}개 파일에서 발견되었습니다. JS 번들 최적화를 위해 최소화가 필요합니다.`,
+    discoverySources: candidateRelPaths,
     instructionForAi: `Next.js App Router 최적화 작업입니다.
 
 목표:
@@ -93,6 +94,11 @@ async function minimizeUseClientForBundle(projectRoot) {
 5) 새 파일 생성 없이 현재 파일들만 수정하세요.
 `,
     candidateRelPaths,
+    manualGuideLines: [
+      '1. 대상: discovery sources의 "use client" 파일들(특히 page/layout 같은 상위 컴포넌트).',
+      '2. 훅/이벤트/브라우저 API가 없는 파일은 "use client"를 제거하고 서버 컴포넌트로 전환하세요. 필요한 클라이언트 로직은 작은 하위 컴포넌트로 분리하고 그 파일에만 "use client"를 유지하세요.',
+      '3. 완료 후: 상위 컴포넌트의 "use client"가 최소화되도록 반영해 저장하세요(동작/타입 유지).',
+    ],
   });
 }
 

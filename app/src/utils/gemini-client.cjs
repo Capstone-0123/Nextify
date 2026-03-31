@@ -221,8 +221,8 @@ async function generateTextStream(prompt, onChunk, options = {}) {
 }
 
 /**
- * 수동 처리 도움말을 Gemini에게 요청
- * @param {string} issueDescription - 수동 처리 필요한 문제 설명
+ * 사용자 직접처리 도움말을 Gemini에게 요청
+ * @param {string} issueDescription - 사용자 직접처리 필요한 문제 설명
  * @param {Object} context - 문제 컨텍스트 (예: { proxyKey, targetUrl, reason, forbiddenOptions })
  * @param {Object} projectContext - 프로젝트 컨텍스트 정보
  * @returns {Promise<string>} Gemini의 도움말 응답
@@ -254,8 +254,8 @@ Answer in Korean.`;
 }
 
 /**
- * 수동 처리 부분에서 Gemini 사용 여부를 사용자에게 물어보는 함수
- * @param {string} issueDescription - 수동 처리 필요한 문제 설명
+ * 사용자 직접처리 부분에서 Gemini 사용 여부를 사용자에게 물어보는 함수
+ * @param {string} issueDescription - 사용자 직접처리 필요한 문제 설명
  * @param {Object} context - 문제 컨텍스트
  * @param {Object} projectContext - 프로젝트 컨텍스트
  * @returns {Promise<boolean>} 사용자가 Gemini 사용을 원하면 true, 아니면 false

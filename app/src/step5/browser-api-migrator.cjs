@@ -1628,6 +1628,7 @@ async function migrateBrowserAPIs(projectRoot) {
   await stopAndOfferGeminiApply({
     projectRoot,
     discoveryLine: `브라우저 전용 API(window/document/localStorage 등) 사용 코드가 ${candidateRelPathsArr.length}개 파일에서 감지되었습니다.`,
+    discoverySources: candidateRelPathsArr,
     instructionForAi: `다음 파일들에서 브라우저 전용 API 접근이 서버 렌더/Next.js App Router 환경에서 깨질 수 있는 부분을 찾아서 수정하세요.
 
 요구사항:
@@ -1641,6 +1642,11 @@ async function migrateBrowserAPIs(projectRoot) {
 
 반드시 서버에서 실행 가능한 코드만 남기고, 동작을 최대한 유지하세요.`,
     candidateRelPaths: candidateRelPathsArr,
+    manualGuideLines: [
+      '1. 대상: discovery sources에 표시된 파일들에서 window/document/localStorage/sessionStorage/navigator 직접 접근(특히 모듈 스코프/렌더 중 실행).',
+      '2. 서버에서 실행되지 않게 수정하세요: 모듈 스코프 접근 제거 → (a) useEffect로 이동하거나 (b) typeof window !== "undefined" 가드로 감싸고, DOM 이벤트는 useEffect + cleanup으로 옮기세요(필요 시 파일에 "use client" 추가).',
+      '3. 완료 후: 서버 렌더에서 브라우저 API가 실행되지 않도록 반영해 저장하세요(초기값/하이드레이션 안전).',
+    ],
   });
 }
 

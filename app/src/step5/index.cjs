@@ -4,6 +4,9 @@ const { migrateBrowserAPIs } = require('./browser-api-migrator.cjs');
 const { migrateZustandStores } = require('./zustand-migrator.cjs');
 const { migrateUseClient } = require('./useclient-migrator.cjs');
 const chalk = require('chalk');
+const {
+  isMechanicalMigrationRerun,
+} = require('../utils/manual-flow.cjs');
 
 /**
  * Step 5 메인 실행 함수
@@ -17,10 +20,26 @@ async function runStep5(projectRoot) {
     await migrateUseClient(projectRoot);
     console.log('"use client" 처리 완료');
 
-    // 브라우저 전용 API 최상단 접근 제어 마이그레이션 실행
-    console.log('브라우저 전용 API 최상단 접근 제어 시작');
-    await migrateBrowserAPIs(projectRoot);
-    console.log('브라우저 전용 API 최상단 접근 제어 완료');
+    // 브라우저 전용 API 최상단 접근 제어 마이그레이션 실행 (사용자 직접반영 시 동일 작업 재실행)
+    let browserApiReruns = 0;
+    while (true) {
+      try {
+        console.log('브라우저 전용 API 최상단 접근 제어 시작');
+        await migrateBrowserAPIs(projectRoot);
+        console.log('브라우저 전용 API 최상단 접근 제어 완료');
+        break;
+      } catch (e) {
+        if (!isMechanicalMigrationRerun(e)) {
+          throw e;
+        }
+        browserApiReruns += 1;
+        console.log(
+          chalk.cyan(
+            `\n(브라우저 API 마이그레이션 재실행 ${browserApiReruns})\n`
+          )
+        );
+      }
+    }
 
     // Zustand 스토어 마이그레이션 실행
     console.log('Zustand 상태 관리 마이그레이션 시작');
