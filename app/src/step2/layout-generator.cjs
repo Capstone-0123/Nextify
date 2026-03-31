@@ -95,6 +95,41 @@ function convertHtmlToJsx(htmlString) {
 }
 
 /**
+ * Next.js 환경에서 불필요/충돌하는 Vite/PWA 개발용 head 태그 제거
+ */
+function sanitizeHeadContent(headContent) {
+  if (!headContent) return '';
+
+  let sanitized = headContent;
+
+  // Vite dev/HMR 관련 스크립트 제거
+  sanitized = sanitized.replace(
+    /<script[^>]*src=["'][^"']*(?:@vite\/client|@react-refresh|\/src\/main\.(?:t|j)sx?)[^"']*["'][^>]*>\s*<\/script>/gi,
+    ''
+  );
+
+  // vite-plugin-pwa dev endpoint 관련 제거
+  sanitized = sanitized.replace(
+    /<script[^>]*src=["'][^"']*@vite-plugin-pwa\/[^"']*["'][^>]*>\s*<\/script>/gi,
+    ''
+  );
+
+  // service worker/dev map/manifest 링크 제거 (Vite 산출물)
+  sanitized = sanitized.replace(
+    /<link[^>]*href=["'][^"']*(?:manifest\.webmanifest|sw\.js(?:\.map)?|dev-sw\.js(?:\?[^"']*)?)["'][^>]*>/gi,
+    ''
+  );
+
+  // 오래된 rawgit CDN 링크 제거 (인증서/접속 오류 빈번)
+  sanitized = sanitized.replace(
+    /<link[^>]*href=["'][^"']*cdn\.rawgit\.com[^"']*["'][^>]*>/gi,
+    ''
+  );
+
+  return sanitized;
+}
+
+/**
  * layout.tsx 생성 메인 함수
  */
 async function generateLayout(projectRoot) {
@@ -118,6 +153,7 @@ async function generateLayout(projectRoot) {
   // 3. Head 내부 콘텐츠 추출
   const headContentMatch = htmlContent.match(/<head[^>]*>([\s\S]*?)<\/head>/i);
   let headContent = headContentMatch ? headContentMatch[1] : '';
+  headContent = sanitizeHeadContent(headContent);
 
   // 4. Head 내용 변환 (JSX 문법 적용)
   const convertedHead = convertHtmlToJsx(headContent);

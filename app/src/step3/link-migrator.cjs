@@ -14,6 +14,21 @@ const fs = require('fs-extra');
  */
 function migrateLinkTag(sourceFile) {
   let modified = false;
+  const linkLikeTagNames = new Set(['Link']);
+
+  // styled(Link) / styled(Link)<...> / styled(Link).attrs(...) 계열 선언의 변수명을 수집한다.
+  // 예) const NavItem = styled(Link)<NavItemProps>`...`
+  const variableDeclarations = sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration);
+  for (const varDecl of variableDeclarations) {
+    const initializer = varDecl.getInitializer();
+    if (!initializer) continue;
+    const initText = initializer.getText();
+
+    // styled(Link) + (제네릭/attrs/템플릿 리터럴) 뒤가 붙어도 허용
+    if (/styled\s*\(\s*Link\s*\)/.test(initText)) {
+      linkLikeTagNames.add(varDecl.getName());
+    }
+  }
 
   // Link 태그 찾기 (JsxSelfClosingElement와 JsxElement 모두)
   const linkElements = sourceFile.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement);
@@ -23,7 +38,7 @@ function migrateLinkTag(sourceFile) {
 
   for (const link of allLinks) {
     const tagName = link.getTagNameNode().getText();
-    if (tagName === 'Link') {
+    if (linkLikeTagNames.has(tagName)) {
       const toAttr = link.getAttribute('to');
       if (toAttr) {
         const hrefAttr = link.getAttribute('href');
@@ -482,6 +497,57 @@ function migrateNavLink(sourceFile) {
   return modified;
 }
 
+/**
+ * styled(NavLink) 같은 식별자 사용처를 styled(Link)로 변환
+ * JSX 태그 변환과 별개로 처리해야 "Cannot find name 'NavLink'"를 방지할 수 있다.
+ */
+function migrateStyledNavLinkReferences(sourceFile) {
+  let modified = false;
+
+  const callExpressions = sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression);
+  for (const call of callExpressions) {
+    const expressionText = call.getExpression().getText();
+    if (!expressionText.startsWith('styled')) continue;
+
+    const args = call.getArguments();
+    if (args.length === 0) continue;
+
+    const firstArg = args[0];
+    if (firstArg.getKind() === SyntaxKind.Identifier && firstArg.getText() === 'NavLink') {
+      firstArg.replaceWithText('Link');
+      modified = true;
+    }
+  }
+
+  if (!modified) return false;
+
+  // react-router-dom에서 NavLink import 제거
+  const imports = sourceFile.getImportDeclarations();
+  for (const importDecl of imports) {
+    if (importDecl.getModuleSpecifierValue() !== 'react-router-dom') continue;
+    const navImport = importDecl.getNamedImports().find((n) => n.getName() === 'NavLink');
+    if (navImport) {
+      navImport.remove();
+    }
+    if (importDecl.getNamedImports().length === 0 && !importDecl.getDefaultImport()) {
+      importDecl.remove();
+    }
+  }
+
+  // next/link의 Link import 보장
+  const existingNextLink = sourceFile.getImportDeclaration(
+    (decl) => decl.getModuleSpecifierValue() === 'next/link',
+  );
+  if (!existingNextLink) {
+    sourceFile.addImportDeclaration({
+      defaultImport: 'Link',
+      moduleSpecifier: 'next/link',
+    });
+  }
+
+  return true;
+}
+
 // ============================================================================
 // useNavigate 변환
 // ============================================================================
@@ -558,12 +624,14 @@ function migrateUseNavigate(sourceFile) {
     for (const decl of declarations) {
       const initializer = decl.getInitializer();
       if (initializer) {
-        const initText = initializer.getText();
-        // useNavigate() 또는 useRouter() 패턴 확인
-        if (initText === 'useNavigate()' || 
-            initText.includes('useNavigate()') ||
-            initText === 'useRouter()' ||
-            initText.includes('useRouter()')) {
+        // useNavigate/useRouter로 직접 초기화된 "훅 변수"만 대상으로 제한
+        // (컴포넌트 전체 함수 본문 문자열에 useRouter()가 포함된 경우까지
+        // 잘못 매칭되어 컴포넌트 이름을 router로 바꾸는 버그 방지)
+        const isDirectHookCall =
+          initializer.getKind() === SyntaxKind.CallExpression &&
+          ['useNavigate', 'useRouter'].includes(initializer.getExpression().getText());
+
+        if (isDirectHookCall) {
           const varName = decl.getName();
           // 원래 변수명 저장 (변경 전)
           navigateVariableNames.add(varName);
@@ -653,6 +721,11 @@ async function migrateFileLinks(filePath) {
   let modified = false;
 
   // ✅ 수정: 실행 순서 중요
+  // 0. styled(NavLink) 식별자 변환 먼저
+  if (migrateStyledNavLinkReferences(sourceFile)) {
+    modified = true;
+  }
+
   // 1. NavLink 변환 먼저 (NavLink가 Link로 변환되므로)
   if (migrateNavLink(sourceFile)) {
     modified = true;

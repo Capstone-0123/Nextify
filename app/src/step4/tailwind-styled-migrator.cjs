@@ -237,12 +237,10 @@ function updateNextConfigForStyled(projectRoot) {
     ];
 
     let configPath = null;
-    let isMjs = false;
     
     for (const filePath of configPaths) {
       if (fs.existsSync(filePath)) {
         configPath = filePath;
-        isMjs = filePath.endsWith('.mjs');
         break;
       }
     }
@@ -272,86 +270,54 @@ function updateNextConfigForStyled(projectRoot) {
       return false;
     }
 
-    // compiler 속성이 있는지 확인
-    const hasCompiler = /compiler\s*:\s*\{/.test(configContent);
+    // JSdoc 주석의 "{ }"를 객체 경계로 오인하지 않도록
+    // 실제 nextConfig 객체 리터럴(module.exports / export default / const nextConfig)만 타깃팅한다.
+    const mergeStyledCompiler = (input) => {
+      const addCompilerToObject = (objectBody) => {
+        if (/^\s*$/.test(objectBody)) {
+          return `\n  compiler: {\n    styledComponents: true\n  }\n`;
+        }
 
-    if (hasCompiler) {
-      // compiler가 있으면 styledComponents만 추가
-      // compiler: { ... } 내부에 styledComponents: true 추가
-      // 중첩된 객체도 고려하여 더 정확한 매칭
-      configContent = configContent.replace(
-        /(compiler\s*:\s*\{)([\s\S]*?)(\n\s*\})/,
-        (match, open, compilerContent, closingBrace) => {
-          // 이미 styledComponents가 있는지 다시 확인 (더 정확하게)
-          if (/styledComponents\s*:/.test(compilerContent)) {
-            return match;
-          }
-          // 들여쓰기 확인
-          const indentMatch = closingBrace.match(/(\n\s*)\}/);
-          const indent = indentMatch ? indentMatch[1].replace(/\n/, '') : '  ';
-          
-          // 마지막 속성 뒤에 쉼표 추가 후 styledComponents 추가
-          const trimmed = compilerContent.trimEnd();
-          const needsComma = !trimmed.endsWith(',') && !trimmed.endsWith('{') && trimmed.length > 0;
-          return `${open}${trimmed}${needsComma ? ',' : ''}\n${indent}styledComponents: true${closingBrace}`;
-        }
-      );
-    } else {
-      // compiler가 없으면 통째로 추가
-      // module.exports = { ... } 또는 export default { ... } 패턴 찾기
-      // 마지막 중괄호를 정확히 찾기 위해 더 정교한 패턴 사용
-      if (isMjs) {
-        // ES modules - export default { ... } 패턴
-        // 중첩 객체를 고려하여 마지막 }를 찾음
-        let braceCount = 0;
-        let lastBraceIndex = -1;
-        for (let i = 0; i < configContent.length; i++) {
-          if (configContent[i] === '{') braceCount++;
-          if (configContent[i] === '}') {
-            braceCount--;
-            if (braceCount === 0) {
-              lastBraceIndex = i;
-              break;
+        const trimmedBody = objectBody.trimEnd();
+        const needsComma = !trimmedBody.endsWith(',') && !trimmedBody.endsWith('{');
+        return `${trimmedBody}${needsComma ? ',' : ''}\n  compiler: {\n    styledComponents: true\n  }\n`;
+      };
+
+      const upsertCompilerInObject = (objectBody) => {
+        const compilerPattern = /(^\s*compiler\s*:\s*\{)([\s\S]*?)(^\s*\},?)/m;
+        if (compilerPattern.test(objectBody)) {
+          return objectBody.replace(compilerPattern, (match, open, compilerBody, close) => {
+            if (/styledComponents\s*:/.test(compilerBody)) {
+              return match;
             }
-          }
+            const trimmedCompilerBody = compilerBody.trimEnd();
+            const needsComma = !trimmedCompilerBody.endsWith(',') && !trimmedCompilerBody.endsWith('{');
+            return `${open}${trimmedCompilerBody}${needsComma ? ',' : ''}\n    styledComponents: true\n${close}`;
+          });
         }
-        
-        if (lastBraceIndex > 0) {
-          const beforeBrace = configContent.substring(0, lastBraceIndex);
-          const afterBrace = configContent.substring(lastBraceIndex);
-          
-          // 마지막 속성 확인
-          const trimmed = beforeBrace.trimEnd();
-          const needsComma = !trimmed.endsWith(',') && !trimmed.endsWith('{') && trimmed.length > 0;
-          configContent = `${trimmed}${needsComma ? ',' : ''}\n  compiler: {\n    styledComponents: true\n  }${afterBrace}`;
-        }
-      } else {
-        // CommonJS - module.exports = { ... } 패턴
-        // 중첩 객체를 고려하여 마지막 }를 찾음
-        let braceCount = 0;
-        let lastBraceIndex = -1;
-        for (let i = 0; i < configContent.length; i++) {
-          if (configContent[i] === '{') braceCount++;
-          if (configContent[i] === '}') {
-            braceCount--;
-            if (braceCount === 0) {
-              lastBraceIndex = i;
-              break;
-            }
-          }
-        }
-        
-        if (lastBraceIndex > 0) {
-          const beforeBrace = configContent.substring(0, lastBraceIndex);
-          const afterBrace = configContent.substring(lastBraceIndex);
-          
-          // 마지막 속성 확인
-          const trimmed = beforeBrace.trimEnd();
-          const needsComma = !trimmed.endsWith(',') && !trimmed.endsWith('{') && trimmed.length > 0;
-          configContent = `${trimmed}${needsComma ? ',' : ''}\n  compiler: {\n    styledComponents: true\n  }${afterBrace}`;
-        }
+        return addCompilerToObject(objectBody);
+      };
+
+      const patterns = [
+        /(const\s+nextConfig\s*=\s*\{)([\s\S]*?)(\n\}\s*;?)/m,
+        /(module\.exports\s*=\s*\{)([\s\S]*?)(\n\}\s*;?)/m,
+        /(export\s+default\s+\{)([\s\S]*?)(\n\}\s*;?)/m,
+      ];
+
+      for (const pattern of patterns) {
+        const matched = input.match(pattern);
+        if (!matched) continue;
+
+        return input.replace(pattern, (full, open, body, close) => {
+          const mergedBody = upsertCompilerInObject(body);
+          return `${open}${mergedBody}${close}`;
+        });
       }
-    }
+
+      return input;
+    };
+
+    configContent = mergeStyledCompiler(configContent);
 
     if (configContent !== originalContent) {
       fs.writeFileSync(configPath, configContent, 'utf8');

@@ -106,7 +106,25 @@ async function addUseClientToClientComponents(projectRoot) {
       return true;
     }
 
+    // 2.6 styled-components 사용
+    if (checkStyledComponentsUsage(content)) {
+      return true;
+    }
+
     return false;
+  }
+
+  // 2.6 styled-components 사용
+  function checkStyledComponentsUsage(content) {
+    // styled-components import 또는 styled.xxx / styled(...) 템플릿 사용 패턴
+    const hasStyledImport =
+      /from\s+['"]styled-components['"]/.test(content) ||
+      /import\s+styled\s+from\s+['"]styled-components['"]/.test(content);
+    const hasStyledFactoryUsage =
+      /\bstyled\.[a-zA-Z]+\s*`/.test(content) ||
+      /\bstyled\s*\(\s*[^)]+\)\s*(?:<[^>]+>)?\s*`/.test(content);
+
+    return hasStyledImport || hasStyledFactoryUsage;
   }
 
   // 2.1 React Hook import 또는 호출
