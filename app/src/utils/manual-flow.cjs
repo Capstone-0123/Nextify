@@ -12,6 +12,28 @@ const {
   detectPackageManager,
 } = require('./project-info.cjs');
 
+/** 사용자 직접처리 후 상위 러너가 감싼 범위의 기계적 마이그레이션을 처음부터 다시 돌리기 위한 신호 */
+class MechanicalMigrationRerunError extends Error {
+  constructor(message = '기계적 마이그레이션을 다시 실행합니다.') {
+    super(message);
+    this.name = 'MechanicalMigrationRerunError';
+    this.code = 'RERUN_MECHANICAL';
+  }
+}
+
+function isMechanicalMigrationRerun(err) {
+  return !!(
+    err &&
+    (err.code === 'RERUN_MECHANICAL' || err.name === 'MechanicalMigrationRerunError')
+  );
+}
+
+/** 무한 재시도 방지 */
+const DEFAULT_MAX_MECHANICAL_RERUNS = 10;
+
+// 동일 stop 구간(=discoveryLine + discoverySources)에서 사용자 직접처리(n)를 선택한 횟수
+const directRetryCountsByKey = new Map();
+
 function getProjectContext(projectRoot) {
   return {
     buildTool: detectBuildTool(projectRoot),
@@ -34,18 +56,49 @@ function validateYnStrict(input) {
   return 'y 또는 n 을 입력하세요.';
 }
 
-/** 수동 가이드 출력 직후: y면 마이그레이션 계속, n이면 exit(1) */
+function validateYnqStrict(input) {
+  const s = String(input ?? '').trim().toLowerCase();
+  if (s === 'y' || s === 'n' || s === 'q') return true;
+  return 'y / n / q 중 하나를 입력하세요.';
+}
+
+function validateYOnly(input) {
+  const s = String(input ?? '').trim().toLowerCase();
+  if (s === 'y') return true;
+  return 'y만 입력할 수 있습니다.';
+}
+
+/**
+ * 사용자 직접처리 안내 (짧은 공통 3단계 + 호출부에서 넘긴 권장 포인트)
+ */
+function printShortManualGuide(discoveryLine, manualGuideLines = []) {
+  console.log(chalk.cyan.bold('\n📋 사용자 직접처리 가이드 (AI 미사용)'));
+  console.log(chalk.gray(`  이슈: ${discoveryLine}`));
+  console.log(chalk.gray('  1) 위 이슈에 맞게 설정/코드를 직접 수정합니다. (아래 권장 포인트 참고)'));
+  console.log(chalk.gray('  2) 파일을 저장합니다.'));
+  console.log(
+    chalk.gray(
+      '  3) 아래에서 y를 입력하면 현재 작업을 재실행합니다.'
+    )
+  );
+  if (manualGuideLines.length > 0) {
+    console.log(chalk.yellow('\n  권장 포인트:'));
+    manualGuideLines.forEach((line) => console.log(chalk.white(`    - ${line}`)));
+  }
+}
+
+/** 사용자 직접처리 가이드 출력 직후: y면 계속, q면 exit(1) */
 async function askContinueAfterManualGuide() {
   const { ans } = await inquirer.prompt([
     {
       type: 'input',
       name: 'ans',
-      message: chalk.yellow('마이그레이션을 계속 진행할까요? (y/n, n이면 종료)'),
+      message: chalk.yellow('마이그레이션을 계속 진행할까요? (y/q, q면 종료)'),
       default: 'y',
       validate: (input) => {
         const s = String(input ?? '').trim().toLowerCase();
-        if (s === '' || s === 'y' || s === 'n') return true;
-        return 'y 또는 n 을 입력하세요.';
+        if (s === '' || s === 'y' || s === 'q') return true;
+        return 'y 또는 q 를 입력하세요.';
       },
       filter: (input) => {
         const s = String(input ?? '').trim().toLowerCase();
@@ -54,18 +107,28 @@ async function askContinueAfterManualGuide() {
     },
   ]);
   if (ans !== 'y') {
-    console.log(chalk.yellow('\n종료합니다. 필요 시 안내에 따라 수정한 뒤 다시 실행하세요.\n'));
+    console.log(chalk.yellow('\n종료합니다.\n'));
     process.exit(1);
   }
 }
 
 /**
- * Gemini 구간: discoveryLine 출력 후 y/n (n → exit)
- * @param {{ projectRoot: string, discoveryLine: string, instructionForAi: string, candidateRelPaths: string[], manualFallback?: string }} opts
- * @returns {Promise<{applied: boolean}>} applied=true이면 Gemini가 파일을 수정/적용한 상태입니다.
+ * Gemini 구간
+ * n → 수동 가이드 → 검사 후 진행(y만) → MechanicalMigrationRerunError
+ * @param {{ projectRoot: string, discoveryLine: string, discoverySources?: string[], instructionForAi: string, candidateRelPaths: string[], manualGuideLines?: string[] }} opts
  */
 async function stopAndOfferGeminiApply(opts) {
-  const { projectRoot, discoveryLine, instructionForAi, candidateRelPaths, manualFallback } = opts;
+  const {
+    projectRoot,
+    discoveryLine,
+    discoverySources = [],
+    instructionForAi,
+    candidateRelPaths,
+    manualGuideLines = [],
+    manualFallback,
+  } = opts;
+
+
 
   const existing = [];
   for (const rel of candidateRelPaths) {
@@ -76,10 +139,85 @@ async function stopAndOfferGeminiApply(opts) {
   }
 
   console.log(chalk.yellow(`\n${discoveryLine}`));
+  if (Array.isArray(discoverySources) && discoverySources.length > 0) {
+    const uniq = [...new Set(discoverySources.map((s) => String(s).trim()).filter(Boolean))];
+    if (uniq.length > 0) {
+      // 파일이 많으면 파일 목록 대신 "상위 디렉토리" 기준으로 요약
+      const normalized = uniq.map((p) => String(p).replace(/\\/g, '/'));
+      const TOO_MANY_FILES_THRESHOLD = 18;
+      if (normalized.length >= TOO_MANY_FILES_THRESHOLD) {
+        const countsByDir = new Map();
+        for (const p of normalized) {
+          const dir = path.posix.dirname(p);
+          const key = dir === '.' ? '(root)' : dir;
+          countsByDir.set(key, (countsByDir.get(key) || 0) + 1);
+        }
+        const parts = Array.from(countsByDir.entries())
+          .sort((a, b) => b[1] - a[1])
+          .map(([dir, count]) => `${dir} (${count}개)`);
+        console.log(chalk.gray(`  발견 위치(폴더): ${parts.join(', ')}`));
+      } else {
+        console.log(chalk.gray(`  발견 위치: ${normalized.join(', ')}`));
+      }
+    }
+  }
 
   if (existing.length === 0) {
     console.error(chalk.red('\n❌ AI에 넘길 대상 파일이 없습니다. 경로를 확인하세요.\n'));
     process.exit(1);
+  }
+
+  const keySources = Array.isArray(discoverySources) ? discoverySources : [];
+  const key = `${String(discoveryLine)}|${keySources.map((s) => String(s)).sort().join(',')}`;
+  const directCount = directRetryCountsByKey.get(key) || 0;
+
+  let ans;
+  if (directCount >= DEFAULT_MAX_MECHANICAL_RERUNS) {
+    console.log(
+      chalk.red(
+        `\n⛔️ 동일 이슈가 반복되었습니다. (사용자 직접처리 ${directCount}회)`
+      )
+    );
+    const prompted = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'ans',
+        message: chalk.yellow('Gemini로 자동 수정할까요? (y=Gemini / n=사용자 직접처리 / q=종료)'),
+        validate: validateYnqStrict,
+        filter: (input) => String(input ?? '').trim().toLowerCase(),
+      },
+    ]);
+    ans = prompted.ans;
+    if (ans === 'q') process.exit(1);
+    // y면 즉시 Gemini 실행, n이면 아래 직접처리 흐름
+  } else {
+    const prompted = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'ans',
+        message: chalk.yellow(
+          'Gemini로 관련 파일을 자동 수정할까요? (y/n, n이면 사용자 직접 처리 후 현재 작업부터 재실행)'
+        ),
+        validate: validateYnStrict,
+        filter: (input) => String(input ?? '').trim().toLowerCase(),
+      },
+    ]);
+    ans = prompted.ans;
+  }
+
+  if (ans !== 'y') {
+    directRetryCountsByKey.set(key, directCount + 1);
+    printShortManualGuide(discoveryLine, manualGuideLines);
+    await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'continueProbe',
+        message: chalk.yellow('검사 후 계속 진행하시겠습니까? (y)'),
+        validate: validateYOnly,
+        filter: (input) => String(input ?? '').trim().toLowerCase(),
+      },
+    ]);
+    throw new MechanicalMigrationRerunError();
   }
 
   if (!process.env.GEMINI_API_KEY) {
@@ -87,25 +225,6 @@ async function stopAndOfferGeminiApply(opts) {
       chalk.red('\n❌ GEMINI_API_KEY가 없습니다. AI 자동 수정을 사용할 수 없습니다.\n')
     );
     process.exit(1);
-  }
-
-  const { ans } = await inquirer.prompt([
-    {
-      type: 'input',
-      name: 'ans',
-      message: chalk.yellow('Gemini로 관련 파일을 자동 수정할까요? (y=적용, n=수동 처리 안내 후 계속)'),
-      validate: validateYnStrict,
-      filter: (input) => String(input ?? '').trim().toLowerCase(),
-    },
-  ]);
-
-  if (ans !== 'y') {
-    const manualText = manualFallback || instructionForAi;
-    console.log(chalk.yellow('\n🤚 Gemini 자동 수정은 건너뜁니다. 아래 안내에 따라 수동으로 수정하세요.\n'));
-    console.log(chalk.white(manualText));
-    // askContinueAfterManualGuide 내부에서 사용자가 n을 고르면 기존처럼 종료합니다.
-    await askContinueAfterManualGuide();
-    return { applied: false };
   }
 
   const spinner = ora('Gemini가 코드를 적용하는 중...').start();
@@ -187,4 +306,7 @@ module.exports = {
   stopAndOfferGeminiApply,
   collectMigrationCandidateRelPaths,
   DEFAULT_MAX_MIGRATION_SOURCE_FILES,
+  MechanicalMigrationRerunError,
+  isMechanicalMigrationRerun,
+  DEFAULT_MAX_MECHANICAL_RERUNS,
 };

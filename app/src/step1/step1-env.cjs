@@ -11,7 +11,7 @@ const {
 
 /** define → 코드 치환 후 .env/.env.local 은 사용자가 직접 관리 */
 function printEnvFilesManualGuide(contextTitle, nextPublicNames) {
-  console.log(chalk.cyan.bold(`\n📋 .env / .env.local 수동 처리 (${contextTitle})`));
+  console.log(chalk.cyan.bold(`\n📋 .env / .env.local 사용자 직접처리 (${contextTitle})`));
   console.log(chalk.gray('  이 단계는 소스 코드의 환경변수 참조만 Next.js 규칙에 맞게 바꿉니다.'));
   console.log(
     chalk.gray('  .env, .env.local 파일의 생성·수정·변수 값 입력은 모두 직접 하세요. (자동 생성/자동 편집 없음)')
@@ -29,14 +29,14 @@ function printBasePathConflictManualGuide(existingBasePath, viteBaseRaw, normali
   console.log(chalk.yellow.bold('\n⚠️  basePath 충돌 — 작업 중단'));
   console.log(chalk.yellow(`  next.config.mjs  basePath: "${existingBasePath}"`));
   console.log(chalk.yellow(`  vite.config.ts   base:      "${viteBaseRaw}"`));
-  console.log(chalk.cyan('\n📋 수동 처리 가이드:'));
+  console.log(chalk.cyan('\n📋 사용자 직접처리를 위한 가이드:'));
   console.log(chalk.gray('  1. 실제 배포/접근 URL 기준으로 하나의 base 경로만 남길지 정합니다.'));
   console.log(
     chalk.gray(
       `  2. next.config.mjs 의 basePath 를 최종 값으로 수정합니다. (Vite 반영 예: "${normalizedViteBase}" 또는 기존 Next 값 유지: "${existingBasePath}")`
     )
   );
-  console.log(chalk.gray('  3. 저장한 뒤 마이그레이션(step1)을 다시 실행하세요.'));
+  console.log(chalk.gray('3. 변경 내용을 저장합니다.'));
 }
 
 // [중요] 기존의 const CWD = process.cwd(); 는 삭제하거나 주석 처리합니다.
@@ -220,7 +220,7 @@ async function migrateViteConfig(cwd) {
   const c2Result = await migrateServerProxyObjectToRewrites(cwd, viteConfigContent);
   
   // Case c-3: server.proxy 값이 객체이며 rewrites로 이관 불가한 경우
-  // 수동 처리 필요 항목에 대해 사용자에게 안내
+  // 사용자 직접처리 필요 항목에 대해 사용자에게 안내
   const hasManualProxyItems = c2Result && c2Result.skipped && c2Result.skipped.length > 0;
   let shouldContinueWithProxy = true; // 기본값은 계속 진행
   if (hasManualProxyItems) {
@@ -606,11 +606,17 @@ async function printManualProxyMigrationGuide(cwd, skippedItems) {
   await stopAndOfferGeminiApply({
     projectRoot: cwd,
     discoveryLine: '자동으로 Next.js rewrites로 옮길 수 없는 server.proxy 설정이 발견되었습니다.',
+    discoverySources: ['vite.config.ts (server.proxy)'],
     instructionForAi: `Vite/React 앱을 Next.js(App Router)로 옮기는 중입니다. 자동 변환에서 제외된 server.proxy 항목:\n${skippedJson}\n\n제공된 파일들을 기준으로 next.config.mjs의 rewrites와/또는 src/app/api Route Handler 등으로 동등한 프록시·리라이트를 구현하세요. vite 의도를 유지하고 빌드 가능하게 만드세요.`,
     manualFallback: `아래 server.proxy 항목은 수동으로 Next.js에 맞게 반영해야 합니다.\n- 다음 후보 파일(일부): ${candidateRelPaths
       .slice(0, 20)
       .join(', ')}${candidateRelPaths.length > 20 ? ' ...' : ''}\n- 서버를 재시작한 뒤 동작을 검증하세요.`,
     candidateRelPaths,
+    manualGuideLines: [
+      '1. 대상: vite.config.ts의 server.proxy 중 자동 이관 제외 항목을 확인하세요.',
+      '2. 각 항목을 Next.js로 이관하세요: 단순 경로 매핑은 next.config.mjs rewrites, 조건/헤더/동적 프록시는 src/app/api Route Handler로 옮기세요.',
+      '3. 완료 후: 해당 proxy 항목을 vite.config.ts에서 제거/정리하고 저장하세요.',
+    ],
   });
   return true;
 }
@@ -1066,11 +1072,17 @@ async function migrateViteDefineLogic(cwd) {
     await stopAndOfferGeminiApply({
       projectRoot: cwd,
       discoveryLine: 'vite define에 global: "window" 설정이 발견되었습니다.',
+      discoverySources: ['vite.config.ts (define.global)'],
       instructionForAi: `Next.js(App Router) 마이그레이션입니다. vite define의 global: "window" 에 의존하는 부분을 제거하거나, 클라이언트 전용 패턴으로 안전하게 바꾸세요.`,
       manualFallback: `수동 처리 필요: \`global: "window"\` 대체/가드 처리를 해주세요.\n- 후보 파일(일부): ${candidateRelPaths
         .slice(0, 20)
         .join(', ')}${candidateRelPaths.length > 20 ? ' ...' : ''}\n- 서버 컴포넌트 실행 시 오류가 없는지 확인하세요.`,
       candidateRelPaths,
+      manualGuideLines: [
+        '1. 대상: vite.config.ts define.global = "window" 설정을 확인하세요.',
+        '2. define.global을 제거하고, global/window 의존 코드는 \'use client\' 컴포넌트로 옮기거나 해당 라이브러리를 dynamic import({ ssr: false })로 로드하도록 분리하세요.',
+        '3. 완료 후: define.global 제거가 반영되도록 저장하세요.',
+      ],
     });
   }
 
@@ -1363,11 +1375,17 @@ async function handleComplexDefineExpressions(cwd, defineContent) {
   await stopAndOfferGeminiApply({
     projectRoot: cwd,
     discoveryLine: `vite define에 자동 변환하기 어려운 복잡한 표현식이 ${complexItems.length}건 발견되었습니다.`,
+    discoverySources: ['vite.config.ts (define: complex expressions)'],
     instructionForAi: `Next.js 마이그레이션입니다. vite.config.ts define의 다음 항목을 Next.js에 맞게 옮기세요 (NEXT_PUBLIC_ 환경변수, src/config 모듈, 서버 전용 코드 등 적절히 구분).\n항목:\n${complexJson}`,
     manualFallback: `수동 처리 필요: complex define 항목을 Next.js에 맞게 분리/이관하세요.\n- 후보 파일(일부): ${candidateRelPaths
       .slice(0, 20)
       .join(', ')}${candidateRelPaths.length > 20 ? ' ...' : ''}\n- 빌드/런타임에서 참조 오류가 없는지 검증하세요.`,
     candidateRelPaths,
+    manualGuideLines: [
+      '1. 대상: vite.config.ts define의 복잡 표현식(함수/객체/참조 등)을 확인하세요.',
+      '2. 빌드 타임 상수는 NEXT_PUBLIC_* 환경변수로 옮기고, 나머지는 src/config 같은 설정 모듈로 분리하세요(서버 전용 값은 서버 컴포넌트/Route Handler로 이동).',
+      '3. 완료 후: vite define에서 복잡 표현식을 제거하고 저장하세요.',
+    ],
   });
 }
 
@@ -1910,7 +1928,7 @@ function printTsConfigConflictGuide(conflictType, conflictDetails) {
     console.log(chalk.gray(`    tsconfig paths: ${JSON.stringify(conflictDetails.tsconfigPaths)}`));
   }
 
-  console.log(chalk.cyan('\n📋 수동 처리 가이드:'));
+  console.log(chalk.cyan('\n📋 사용자 직접처리를 위한 가이드:'));
   console.log(chalk.gray('  1. 프로젝트에 맞는 최종 baseUrl / paths 한 벌만 남기도록 tsconfig.json 을 직접 수정하세요.'));
   console.log(
     chalk.gray(
@@ -1922,7 +1940,7 @@ function printTsConfigConflictGuide(conflictType, conflictDetails) {
       '  3. vite alias 와 충돌한 경우: 마이그레이션 후 vite.config 는 제거되므로, 채택할 경로는 tsconfig.json 의 paths 에만 두는 것을 권장합니다.'
     )
   );
-  console.log(chalk.gray('  4. 저장 후 마이그레이션(step1)을 다시 실행하세요.'));
+  console.log(chalk.gray('4. 변경 내용을 저장합니다.'));
 }
 
 module.exports = {
