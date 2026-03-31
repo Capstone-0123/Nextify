@@ -125,7 +125,10 @@ async function stopAndOfferGeminiApply(opts) {
     instructionForAi,
     candidateRelPaths,
     manualGuideLines = [],
+    manualFallback,
   } = opts;
+
+
 
   const existing = [];
   for (const rel of candidateRelPaths) {
@@ -235,6 +238,7 @@ async function stopAndOfferGeminiApply(opts) {
     spinner.stop();
     console.log(chalk.green(`\n✅ Gemini 적용 완료: ${written.join(', ')}`));
     console.log(chalk.green('마이그레이션을 계속 진행합니다.\n'));
+    return { applied: true };
   } catch (e) {
     spinner.stop();
     console.error(chalk.red(`\n❌ Gemini 적용 실패: ${e.message}\n`));

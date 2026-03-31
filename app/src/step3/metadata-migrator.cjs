@@ -1050,6 +1050,9 @@ ${JSON.stringify(dynamicExpressions, null, 2)}
 
 Helmet 내부 발췌:
 ${helmetSnippet}`,
+        manualFallback: `수동 처리 필요: ${pageRel}의 generateMetadata/Metadata 타입을 Next.js App Router 패턴으로 완성하세요.\n- 후보 파일(일부): ${candidateRelPaths
+          .slice(0, 20)
+          .join(', ')}${candidateRelPaths.length > 20 ? ' ...' : ''}\n- 구현 후 서버 렌더링/빌드를 검증하세요.`,
         candidateRelPaths,
         manualGuideLines: [
           `1. 대상: ${pageRel}의 export async function generateMetadata 구현(현재 stub/빈 값).`,

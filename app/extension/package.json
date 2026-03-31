@@ -1,0 +1,65 @@
+{
+  "name": "nextify-review",
+  "displayName": "Nextify Review",
+  "description": "Review Nextify migration diffs and accept or reject them from Cursor or VSCode.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:nextifyReview.panel",
+    "onCommand:nextifyReview.focusPanel",
+    "onCommand:nextifyReview.refreshSession",
+    "onCommand:nextifyReview.openChange",
+    "onCommand:nextifyReview.acceptChange",
+    "onCommand:nextifyReview.rejectChange",
+    "onCommand:nextifyReview.acceptAll",
+    "onCommand:nextifyReview.discardSession"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "nextifyReview.focusPanel",
+        "title": "Nextify Review: Focus Panel"
+      },
+      {
+        "command": "nextifyReview.refreshSession",
+        "title": "Nextify Review: Refresh Session"
+      },
+      {
+        "command": "nextifyReview.openChange",
+        "title": "Nextify Review: Open Change"
+      },
+      {
+        "command": "nextifyReview.acceptChange",
+        "title": "Nextify Review: Accept Change"
+      },
+      {
+        "command": "nextifyReview.rejectChange",
+        "title": "Nextify Review: Reject Change"
+      },
+      {
+        "command": "nextifyReview.acceptAll",
+        "title": "Nextify Review: Accept All"
+      },
+      {
+        "command": "nextifyReview.discardSession",
+        "title": "Nextify Review: Discard Session"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "type": "webview",
+          "id": "nextifyReview.panel",
+          "name": "Nextify Review"
+        }
+      ]
+    }
+  }
+}
