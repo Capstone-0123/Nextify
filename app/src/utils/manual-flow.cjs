@@ -61,10 +61,11 @@ async function askContinueAfterManualGuide() {
 
 /**
  * Gemini 구간: discoveryLine 출력 후 y/n (n → exit)
- * @param {{ projectRoot: string, discoveryLine: string, instructionForAi: string, candidateRelPaths: string[] }} opts
+ * @param {{ projectRoot: string, discoveryLine: string, instructionForAi: string, candidateRelPaths: string[], manualFallback?: string }} opts
+ * @returns {Promise<{applied: boolean}>} applied=true이면 Gemini가 파일을 수정/적용한 상태입니다.
  */
 async function stopAndOfferGeminiApply(opts) {
-  const { projectRoot, discoveryLine, instructionForAi, candidateRelPaths } = opts;
+  const { projectRoot, discoveryLine, instructionForAi, candidateRelPaths, manualFallback } = opts;
 
   const existing = [];
   for (const rel of candidateRelPaths) {
@@ -92,15 +93,19 @@ async function stopAndOfferGeminiApply(opts) {
     {
       type: 'input',
       name: 'ans',
-      message: chalk.yellow('Gemini로 관련 파일을 자동 수정할까요? (y/n, n이면 종료)'),
+      message: chalk.yellow('Gemini로 관련 파일을 자동 수정할까요? (y=적용, n=수동 처리 안내 후 계속)'),
       validate: validateYnStrict,
       filter: (input) => String(input ?? '').trim().toLowerCase(),
     },
   ]);
 
   if (ans !== 'y') {
-    console.log(chalk.yellow('\n종료합니다.\n'));
-    process.exit(1);
+    const manualText = manualFallback || instructionForAi;
+    console.log(chalk.yellow('\n🤚 Gemini 자동 수정은 건너뜁니다. 아래 안내에 따라 수동으로 수정하세요.\n'));
+    console.log(chalk.white(manualText));
+    // askContinueAfterManualGuide 내부에서 사용자가 n을 고르면 기존처럼 종료합니다.
+    await askContinueAfterManualGuide();
+    return { applied: false };
   }
 
   const spinner = ora('Gemini가 코드를 적용하는 중...').start();
@@ -114,6 +119,7 @@ async function stopAndOfferGeminiApply(opts) {
     spinner.stop();
     console.log(chalk.green(`\n✅ Gemini 적용 완료: ${written.join(', ')}`));
     console.log(chalk.green('마이그레이션을 계속 진행합니다.\n'));
+    return { applied: true };
   } catch (e) {
     spinner.stop();
     console.error(chalk.red(`\n❌ Gemini 적용 실패: ${e.message}\n`));

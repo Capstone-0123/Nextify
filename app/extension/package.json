@@ -12,6 +12,7 @@
   ],
   "activationEvents": [
     "onView:nextifyReview.panel",
+    "onCommand:nextifyReview.focusPanel",
     "onCommand:nextifyReview.refreshSession",
     "onCommand:nextifyReview.openChange",
     "onCommand:nextifyReview.acceptChange",
@@ -22,6 +23,10 @@
   "main": "./extension.js",
   "contributes": {
     "commands": [
+      {
+        "command": "nextifyReview.focusPanel",
+        "title": "Nextify Review: Focus Panel"
+      },
       {
         "command": "nextifyReview.refreshSession",
         "title": "Nextify Review: Refresh Session"

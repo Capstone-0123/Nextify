@@ -1640,6 +1640,9 @@ async function migrateBrowserAPIs(projectRoot) {
 5) 코드가 빌드되도록 타입/문법을 유지하고, 불필요한 TODO 주석을 추가하지 마세요.
 
 반드시 서버에서 실행 가능한 코드만 남기고, 동작을 최대한 유지하세요.`,
+    manualFallback: `수동 처리 필요: 브라우저 전용 API 사용 코드를 Next.js(App Router) 서버/클라이언트 경계에 맞게 보호/분리하세요.\n- 후보 파일(일부): ${candidateRelPathsArr
+      .slice(0, 20)
+      .join(', ')}${candidateRelPathsArr.length > 20 ? ' ...' : ''}\n- 'use client' 적용 여부/typeof window 가드 등을 확인하세요.`,
     candidateRelPaths: candidateRelPathsArr,
   });
 }

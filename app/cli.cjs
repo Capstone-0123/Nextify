@@ -25,13 +25,32 @@ const {
   getInstallCommand,
 } = require('./src/utils/project-info.cjs');
 const { cloneProject } = require('./src/utils/copy.cjs');
-const { createStepReviewSession, openReviewDiff } = require('./src/utils/review-session.cjs');
+const {
+  REVIEW_ROOT_DIR,
+  createStepReviewSession,
+  createSnapshotReviewSession,
+  openReviewDiff,
+} = require('./src/utils/review-session.cjs');
 const { generateText, createMigrationPrompt, generateTextStream } = require('./src/utils/gemini-client.cjs');
 const { runAskApply } = require('./src/utils/ai-file-apply.cjs');
+const { runAiReviewSessionStream } = require('./src/utils/ai-review-session.cjs');
+
+const fs = require('fs-extra');
 
 const program = new Command();
 
 program.name('migrate-next').description('React(Vite) 프로젝트를 Next.js로 마이그레이션하는 CLI').version('0.1.0');
+
+program.addHelpText(
+  'after',
+  `\n예시:\n` +
+    `  migrate-next\n` +
+    `    - step1~step7을 순차 실행하며, 각 파트마다 diff + Gemini CLI 대화형 리뷰(수정 불가)를 함께 진행합니다.\n` +
+    `    - Gemini CLI(\`gemini\`)가 PATH에 설치되어 있어야 하며, Ctrl+C는 현재 AI 리뷰만 중단합니다.\n` +
+    `    - Nextify Review 패널에서 Accept/Reject로 세션을 비우고, AI 리뷰도 멈춘 뒤에만 다음 파트로 넘어갑니다.\n` +
+    `\n레거시(기존 step1 preview clone 방식):\n` +
+    `  migrate-next step1 --review\n`,
+);
 
 // =========================================================
 // Command: Step 1
@@ -164,7 +183,8 @@ program
         }
 
         console.log(chalk.green(`\n✔ Step 1 preview 생성 완료 (${reviewSession.manifest.changes.length}개 변경)`));
-        const openResult = openReviewDiff(reviewSession.firstChange);
+        console.log(chalk.white(`리뷰 대상 변경 파일: ${reviewSession.manifest.changes.length}개`));
+        const openResult = openFirstReviewableDiff(reviewSession.manifest);
 
         if (openResult.opened) {
           console.log(chalk.blue(`첫 번째 diff를 ${openResult.command}에서 열었습니다.`));
@@ -458,4 +478,267 @@ program
     }
   });
 
-program.parse(process.argv);
+// =========================================================
+// Default command: `migrate-next` (no subcommand)
+// =========================================================
+async function waitForSessionCleared(sessionPath) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  while (true) {
+    if (!sessionPath) return true;
+    if (!(await fs.pathExists(sessionPath))) return true;
+
+    try {
+      const manifest = await fs.readJson(sessionPath);
+      if (!manifest?.changes || manifest.changes.length === 0) return true;
+    } catch {
+      // session.json write 중일 수 있으므로 재시도
+    }
+
+    await sleep(1500);
+  }
+}
+
+function openFirstReviewableDiff(manifest) {
+  const changes = Array.isArray(manifest?.changes) ? manifest.changes : [];
+  for (const change of changes) {
+    const result = openReviewDiff(change);
+    if (result?.opened) {
+      return { ...result, change };
+    }
+  }
+  return { opened: false, command: null, change: null };
+}
+
+function promptNextPart() {
+  return inquirer.prompt([
+    {
+      type: 'input',
+      name: 'ans',
+      message: '다음 파트로 넘어가겠습니까? (y/n)',
+      default: 'y',
+      validate: (input) => {
+        const s = String(input ?? '').trim().toLowerCase();
+        return s === '' || s === 'y' || s === 'n' ? true : 'y 또는 n 을 입력하세요.';
+      },
+      filter: (input) => {
+        const s = String(input ?? '').trim().toLowerCase();
+        return s === '' ? 'y' : s;
+      },
+    },
+  ]);
+}
+
+function extractStepNumber(stepName) {
+  const m = String(stepName || '').match(/^step(\d+)$/i);
+  return m ? Number(m[1]) : null;
+}
+
+function getStepReviewRoot(projectRoot, stepName) {
+  return path.join(projectRoot, REVIEW_ROOT_DIR, stepName);
+}
+
+async function cleanupPreviousStepArtifacts(projectRoot, currentStepName) {
+  const currentNum = extractStepNumber(currentStepName);
+  if (!currentNum || currentNum <= 1) return;
+  const prevStepName = `step${currentNum - 1}`;
+  const prevRoot = getStepReviewRoot(projectRoot, prevStepName);
+  if (await fs.pathExists(prevRoot)) {
+    await fs.remove(prevRoot);
+  }
+}
+
+async function cleanupStaleStepArtifacts(projectRoot) {
+  const reviewRoot = path.join(projectRoot, REVIEW_ROOT_DIR);
+  if (!(await fs.pathExists(reviewRoot))) return;
+
+  const entries = await fs.readdir(reviewRoot, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (!/^step\d+$/i.test(entry.name)) continue;
+    await fs.remove(path.join(reviewRoot, entry.name));
+  }
+}
+
+async function runDefaultOrchestrator() {
+  const cwd = process.cwd();
+
+  // 1) detect & validate project type
+  const pm = detectPackageManager(cwd);
+  const lang = detectLanguage(cwd);
+  const buildTool = detectBuildTool(cwd);
+  const monorepo = detectMonorepo(cwd);
+  const appType = detectAppType(cwd);
+
+  console.log(chalk.blue.bold('🚀 Nextify 마이그레이션(기본 오케스트레이터)을 시작합니다...'));
+  console.log(chalk.gray(`📦 패키지 매니저: ${chalk.cyan(pm)}`));
+  console.log(chalk.gray(`📘 프로젝트 언어: ${chalk.cyan(lang === 'ts' ? 'TypeScript' : 'JavaScript')}`));
+  console.log(chalk.gray(`🛠️  빌드 도구:     ${chalk.cyan(buildTool.toUpperCase())}`));
+  if (monorepo) console.log(chalk.magenta(`🏢 모노레포 감지: ${chalk.bold(monorepo)}`));
+  console.log(chalk.gray('--------------------------------------------------'));
+
+  if (buildTool !== 'vite') {
+    console.error(chalk.red.bold('\n⛔️ 지원하지 않는 프로젝트 형식입니다. (Vite 필수)'));
+    process.exit(1);
+  }
+  if (appType !== 'spa') {
+    console.error(chalk.red.bold('\n⛔️ SPA(index.html 보유) 프로젝트만 지원합니다.'));
+    process.exit(1);
+  }
+
+  // 2) mode selection
+  const answer = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'mode',
+      message: '마이그레이션을 어떻게 진행하시겠습니까?',
+      choices: [
+        { name: '새 폴더에 복사본을 만들어서 진행 (추천)', value: 'copy' },
+        { name: '현재 폴더에 바로 적용 (주의: 원본 변경)', value: 'inplace' },
+      ],
+    },
+  ]);
+
+  let mode = answer.mode;
+  let targetPath = cwd;
+
+  if (mode === 'copy') {
+    const parentDir = path.dirname(cwd);
+    const currentDirName = path.basename(cwd);
+    const defaultNewPath = path.join(parentDir, `${currentDirName}-nextified`);
+
+    const { outputPath } = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'outputPath',
+        message: '복사본을 생성할 경로 (폴더명 또는 전체 경로):',
+        default: defaultNewPath,
+      },
+    ]);
+
+    const cleanedPath = outputPath.trim();
+    const isAbsolutePath = path.isAbsolute(cleanedPath) || /^[A-Za-z]:[\\/]/.test(cleanedPath);
+
+    if (isAbsolutePath) {
+      targetPath = path.resolve(cleanedPath);
+    } else if (cleanedPath.includes('/') || cleanedPath.includes('\\')) {
+      targetPath = path.resolve(cwd, cleanedPath);
+    } else {
+      targetPath = path.join(parentDir, cleanedPath);
+    }
+
+    await cloneProject(cwd, targetPath);
+    console.log(chalk.blue(`\n📂 작업 경로가 변경되었습니다: ${targetPath}`));
+  }
+
+  // 이전 실행에서 남아있는 step 아티팩트를 정리합니다.
+  await cleanupStaleStepArtifacts(targetPath);
+
+  const stepEntries = [
+    ['step1', runStep1],
+    ['step2', runStep2],
+    ['step3', runStep3],
+    ['step4', runStep4],
+    ['step5', runStep5],
+    ['step6', runStep6],
+    ['step7', runStep7],
+  ];
+
+  // 3) sequential parts with review gate
+  for (let idx = 0; idx < stepEntries.length; idx++) {
+    const [stepName, stepRunner] = stepEntries[idx];
+    const partNum = stepName.replace('step', '');
+    console.log(chalk.yellow(`\n==================== Part ${partNum} (${stepName}) ====================`));
+
+    // stepN 시작 시 step(N-1) 아티팩트를 정리해 디스크 증가/컨텍스트 혼선을 방지합니다.
+    await cleanupPreviousStepArtifacts(targetPath, stepName);
+
+    const reviewSession = await createSnapshotReviewSession(targetPath, stepName, stepRunner);
+    const { manifest, manifestPath } = reviewSession;
+
+    if (!manifestPath || !Array.isArray(manifest?.changes) || manifest.changes.length === 0) {
+      console.log(chalk.green(`\n✔ Part ${partNum}: 변경 없음 → 리뷰/AI 게이트 생략`));
+      const { ans } = await promptNextPart();
+      if (ans !== 'y') process.exit(0);
+      continue;
+    }
+    console.log(chalk.white(`리뷰 대상 변경 파일: ${manifest.changes.length}개`));
+
+    const openResult = openFirstReviewableDiff(manifest);
+    if (openResult.opened) {
+      console.log(chalk.blue(`첫 번째 diff를 ${openResult.command}에서 열었습니다.`));
+    } else {
+      console.log(
+        chalk.yellow(
+          '자동으로 diff를 열지 못했습니다. Nextify Review 패널이나 session.json을 통해 수동으로 열어주세요.',
+        ),
+      );
+    }
+
+    console.log(chalk.yellow('\n⏳ Gemini CLI 대화형 AI 리뷰(수정 불가)를 시작합니다.'));
+    console.log(chalk.white('   - 리뷰 텍스트를 자동 덤프하지 않습니다. Gemini 대화창에서 직접 질문하세요.'));
+    console.log(chalk.white('   - Step session 경로를 참고해 Gemini 대화창에서 직접 질문하세요.'));
+    console.log(chalk.white('   - Gemini CLI 인증은 `gemini /auth` 기준입니다 (.env.local 필수 아님).'));
+    console.log(chalk.white('   - `GEMINI_API_KEY`(.env.local)는 SDK 경로(비-CLI)에서만 필요합니다.'));
+    console.log(chalk.white('   - Ctrl+C: 현재 AI 리뷰 대화만 중단 (오케스트레이터는 계속 실행)'));
+    console.log(chalk.white('   - 다음 파트 이동 조건: 세션 비움 + AI 리뷰 중단/완료'));
+    console.log(chalk.white(`   - Step ${partNum} session: ${manifestPath}`));
+
+    const aiAbort = new AbortController();
+    const onSigint = () => {
+      if (!aiAbort.signal.aborted) {
+        process.stdout.write('\n');
+        console.log(chalk.yellow('⏹ Ctrl+C 감지: 현재 Gemini CLI 리뷰를 중단합니다. (세션 비움 대기는 계속됩니다.)'));
+        aiAbort.abort();
+      }
+    };
+
+    const sessionClearedPromise = waitForSessionCleared(manifestPath);
+    process.on('SIGINT', onSigint);
+    try {
+      const aiReviewPromise = runAiReviewSessionStream({
+        sessionPath: manifestPath,
+        signal: aiAbort.signal,
+        transport: 'cli',
+        mode: 'interactive-seeded',
+        model: process.env.NEXTIFY_GEMINI_CLI_MODEL || 'gemini-2.5-flash-lite',
+        workingDirectory: targetPath,
+        onChunk: (t) => process.stdout.write(t),
+      });
+
+      // Both conditions are required:
+      // 1) session cleared (IDE에서 accept/reject 처리 완료)
+      // 2) ai review stopped (자연 종료 or Ctrl+C로 Abort)
+      await Promise.all([sessionClearedPromise, aiReviewPromise]);
+    } catch (err) {
+      if (err?.code === 'ENOENT') {
+        console.error(chalk.red('\n❌ Gemini CLI를 찾을 수 없습니다.'));
+        console.log(chalk.yellow('   - Gemini CLI를 설치하고 `gemini` 명령이 PATH에서 실행되는지 확인하세요.'));
+      }
+      throw err;
+    } finally {
+      process.off('SIGINT', onSigint);
+    }
+
+    console.log(chalk.green('\n✔ Part review complete (session cleared + AI stopped).'));
+
+    const { ans } = await promptNextPart();
+    if (ans !== 'y') process.exit(0);
+  }
+
+  const installCmd = getInstallCommand(pm);
+  console.log(chalk.yellow('\n👉 다음 단계 안내'));
+  console.log(chalk.white(`   - ${installCmd} (의존성 설치)`));
+  console.log(chalk.white('   - 마이그레이션된 프로젝트에서 빌드/실행을 확인하세요. '));
+}
+
+// Only run default orchestrator when user calls `migrate-next` with no subcommand.
+const argv = process.argv.slice(2);
+if (argv.length === 0) {
+  runDefaultOrchestrator().catch((e) => {
+    console.error(chalk.red('\n❌ 기본 오케스트레이터 오류:'), e?.message || e);
+    process.exit(1);
+  });
+} else {
+  program.parse(process.argv);
+}

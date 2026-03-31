@@ -607,6 +607,9 @@ async function printManualProxyMigrationGuide(cwd, skippedItems) {
     projectRoot: cwd,
     discoveryLine: '자동으로 Next.js rewrites로 옮길 수 없는 server.proxy 설정이 발견되었습니다.',
     instructionForAi: `Vite/React 앱을 Next.js(App Router)로 옮기는 중입니다. 자동 변환에서 제외된 server.proxy 항목:\n${skippedJson}\n\n제공된 파일들을 기준으로 next.config.mjs의 rewrites와/또는 src/app/api Route Handler 등으로 동등한 프록시·리라이트를 구현하세요. vite 의도를 유지하고 빌드 가능하게 만드세요.`,
+    manualFallback: `아래 server.proxy 항목은 수동으로 Next.js에 맞게 반영해야 합니다.\n- 다음 후보 파일(일부): ${candidateRelPaths
+      .slice(0, 20)
+      .join(', ')}${candidateRelPaths.length > 20 ? ' ...' : ''}\n- 서버를 재시작한 뒤 동작을 검증하세요.`,
     candidateRelPaths,
   });
   return true;
@@ -1064,6 +1067,9 @@ async function migrateViteDefineLogic(cwd) {
       projectRoot: cwd,
       discoveryLine: 'vite define에 global: "window" 설정이 발견되었습니다.',
       instructionForAi: `Next.js(App Router) 마이그레이션입니다. vite define의 global: "window" 에 의존하는 부분을 제거하거나, 클라이언트 전용 패턴으로 안전하게 바꾸세요.`,
+      manualFallback: `수동 처리 필요: \`global: "window"\` 대체/가드 처리를 해주세요.\n- 후보 파일(일부): ${candidateRelPaths
+        .slice(0, 20)
+        .join(', ')}${candidateRelPaths.length > 20 ? ' ...' : ''}\n- 서버 컴포넌트 실행 시 오류가 없는지 확인하세요.`,
       candidateRelPaths,
     });
   }
@@ -1358,6 +1364,9 @@ async function handleComplexDefineExpressions(cwd, defineContent) {
     projectRoot: cwd,
     discoveryLine: `vite define에 자동 변환하기 어려운 복잡한 표현식이 ${complexItems.length}건 발견되었습니다.`,
     instructionForAi: `Next.js 마이그레이션입니다. vite.config.ts define의 다음 항목을 Next.js에 맞게 옮기세요 (NEXT_PUBLIC_ 환경변수, src/config 모듈, 서버 전용 코드 등 적절히 구분).\n항목:\n${complexJson}`,
+    manualFallback: `수동 처리 필요: complex define 항목을 Next.js에 맞게 분리/이관하세요.\n- 후보 파일(일부): ${candidateRelPaths
+      .slice(0, 20)
+      .join(', ')}${candidateRelPaths.length > 20 ? ' ...' : ''}\n- 빌드/런타임에서 참조 오류가 없는지 검증하세요.`,
     candidateRelPaths,
   });
 }

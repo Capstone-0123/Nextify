@@ -196,7 +196,9 @@ async function generateTextStream(prompt, onChunk, options = {}) {
         ...options.modelOptions 
       });
       
-      const result = await model.generateContentStream(prompt);
+      const result = options?.signal
+        ? await model.generateContentStream(prompt, { signal: options.signal })
+        : await model.generateContentStream(prompt);
       
       for await (const chunk of result.stream) {
         const chunkText = chunk.text();
