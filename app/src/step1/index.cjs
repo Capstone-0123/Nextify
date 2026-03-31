@@ -8,6 +8,9 @@ const {
   updateTsConfig,
 } = require('./step1-env.cjs');
 const chalk = require('chalk');
+const {
+  isMechanicalMigrationRerun,
+} = require('../utils/manual-flow.cjs');
 
 /**
  * Step 1 메인 실행 함수
@@ -25,10 +28,26 @@ async function runStep1(projectRoot) {
   await setupConfigFiles(projectRoot);
   console.log('설정 파일 업데이트 완료');
 
-  // 3. vite.config.ts 설정 마이그레이션
-  console.log('vite.config.ts 설정 마이그레이션 시작');
-  await migrateViteConfig(projectRoot);
-  console.log('vite.config.ts 설정 마이그레이션 완료');
+  // 3. vite.config.ts 설정 마이그레이션 (사용자 직접처리 후 같은 해당 파트를 재실행할 수 있음)
+  let viteMechanicalReruns = 0;
+  while (true) {
+    try {
+      console.log('vite.config.ts 설정 마이그레이션 시작');
+      await migrateViteConfig(projectRoot);
+      console.log('vite.config.ts 설정 마이그레이션 완료');
+      break;
+    } catch (e) {
+      if (!isMechanicalMigrationRerun(e)) {
+        throw e;
+      }
+      viteMechanicalReruns += 1;
+      console.log(
+        chalk.cyan(
+          `\n(vite 마이그레이션 재실행 ${viteMechanicalReruns})\n`
+        )
+      );
+    }
+  }
 
   // 4. TypeScript 설정 정리
   console.log('TypeScript 컴파일러 설정 정리 시작');

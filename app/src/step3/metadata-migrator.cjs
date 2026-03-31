@@ -1029,6 +1029,7 @@ async function migratePageMetadata(projectRoot, pageFilePath, componentFilePath)
       await stopAndOfferGeminiApply({
         projectRoot,
         discoveryLine: `${pageRel} 에서 동적 메타데이터(generateMetadata)가 감지되었습니다.`,
+        discoverySources: [pageRel, componentRel].filter(Boolean),
         instructionForAi: `Next.js App Router 마이그레이션입니다. 동적 메타데이터를 generateMetadata로 완성하세요.
 
 - 수정 대상: ${pageRel} 의 export async function generateMetadata — 빈 title/description 및 서버에서 실행 가능한 데이터 로딩을 이 저장소의 기존 패턴(API 모듈, fetch 등)에 맞게 완성하세요.
@@ -1050,6 +1051,11 @@ ${JSON.stringify(dynamicExpressions, null, 2)}
 Helmet 내부 발췌:
 ${helmetSnippet}`,
         candidateRelPaths,
+        manualGuideLines: [
+          `1. 대상: ${pageRel}의 export async function generateMetadata 구현(현재 stub/빈 값).`,
+          `2. ${componentRel}의 Helmet/Head 값을 다음처럼 Metadata return 객체로 채우세요: generateMetadata가 "return { title, description, alternates: { canonical }, openGraph: { title, description, url, images }, twitter: { card, title, description, images } }" 형태로 결과를 만들어 반환하도록 구성하고, 데이터는 서버 fetch/서버 유틸로 만든 뒤(window/document 금지) return만 사용하세요.`,
+          `3. 완료 후: generateMetadata가 서버에서 동작 가능하도록 정리하고 저장하세요(브라우저 API/모듈 스코프 부작용 제거).`,
+        ],
       });
     }
 

@@ -85,6 +85,7 @@ async function optimizeDataFetchingPlacement(projectRoot) {
   await stopAndOfferGeminiApply({
     projectRoot,
     discoveryLine: `클라이언트 컴포넌트의 useEffect 기반 데이터 패칭이 ${candidateAbsFiles.length}개 파일에서 감지되었습니다.`,
+    discoverySources: candidateRelPaths,
     instructionForAi: `Next.js App Router 최적화 작업입니다.
 
 목표:
@@ -107,6 +108,11 @@ async function optimizeDataFetchingPlacement(projectRoot) {
    - 새 파일 생성 없이 기존 파일 구조에서 리팩터링하세요.
 `,
     candidateRelPaths,
+    manualGuideLines: [
+      '1. 대상: discovery sources의 "use client" 파일들 중 useEffect로 fetch/axios 호출하는 코드.',
+      '2. 데이터 로딩을 가능한 범위에서 서버로 이동하세요: page/layout(서버 컴포넌트)에서 fetch → 결과를 props로 내려주고, 클라이언트는 상호작용(버튼/입력/상태)만 남기세요.',
+      '3. 완료 후: 상위 컴포넌트의 불필요한 "use client"와 useEffect fetch가 제거/축소되도록 저장하세요.',
+    ],
   });
 }
 
