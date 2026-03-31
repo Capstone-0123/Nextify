@@ -5,6 +5,7 @@
 const { Project, SyntaxKind } = require('ts-morph');
 const fs = require('fs-extra');
 const path = require('path');
+const { stopAndOfferGeminiApply } = require('../utils/manual-flow.cjs');
 
 // ============================================================================
 // Case 1: Variable Declaration - Utils/Constants (.ts, .tsx)
@@ -1571,35 +1572,88 @@ function addReactHookImports(sourceFile, hooks) {
  * @param {string} projectRoot - 프로젝트 루트 경로
  */
 async function migrateBrowserAPIs(projectRoot) {
-  console.log('🌐 브라우저 전용 API 최상단 접근 제어 시작...');
+  const srcPath = path.join(projectRoot, 'src');
 
-  // Case 1: Variable Declaration (.ts, .tsx)
-  handleVariableDeclaration(projectRoot);
+  if (!fs.existsSync(srcPath)) {
+    return;
+  }
 
-  // Case 2: Side Effect Logic (.ts)
-  handleSideEffectLogic(projectRoot);
+  // 브라우저 전용 API 후보(문자열 기반)를 먼저 수집
+  const browserApiRegexes = [
+    /(window|document|localStorage|sessionStorage)\.[\w.]+/,
+    /window\.(innerWidth|innerHeight|outerWidth|outerHeight|screen|location|navigator|Swiper|Chart|Map|Editor)\b/,
+    /document\.(body|documentElement|title|cookie|domain)\b/,
+    /localStorage\.(getItem|setItem|removeItem|clear)\b/,
+    /sessionStorage\.(getItem|setItem|removeItem|clear)\b/,
+    /window\.(addEventListener|removeEventListener|alert|confirm|prompt)\b/,
+    /document\.(title|body|querySelector|getElementById)\b/,
+    /document\.body\.(classList|style)\b/,
+    /\bmatchMedia\(/,
+    /\bgetBoundingClientRect\(/,
+    /\bgetComputedStyle\(/,
+  ];
 
-  // Case 3: Rendering Value (.tsx) - Hydration-safe
-  handleRenderingValue(projectRoot);
+  const allTsFiles = [
+    ...findFiles(srcPath, /\.ts$/),
+    ...findFiles(srcPath, /\.tsx$/),
+  ];
 
-  // Case 4: DOM/Event Handler (.tsx)
-  handleDOMEventHandler(projectRoot);
+  const candidateRelPaths = new Set();
+  const maxFiles = 220; // step1과 비슷한 토큰 방어용 상한
 
-  // Case 5: Void/Reference
-  handleVoidReference(projectRoot);
+  for (const absFilePath of allTsFiles) {
+    if (candidateRelPaths.size >= maxFiles) break;
+    if (isStoreFile(absFilePath, srcPath)) continue;
 
-  // Case 6: Lib Initialization - Dynamic Import
-  handleLibInitialization(projectRoot);
+    let content = '';
+    try {
+      content = await fs.readFile(absFilePath, 'utf-8');
+    } catch {
+      continue;
+    }
 
-  console.log('✅ 브라우저 전용 API 최상단 접근 제어 완료!');
+    const hasBrowserApi = browserApiRegexes.some((re) => re.test(content));
+    if (!hasBrowserApi) continue;
+
+    const rel = path.relative(projectRoot, absFilePath).split(path.sep).join('/');
+    candidateRelPaths.add(rel);
+  }
+
+  if (candidateRelPaths.size === 0) {
+    return;
+  }
+
+  const candidateRelPathsArr = Array.from(candidateRelPaths);
+
+  await stopAndOfferGeminiApply({
+    projectRoot,
+    discoveryLine: `브라우저 전용 API(window/document/localStorage 등) 사용 코드가 ${candidateRelPathsArr.length}개 파일에서 감지되었습니다.`,
+    instructionForAi: `다음 파일들에서 브라우저 전용 API 접근이 서버 렌더/Next.js App Router 환경에서 깨질 수 있는 부분을 찾아서 수정하세요.
+
+요구사항:
+1) window/document/localStorage/sessionStorage/navigator 등은 서버에서 실행되지 않도록 처리하세요.
+   - 최상단(모듈 스코프)에서 직접 접근하는 코드는 제거하거나 typeof window !== 'undefined' 가드로 감싸고,
+   - 렌더 중 실행되는 값이면 useEffect로 옮기고 hydration-safe하게 상태 기본값을 둡니다.
+2) DOM 이벤트 등록/해제(addEventListener/removeEventListener)는 useEffect 안에서 수행하고 cleanup을 추가하세요.
+3) localStorage/sessionStorage 읽기/쓰기 로직은 서버에서 실행되지 않게 보호하세요.
+4) 필요한 경우 해당 파일(또는 관련 컴포넌트)에 'use client'를 추가해 클라이언트 전용으로 실행되게 만드세요.
+5) 코드가 빌드되도록 타입/문법을 유지하고, 불필요한 TODO 주석을 추가하지 마세요.
+
+반드시 서버에서 실행 가능한 코드만 남기고, 동작을 최대한 유지하세요.`,
+    candidateRelPaths: candidateRelPathsArr,
+  });
 }
 
 module.exports = {
-  handleVariableDeclaration,
-  handleSideEffectLogic,
-  handleRenderingValue,
-  handleDOMEventHandler,
-  handleVoidReference,
-  handleLibInitialization,
+  // NOTE:
+  // migrateBrowserAPIs에서는 이제 위 handler들을 직접 호출하지 않고,
+  // 브라우저 전용 API 후보 파일을 수집한 뒤 stopAndOfferGeminiApply로 AI가 일괄 수정합니다.
+  // 아래 handle* 들은 레거시/참고용으로만 남겨둡니다(삭제하지 않음).
+  // handleVariableDeclaration,
+  // handleSideEffectLogic,
+  // handleRenderingValue,
+  // handleDOMEventHandler,
+  // handleVoidReference,
+  // handleLibInitialization,
   migrateBrowserAPIs,
 };

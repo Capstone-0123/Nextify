@@ -5,6 +5,8 @@ const { applyNextImage } = require('./next-image-migrator.cjs');
 const { applyNextFont } = require('./next-font-migrator.cjs');
 const { optimizeDynamicImport } = require('./dynamic-import-migrator.cjs');
 const { cleanReactTrace } = require('./react-trace-cleaner.cjs');
+const { minimizeUseClientForBundle } = require('./useclient-minimizer.cjs');
+const { optimizeDataFetchingPlacement } = require('./data-fetch-migrator.cjs');
 const chalk = require('chalk');
 
 /**
@@ -23,6 +25,16 @@ async function runStep7(projectRoot) {
     console.log('next/font 적용 시작');
     await applyNextFont(projectRoot);
     console.log('next/font 적용 완료');
+
+    // 클라이언트 데이터 패칭 위치 최적화 실행
+    console.log('데이터 패칭 위치 최적화 시작');
+    await optimizeDataFetchingPlacement(projectRoot);
+    console.log('데이터 패칭 위치 최적화 완료');
+
+    // "use client" 최소화 실행 (JS 번들 최적화)
+    console.log('"use client" 최소화 시작');
+    await minimizeUseClientForBundle(projectRoot);
+    console.log('"use client" 최소화 완료');
 
     // Dynamic Import 적용 실행
     console.log('Dynamic Import 적용 시작');

@@ -137,17 +137,23 @@ async function applyNextImage(projectRoot) {
     const hasNextImageImport = nextImageImportPattern.test(content);
 
     // 4. 존재하지 않으면 파일 최상단에 import Image from "next/image"; 추가
+    const importLine = 'import Image from "next/image";\n';
     if (!hasNextImageImport) {
-      // 첫 번째 import 문 앞에 추가
       const firstImportMatch = content.match(/^import\s+/m);
       if (firstImportMatch) {
         const insertIndex = firstImportMatch.index;
-        content = content.slice(0, insertIndex) + 
-                  'import Image from "next/image";\n' + 
-                  content.slice(insertIndex);
+        content =
+          content.slice(0, insertIndex) + importLine + content.slice(insertIndex);
+        const delta = importLine.length;
+        for (const tag of imgTags) {
+          if (tag.index >= insertIndex) tag.index += delta;
+        }
       } else {
-        // import 문이 없으면 파일 최상단에 추가
-        content = 'import Image from "next/image";\n' + content;
+        content = importLine + content;
+        const delta = importLine.length;
+        for (const tag of imgTags) {
+          tag.index += delta;
+        }
       }
     }
 
