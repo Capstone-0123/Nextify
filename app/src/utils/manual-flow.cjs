@@ -64,8 +64,18 @@ async function askContinueAfterManualGuide() {
  * @param {{ projectRoot: string, discoveryLine: string, instructionForAi: string, candidateRelPaths: string[], manualFallback?: string }} opts
  * @returns {Promise<{applied: boolean}>} applied=true이면 Gemini가 파일을 수정/적용한 상태입니다.
  */
+
 async function stopAndOfferGeminiApply(opts) {
-  const { projectRoot, discoveryLine, instructionForAi, candidateRelPaths, manualFallback } = opts;
+  const {
+    projectRoot,
+    discoveryLine,
+    discoverySources = [],
+    instructionForAi,
+    candidateRelPaths,
+    manualGuideLines = [],
+    manualFallback,
+  } = opts;
+
 
   const existing = [];
   for (const rel of candidateRelPaths) {
