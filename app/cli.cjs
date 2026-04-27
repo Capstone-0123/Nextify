@@ -34,7 +34,7 @@ const {
 const { generateText, createMigrationPrompt, generateTextStream } = require('./src/utils/gemini-client.cjs');
 const { runAskApply } = require('./src/utils/ai-file-apply.cjs');
 const { runAiReviewSessionStream } = require('./src/utils/ai-review-session.cjs');
-
+const { printRelPathsBlock } = require('./src/utils/path-list-print.cjs');
 const fs = require('fs-extra');
 
 const program = new Command();
@@ -387,7 +387,8 @@ program
           context,
         });
         spinner.stop();
-        console.log(chalk.green(`\n✅ 적용 완료 (${written.length}개): ${written.join(', ')}\n`));
+        printRelPathsBlock(chalk.green, '\n✅ 적용 완료', written);
+        console.log('');
         return;
       }
 

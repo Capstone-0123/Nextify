@@ -504,7 +504,7 @@ function generateStaticMetadataCode(title, metadata, viewport) {
 
 /**
  * 동적 메타데이터용 최소 뼈대.
- * 직후 stopAndOfferGeminiApply(step1과 동일 흐름)로 채움.
+ * 직후 stopAndOfferGeminiApply로 채움.
  */
 function generateDynamicMetadataStub(patterns) {
   let code = `import type { Metadata } from 'next';\n\n`;
@@ -1026,10 +1026,13 @@ async function migratePageMetadata(projectRoot, pageFilePath, componentFilePath)
 
       const candidateRelPaths = await collectMigrationCandidateRelPaths(projectRoot);
 
+      const metadataDiscoveryPaths = [...new Set([pageRel, componentRel].filter(Boolean))];
+      const metadataDiscoveryCount = metadataDiscoveryPaths.length;
+
       await stopAndOfferGeminiApply({
         projectRoot,
-        discoveryLine: `${pageRel} 에서 동적 메타데이터(generateMetadata)가 감지되었습니다.`,
-        discoverySources: [pageRel, componentRel].filter(Boolean),
+        discoveryLine: `동적 메타데이터(generateMetadata)가 ${metadataDiscoveryCount}개 파일에서 감지되었습니다.`,
+        discoverySources: metadataDiscoveryPaths,
         instructionForAi: `Next.js App Router 마이그레이션입니다. 동적 메타데이터를 generateMetadata로 완성하세요.
 
 - 수정 대상: ${pageRel} 의 export async function generateMetadata — 빈 title/description 및 서버에서 실행 가능한 데이터 로딩을 이 저장소의 기존 패턴(API 모듈, fetch 등)에 맞게 완성하세요.
@@ -1054,14 +1057,8 @@ ${helmetSnippet}`,
           .slice(0, 20)
           .join(', ')}${candidateRelPaths.length > 20 ? ' ...' : ''}\n- 구현 후 서버 렌더링/빌드를 검증하세요.`,
         candidateRelPaths,
-        manualGuideLines: [
-          `1. 대상: ${pageRel}의 export async function generateMetadata 구현(현재 stub/빈 값).`,
-          `2. ${componentRel}의 Helmet/Head 값을 다음처럼 Metadata return 객체로 채우세요: generateMetadata가 "return { title, description, alternates: { canonical }, openGraph: { title, description, url, images }, twitter: { card, title, description, images } }" 형태로 결과를 만들어 반환하도록 구성하고, 데이터는 서버 fetch/서버 유틸로 만든 뒤(window/document 금지) return만 사용하세요.`,
-          `3. 완료 후: generateMetadata가 서버에서 동작 가능하도록 정리하고 저장하세요(브라우저 API/모듈 스코프 부작용 제거).`,
-        ],
       });
     }
-
     await commentOutHelmet(componentFilePath, helmetContent);
   }
 
