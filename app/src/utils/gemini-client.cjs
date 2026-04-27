@@ -2,6 +2,14 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 let geminiClient = null;
 
+function getNextifyScopeRules() {
+  return [
+    'You only answer questions that are directly related to Nextify or React(Vite) to Next.js migration.',
+    'If the user asks something unrelated to Nextify or migration, refuse briefly in Korean.',
+    'Use this exact refusal sentence for off-topic requests: "Nextify 관련 질문이 아닌 경우 답변하지 않습니다."',
+  ].join('\n');
+}
+
 /**
  * 사용 가능한 모델 목록 조회
  * @param {string} apiKey - Google Gemini API 키
@@ -136,7 +144,10 @@ Current project context:
 - Language: ${context.language || 'TypeScript'}
 - Package manager: ${context.packageManager || 'npm'}
 
-Provide clear, actionable advice for React to Next.js migration.`;
+Provide clear, actionable advice for React to Next.js migration.
+
+Scope rules:
+${getNextifyScopeRules()}`;
 
   return `${systemPrompt}\n\nUser question: ${question}\n\nAnswer:`;
 }
@@ -232,6 +243,9 @@ async function generateTextStream(prompt, onChunk, options = {}) {
 async function getManualProcessingHelp(issueDescription, context = {}, projectContext = {}) {
   const prompt = `You are an expert in React to Next.js migration.
 
+Scope rules:
+${getNextifyScopeRules()}
+
 A manual processing issue has been detected during migration:
 
 Issue: ${issueDescription}
@@ -302,6 +316,7 @@ module.exports = {
   generateText,
   generateTextStream,
   createMigrationPrompt,
+  getNextifyScopeRules,
   getManualProcessingHelp,
   askForGeminiHelp,
   listAvailableModels,

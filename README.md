@@ -4,7 +4,7 @@ React to Next migration 자동화 CLI 툴 'Nextify' 개발 레포지토리입니
 0) 사전 준비
 - 기본 오케스트레이터(`migrate-next`)의 AI 리뷰는 Gemini CLI(`gemini`)를 사용합니다.
 - Gemini CLI가 설치되어 있고 PATH에서 `gemini` 명령이 실행 가능해야 합니다.
-- 각 Part는 "세션 비움(Nextify Review Accept/Reject 완료) + AI 리뷰 종료(자연 종료 또는 Ctrl+C)" 두 조건이 모두 만족되어야 다음 Part로 진행됩니다.
+- 기본 오케스트레이터는 step1~7을 한 번에 실행한 뒤, 최종 **Gemini CLI 대화형 리뷰**가 끝나면 이어서 안내 메시지를 출력합니다. (Nextify Review 패널은 트리/diff 확인용이며, 선택 파일의 before/after 경로 복사 기능을 제공합니다.)
 
 1) 테스트(실행) 명령어들
 # 기본 오케스트레이터(서브커맨드 없음): step1~step7을 Part 단위로 순차 처리
@@ -27,6 +27,6 @@ migrate-next ask --apply -f path1,path2 -q "지시..."
 migrate-next test-gemini
 Extension 쪽은 “명령어 테스트”라기보다 VSCode/Cursor에서 확장 실행을 확인합니다.
 
-app/extension/README.md 기준으로 F5로 Extension Development Host 띄우고, 실제 프로젝트 루트에서 migrate-next(기본) 또는 migrate-next step1 --review를 실행한 뒤 Nextify Review 패널에서 Accept/Reject로 세션이 비워지는지 확인합니다.
-Extension 내부 커맨드는 nextifyReview.refreshSession, nextifyReview.openChange, nextifyReview.acceptChange, nextifyReview.rejectChange, nextifyReview.acceptAll, nextifyReview.discardSession 입니다.
+app/extension/README.md 기준으로 F5로 Extension Development Host 띄우고, 실제 프로젝트 루트에서 migrate-next(기본) 또는 migrate-next step1 --review를 실행한 뒤 Nextify Review 패널에서 트리/diff 확인 및 before/after 경로 복사를 확인합니다.
+Extension 내부 커맨드는 nextifyReview.refreshSession, nextifyReview.openChange, nextifyReview.copySessionPath, nextifyReview.copyBeforePath, nextifyReview.copyAfterPath 입니다.
 

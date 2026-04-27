@@ -1,6 +1,5 @@
 const vscode = require('vscode');
 const fs = require('fs');
-const path = require('path');
 
 function activate(context) {
   const controller = new NextifyReviewController();
@@ -8,6 +7,70 @@ function activate(context) {
 }
 
 function deactivate() {}
+
+/**
+ * @param {Array<{ relativePath: string }>} changes
+ */
+function buildChangeTreeRoot(changes) {
+  const root = { subdirs: new Map(), files: [] };
+  for (const change of changes) {
+    const parts = String(change.relativePath || '')
+      .replace(/\\/g, '/')
+      .split('/')
+      .filter(Boolean);
+    if (parts.length === 0) continue;
+    let node = root;
+    for (let i = 0; i < parts.length; i++) {
+      const seg = parts[i];
+      const isLast = i === parts.length - 1;
+      if (isLast) {
+        node.files.push({ name: seg, change });
+      } else {
+        if (!node.subdirs.has(seg)) {
+          node.subdirs.set(seg, { subdirs: new Map(), files: [] });
+        }
+        node = node.subdirs.get(seg);
+      }
+    }
+  }
+  return root;
+}
+
+/**
+ * @param {{ subdirs: Map, files: Array }} node
+ * @param {number} depth
+ * @param {string|null|undefined} currentChangeId
+ */
+function renderTreeContentHtml(node, depth, currentChangeId) {
+  const indentPx = 10;
+  const pad = depth * indentPx;
+  let html = '';
+
+  const dirEntries = [...node.subdirs.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  for (const [dirName, child] of dirEntries) {
+    const inner = renderTreeContentHtml(child, depth + 1, currentChangeId);
+    html += `
+<details class="tree-dir" open>
+  <summary class="tree-summary" style="padding-left:${pad}px">${escapeHtml(dirName)}</summary>
+  <div class="tree-children">${inner}</div>
+</details>`;
+  }
+
+  const fileEntries = [...node.files].sort((a, b) => a.name.localeCompare(b.name));
+  for (const f of fileEntries) {
+    const c = f.change;
+    const id = escapeHtml(c.id);
+    const type = escapeHtml(c.type || 'unknown');
+    const activeClass = currentChangeId && c.id === currentChangeId ? ' active' : '';
+    html += `
+<div class="tree-file${activeClass}" style="padding-left:${pad + indentPx}px">
+  <button type="button" class="link file-link" data-command="openChange" data-change-id="${id}">${escapeHtml(f.name)}</button>
+  <button type="button" class="badge-btn" data-command="openChange" data-change-id="${id}" title="diff 열기">${type}</button>
+</div>`;
+  }
+
+  return html;
+}
 
 class NextifyReviewController {
   constructor() {
@@ -29,10 +92,9 @@ class NextifyReviewController {
     this.focusPanel = this.focusPanel.bind(this);
     this.refreshSession = this.refreshSession.bind(this);
     this.openChange = this.openChange.bind(this);
-    this.acceptChange = this.acceptChange.bind(this);
-    this.rejectChange = this.rejectChange.bind(this);
-    this.acceptAll = this.acceptAll.bind(this);
-    this.discardSession = this.discardSession.bind(this);
+    this.copySessionPath = this.copySessionPath.bind(this);
+    this.copyBeforePath = this.copyBeforePath.bind(this);
+    this.copyAfterPath = this.copyAfterPath.bind(this);
 
     context.subscriptions.push(
       vscode.window.registerWebviewViewProvider('nextifyReview.panel', this, {
@@ -41,10 +103,9 @@ class NextifyReviewController {
       vscode.commands.registerCommand('nextifyReview.focusPanel', this.focusPanel),
       vscode.commands.registerCommand('nextifyReview.refreshSession', this.refreshSession),
       vscode.commands.registerCommand('nextifyReview.openChange', this.openChange),
-      vscode.commands.registerCommand('nextifyReview.acceptChange', this.acceptChange),
-      vscode.commands.registerCommand('nextifyReview.rejectChange', this.rejectChange),
-      vscode.commands.registerCommand('nextifyReview.acceptAll', this.acceptAll),
-      vscode.commands.registerCommand('nextifyReview.discardSession', this.discardSession),
+      vscode.commands.registerCommand('nextifyReview.copySessionPath', this.copySessionPath),
+      vscode.commands.registerCommand('nextifyReview.copyBeforePath', this.copyBeforePath),
+      vscode.commands.registerCommand('nextifyReview.copyAfterPath', this.copyAfterPath),
     );
 
     const watcher = vscode.workspace.createFileSystemWatcher('**/.ai-migration/**/session.json');
@@ -67,17 +128,14 @@ class NextifyReviewController {
         case 'openChange':
           await this.openChange(message.changeId);
           break;
-        case 'acceptChange':
-          await this.acceptChange(message.changeId);
+        case 'copySessionPath':
+          await this.copySessionPath();
           break;
-        case 'rejectChange':
-          await this.rejectChange(message.changeId);
+        case 'copyBeforePath':
+          await this.copyBeforePath();
           break;
-        case 'acceptAll':
-          await this.acceptAll();
-          break;
-        case 'discardSession':
-          await this.discardSession();
+        case 'copyAfterPath':
+          await this.copyAfterPath();
           break;
         default:
           break;
@@ -88,7 +146,6 @@ class NextifyReviewController {
   }
 
   async refreshSession() {
-    // Refresh 호출이 중첩되면, 마지막 이벤트 1회만 처리하도록 coalesce합니다.
     if (this.refreshInFlight) {
       this.refreshPending = true;
       this.scheduleRefresh();
@@ -149,8 +206,6 @@ class NextifyReviewController {
     }
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = null;
-      // scheduleRefresh는 항상 refreshSession 실행을 목표로 합니다.
-      // 중복 호출은 refreshSession 내부 coalesce로 흡수됩니다.
       this.refreshSession().catch(() => {
         // ignore
       });
@@ -209,147 +264,44 @@ class NextifyReviewController {
     this.render();
   }
 
-  async acceptChange(changeId) {
-    const change = this.getChange(changeId);
-    if (!change || !this.session) {
+  async copySessionPath() {
+    const p = this.session?.manifestPath;
+    if (!p) {
+      vscode.window.showInformationMessage('복사할 세션 경로가 없습니다.');
       return;
     }
-
-    try {
-      // Snapshot schema (new): step already applied to workspace; accept => keep current state.
-      // Legacy schema: preview files need to be copied into originalPath.
-      if (change.type === 'delete') {
-        const targetPath = change.targetPath || change.originalPath;
-        if (targetPath && fs.existsSync(targetPath)) {
-          fs.rmSync(targetPath, { force: true });
-        }
-      } else if (change.migratedPath && change.originalPath) {
-        // legacy create/modify accept
-        fs.mkdirSync(path.dirname(change.originalPath), { recursive: true });
-        fs.copyFileSync(change.migratedPath, change.originalPath);
-      }
-
-      this.removeChange(change.id);
-      // NOTE:
-      // 현재 step 동안 Gemini follow-up 질문을 위해 before/after 근거 아티팩트를 유지합니다.
-      // 개별 파일 아티팩트 cleanup은 step 전환 시점(오케스트레이터)에서 수행합니다.
-      this.persistOrCleanupSession();
-      vscode.window.setStatusBarMessage(`Nextify Review: ${change.relativePath} 적용 완료`, 2500);
-      await this.openFirstPendingChange();
-    } catch (error) {
-      vscode.window.showErrorMessage(`변경 적용 실패: ${error.message}`);
-    }
+    await vscode.env.clipboard.writeText(p);
+    vscode.window.setStatusBarMessage('Nextify Review: session.json 경로를 복사했습니다.', 2500);
   }
 
-  async rejectChange(changeId) {
-    const change = this.getChange(changeId);
-    if (!change || !this.session) {
+  async copyBeforePath() {
+    const change = this.getChange(this.currentChangeId);
+    if (!change) {
+      vscode.window.showInformationMessage('선택된 변경 파일이 없습니다.');
       return;
     }
-
-    try {
-      const isSnapshotSchema = !!(change?.targetPath && change?.diffBeforePath && change?.diffAfterPath);
-      // Snapshot schema (new): reject => restore beforeSnapshot to the current workspace.
-      // - create: remove the file created by the step
-      // - modify/delete: copy snapshot -> targetPath
-      if (isSnapshotSchema) {
-        if (change.type === 'create') {
-          if (change.targetPath && fs.existsSync(change.targetPath)) {
-            fs.rmSync(change.targetPath, { force: true });
-          }
-        } else {
-          if (!change.beforeSnapshotPath) {
-            throw new Error(`beforeSnapshotPath가 없어 복원할 수 없습니다: ${change.relativePath}`);
-          }
-          fs.mkdirSync(path.dirname(change.targetPath), { recursive: true });
-          fs.copyFileSync(change.beforeSnapshotPath, change.targetPath);
-        }
-      }
-
-      this.removeChange(change.id);
-      // NOTE:
-      // 현재 step 동안 Gemini follow-up 질문을 위해 before/after 근거 아티팩트를 유지합니다.
-      // 개별 파일 아티팩트 cleanup은 step 전환 시점(오케스트레이터)에서 수행합니다.
-      this.persistOrCleanupSession();
-      vscode.window.setStatusBarMessage(`Nextify Review: ${change.relativePath} 변경을 유지하지 않았습니다.`, 2500);
-      await this.openFirstPendingChange();
-    } catch (error) {
-      vscode.window.showErrorMessage(`변경 제외 실패: ${error.message}`);
+    const beforePath = change.diffBeforePath || change.beforePath;
+    if (!beforePath) {
+      vscode.window.showInformationMessage(`before 경로가 없습니다: ${change.relativePath}`);
+      return;
     }
+    await vscode.env.clipboard.writeText(beforePath);
+    vscode.window.setStatusBarMessage(`Nextify Review: BEFORE 경로 복사 완료 (${change.relativePath})`, 3000);
   }
 
-  async acceptAll() {
-    if (!this.session || this.session.changes.length === 0) {
-      vscode.window.showInformationMessage('적용할 변경이 없습니다.');
+  async copyAfterPath() {
+    const change = this.getChange(this.currentChangeId);
+    if (!change) {
+      vscode.window.showInformationMessage('선택된 변경 파일이 없습니다.');
       return;
     }
-
-    try {
-      for (const change of [...this.session.changes]) {
-        // Legacy schema accept
-        if (!change.beforeSnapshotPath && change.migratedPath && change.originalPath && change.type !== 'delete') {
-          fs.mkdirSync(path.dirname(change.originalPath), { recursive: true });
-          fs.copyFileSync(change.migratedPath, change.originalPath);
-        }
-
-        // Both schemas: delete accept should ensure the file is removed.
-        if (change.type === 'delete') {
-          const targetPath = change.targetPath || change.originalPath;
-          if (targetPath && fs.existsSync(targetPath)) {
-            fs.rmSync(targetPath, { force: true });
-          }
-        }
-
-        cleanupChangeArtifacts(change, this.session.reviewRoot);
-      }
-
-      const reviewRoot = this.session.reviewRoot;
-      removeDirectory(reviewRoot);
-      this.session = null;
-      this.currentChangeId = null;
-      this.render();
-      vscode.window.showInformationMessage('Nextify Review 변경을 모두 적용했습니다.');
-    } catch (error) {
-      vscode.window.showErrorMessage(`전체 적용 실패: ${error.message}`);
-    }
-  }
-
-  async discardSession() {
-    if (!this.session) {
+    const afterPath = change.diffAfterPath || change.afterPath;
+    if (!afterPath) {
+      vscode.window.showInformationMessage(`after 경로가 없습니다: ${change.relativePath}`);
       return;
     }
-
-    // Snapshot schema (new): discard => reject all pending changes to restore the original snapshot state.
-    // Legacy schema: step already ran in preview clone, so removing reviewRoot is sufficient.
-    if (this.session.changes?.some((c) => c.diffBeforePath && c.diffAfterPath)) {
-      for (const change of [...this.session.changes]) {
-        if (change.type === 'create') {
-          if (fs.existsSync(change.targetPath)) {
-            fs.rmSync(change.targetPath, { force: true });
-          }
-        } else {
-          fs.mkdirSync(path.dirname(change.targetPath), { recursive: true });
-          fs.copyFileSync(change.beforeSnapshotPath, change.targetPath);
-        }
-        cleanupChangeArtifacts(change, this.session.reviewRoot);
-      }
-    }
-
-    removeDirectory(this.session.reviewRoot);
-    this.session = null;
-    this.currentChangeId = null;
-    this.render();
-    vscode.window.showInformationMessage('Nextify Review 세션을 삭제했습니다.');
-  }
-
-  async openFirstPendingChange() {
-    if (!this.session || this.session.changes.length === 0) {
-      this.render();
-      return;
-    }
-
-    this.currentChangeId = this.session.changes[0].id;
-    await this.openChange(this.currentChangeId);
+    await vscode.env.clipboard.writeText(afterPath);
+    vscode.window.setStatusBarMessage(`Nextify Review: AFTER 경로 복사 완료 (${change.relativePath})`, 3000);
   }
 
   getChange(changeId) {
@@ -365,43 +317,6 @@ class NextifyReviewController {
     return this.session.changes.find((change) => change.id === targetId) || null;
   }
 
-  removeChange(changeId) {
-    if (!this.session) {
-      return;
-    }
-
-    this.session.changes = this.session.changes.filter((change) => change.id !== changeId);
-    this.currentChangeId = this.session.changes[0]?.id || null;
-  }
-
-  persistOrCleanupSession() {
-    if (!this.session) {
-      return;
-    }
-
-    if (this.session.changes.length === 0) {
-      removeDirectory(this.session.reviewRoot);
-      this.session = null;
-      this.currentChangeId = null;
-      this.render();
-      vscode.window.showInformationMessage('모든 리뷰 항목이 처리되어 .ai-migration 세션을 정리했습니다.');
-      return;
-    }
-
-    const nextManifest = {
-      version: this.session.version,
-      step: this.session.step,
-      createdAt: this.session.createdAt,
-      reviewRoot: this.session.reviewRoot,
-      filesRoot: this.session.filesRoot,
-      placeholdersRoot: this.session.placeholdersRoot,
-      changes: this.session.changes,
-    };
-
-    fs.writeFileSync(this.session.manifestPath, JSON.stringify(nextManifest, null, 2));
-    this.render();
-  }
-
   render() {
     if (!this.view) {
       return;
@@ -415,40 +330,27 @@ class NextifyReviewController {
     const sessionMeta = this.isLoading
       ? 'Loading session...'
       : this.session
-        ? `Step ${escapeHtml(this.session.step.replace('step', ''))} · ${pendingCount} pending`
+        ? `Step ${escapeHtml(String(this.session.step).replace('step', ''))} · ${pendingCount} changed (view-only)`
         : 'No active .ai-migration session';
+
+    const treeRoot = buildChangeTreeRoot(changes);
+    const treeHtml = pendingCount
+      ? renderTreeContentHtml(treeRoot, 0, current?.id)
+      : '';
 
     const items = this.isLoading
       ? '<div class="empty">Loading session...</div>'
       : pendingCount
-        ? changes
-            .map((change) => {
-              const activeClass = current?.id === change.id ? 'change active' : 'change';
-              return `
-                <div class="${activeClass}">
-                  <button class="link" data-command="openChange" data-change-id="${escapeHtml(change.id)}">
-                    ${escapeHtml(change.relativePath)}
-                  </button>
-                  <div class="badges">
-                    <span class="badge">${escapeHtml(change.type)}</span>
-                  </div>
-                  <div class="row">
-                    <button data-command="acceptChange" data-change-id="${escapeHtml(change.id)}">Accept</button>
-                    <button data-command="rejectChange" data-change-id="${escapeHtml(change.id)}">Reject</button>
-                  </div>
-                </div>
-              `;
-            })
-            .join('')
+        ? `<div class="tree-root" role="tree">${treeHtml}</div>`
         : '<div class="empty">`migrate-next` 실행 후 Nextify Review 패널에서 세션을 확인하세요.</div>';
 
     const disabled = this.isLoading ? 'disabled' : '';
-    const openCurrentDisabled = this.isLoading || !hasSession ? 'disabled' : '';
-    const acceptAllDisabled = this.isLoading || !hasSession || pendingCount === 0 ? 'disabled' : '';
-    const discardDisabled = this.isLoading || !hasSession ? 'disabled' : '';
+    const openCurrentDisabled = this.isLoading || !hasSession || !current ? 'disabled' : '';
+    const copyPathDisabled = this.isLoading || !hasSession ? 'disabled' : '';
+    const copySelectedPathDisabled = this.isLoading || !hasSession || !current ? 'disabled' : '';
 
     this.view.webview.html = `<!DOCTYPE html>
-<html lang="en">
+<html lang="ko">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -458,16 +360,25 @@ class NextifyReviewController {
       color: var(--vscode-foreground);
       padding: 10px;
     }
-    .toolbar, .row {
+    .toolbar {
       display: grid;
       gap: 8px;
       grid-template-columns: 1fr 1fr;
       margin-bottom: 8px;
     }
+    .toolbar-row2 {
+      grid-template-columns: 1fr;
+    }
     .summary {
       font-size: 12px;
       margin-bottom: 12px;
       color: var(--vscode-descriptionForeground);
+    }
+    .hint {
+      font-size: 11px;
+      margin-bottom: 10px;
+      color: var(--vscode-descriptionForeground);
+      line-height: 1.4;
     }
     button {
       border: 1px solid var(--vscode-input-border, transparent);
@@ -487,25 +398,71 @@ class NextifyReviewController {
       border: 0;
       padding: 0;
       text-align: left;
+      font-size: inherit;
+      font-family: inherit;
     }
-    .change {
+    button.file-link {
+      margin-right: 8px;
+    }
+    .tree-root {
       border: 1px solid var(--vscode-editorWidget-border, transparent);
-      background: var(--vscode-editorWidget-background);
       border-radius: 6px;
-      padding: 8px;
-      margin-bottom: 8px;
+      background: var(--vscode-editorWidget-background);
+      padding: 4px 0;
+      max-height: 70vh;
+      overflow: auto;
     }
-    .change.active {
-      border-color: var(--vscode-focusBorder);
+    details.tree-dir {
+      margin: 0;
     }
-    .badge {
+    summary.tree-summary {
+      cursor: pointer;
+      list-style: none;
+      font-weight: 500;
+      padding: 2px 4px;
+      user-select: none;
+    }
+    summary.tree-summary::-webkit-details-marker {
+      display: none;
+    }
+    summary.tree-summary::before {
+      content: '▾ ';
+      opacity: 0.7;
+      font-size: 10px;
+    }
+    details.tree-dir:not([open]) > summary.tree-summary::before {
+      content: '▸ ';
+    }
+    .tree-children {
+      margin: 0;
+    }
+    .tree-file {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 4px 8px;
+      padding: 3px 4px;
+      border-radius: 4px;
+    }
+    .tree-file:hover {
+      background: var(--vscode-list-hoverBackground);
+    }
+    .tree-file.active {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+    button.badge-btn {
       display: inline-block;
       background: var(--vscode-badge-background);
       color: var(--vscode-badge-foreground);
       border-radius: 999px;
-      padding: 2px 6px;
+      padding: 2px 8px;
       font-size: 11px;
-      margin: 6px 0 8px;
+      border: 0;
+      cursor: pointer;
+    }
+    button.badge-btn:hover {
+      filter: brightness(1.08);
     }
     .empty {
       border: 1px dashed var(--vscode-editorWidget-border, transparent);
@@ -517,16 +474,20 @@ class NextifyReviewController {
 </head>
 <body>
   <div class="toolbar">
-    <button data-command="refresh" ${disabled}>Refresh</button>
-    <button data-command="openChange" data-change-id="${escapeHtml(current?.id || '')}" ${openCurrentDisabled}>
-      Open Current
+    <button type="button" data-command="refresh" ${disabled}>Refresh</button>
+    <button type="button" data-command="openChange" data-change-id="${escapeHtml(current?.id || '')}" ${openCurrentDisabled}>
+      Open diff (selected)
     </button>
   </div>
+  <div class="toolbar toolbar-row2">
+    <button type="button" data-command="copySessionPath" ${copyPathDisabled}>Copy session.json path</button>
+  </div>
   <div class="toolbar">
-    <button data-command="acceptAll" ${acceptAllDisabled}>Accept All</button>
-    <button data-command="discardSession" ${discardDisabled}>Discard Session</button>
+    <button type="button" data-command="copyBeforePath" ${copySelectedPathDisabled}>Copy BEFORE path</button>
+    <button type="button" data-command="copyAfterPath" ${copySelectedPathDisabled}>Copy AFTER path</button>
   </div>
   <div class="summary">${sessionMeta}</div>
+  <div class="hint">폴더를 펼쳐 파일을 선택한 다음 path 복사 버튼을 누르세요. Gemini CLI에는 <code>@복사한경로</code> 형태로 붙여 넣으면 됩니다.</div>
   ${items}
   <script>
     const vscode = acquireVsCodeApi();
@@ -548,41 +509,6 @@ function getWorkspaceRoots() {
   return (vscode.workspace.workspaceFolders || []).map((folder) => folder.uri.fsPath);
 }
 
-function cleanupChangeArtifacts(change, reviewRoot) {
-  // Snapshot schema artifacts (within reviewRoot)
-  safeRemoveInsideReview(change.beforeSnapshotPath, reviewRoot);
-  safeRemoveInsideReview(change.diffBeforePath, reviewRoot);
-  safeRemoveInsideReview(change.diffAfterPath, reviewRoot);
-
-  // Legacy schema artifacts (within reviewRoot)
-  safeRemoveInsideReview(change.migratedPath, reviewRoot);
-  safeRemoveInsideReview(change.beforePath, reviewRoot);
-  safeRemoveInsideReview(change.afterPath, reviewRoot);
-}
-
-function safeRemoveInsideReview(targetPath, reviewRoot) {
-  if (!targetPath || !reviewRoot) {
-    return;
-  }
-
-  const resolvedReviewRoot = path.resolve(reviewRoot);
-  const resolvedTarget = path.resolve(targetPath);
-
-  if (!resolvedTarget.startsWith(resolvedReviewRoot)) {
-    return;
-  }
-
-  if (fs.existsSync(resolvedTarget)) {
-    fs.rmSync(resolvedTarget, { force: true, recursive: false });
-  }
-}
-
-function removeDirectory(directoryPath) {
-  if (directoryPath && fs.existsSync(directoryPath)) {
-    fs.rmSync(directoryPath, { recursive: true, force: true });
-  }
-}
-
 function escapeHtml(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')
@@ -596,8 +522,6 @@ async function getLatestSessionManifestPath(workspaceRoots) {
   const roots = Array.isArray(workspaceRoots) ? workspaceRoots : [];
   if (roots.length === 0) return null;
 
-  // VSCode workspace 범위 전체에서 세션 파일을 직접 검색하면
-  // 루트/하위/멀티루트/복사본 경로 케이스를 가장 안정적으로 처리할 수 있습니다.
   const uris = await vscode.workspace.findFiles('**/.ai-migration/**/session.json');
   if (!uris || uris.length === 0) {
     return null;
@@ -613,9 +537,6 @@ async function getLatestSessionManifestPath(workspaceRoots) {
       const isBetterStep = stepNum > latestStepNum;
       const isSameStepAndNewer = stepNum === latestStepNum && st.mtimeMs > latestMtimeMs;
 
-      // 우선순위:
-      // 1) step 번호가 더 큰 세션
-      // 2) step 번호가 같으면 수정시각이 더 최신인 세션
       if (isBetterStep || isSameStepAndNewer) {
         latestStepNum = stepNum;
         latestMtimeMs = st.mtimeMs;

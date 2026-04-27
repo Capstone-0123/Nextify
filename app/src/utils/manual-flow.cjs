@@ -7,11 +7,7 @@ const path = require('path');
 const fs = require('fs-extra');
 const { runAskApply } = require('./ai-file-apply.cjs');
 const { printRelPathsBlock } = require('./path-list-print.cjs');
-const {
-  detectBuildTool,
-  detectLanguage,
-  detectPackageManager,
-} = require('./project-info.cjs');
+const { detectBuildTool, detectLanguage, detectPackageManager } = require('./project-info.cjs');
 
 function getProjectContext(projectRoot) {
   return {
@@ -32,12 +28,16 @@ async function askContinueAfterManualGuide() {
       message: chalk.yellow('마이그레이션을 계속 진행할까요? (y, Enter=y)'),
       default: 'y',
       validate: (input) => {
-        const s = String(input ?? '').trim().toLowerCase();
+        const s = String(input ?? '')
+          .trim()
+          .toLowerCase();
         if (s === '' || s === 'y') return true;
         return '계속하려면 y 를 입력하세요.';
       },
       filter: (input) => {
-        const s = String(input ?? '').trim().toLowerCase();
+        const s = String(input ?? '')
+          .trim()
+          .toLowerCase();
         return s === '' ? 'y' : s;
       },
     },
@@ -48,6 +48,7 @@ async function askContinueAfterManualGuide() {
  * 이슈 안내 후 확인 없이 Gemini로 관련 파일을 수정합니다.
  * @param {{ projectRoot: string, discoveryLine: string, discoverySources?: string[], instructionForAi: string, candidateRelPaths: string[] }} opts
  */
+
 async function stopAndOfferGeminiApply(opts) {
   const {
     projectRoot,
@@ -58,8 +59,6 @@ async function stopAndOfferGeminiApply(opts) {
     manualGuideLines = [],
     manualFallback,
   } = opts;
-
-
 
   const existing = [];
   for (const rel of candidateRelPaths) {
@@ -85,9 +84,7 @@ async function stopAndOfferGeminiApply(opts) {
   console.log(chalk.cyan('→ Gemini로 관련 파일을 수정합니다.\n'));
 
   if (!process.env.GEMINI_API_KEY) {
-    console.error(
-      chalk.red('\n❌ GEMINI_API_KEY가 없습니다. AI 자동 수정을 사용할 수 없습니다.\n')
-    );
+    console.error(chalk.red('\n❌ GEMINI_API_KEY가 없습니다. AI 자동 수정을 사용할 수 없습니다.\n'));
     process.exit(1);
   }
 
@@ -120,10 +117,7 @@ async function stopAndOfferGeminiApply(opts) {
 /** src 하위에 포함할 소스 파일 상한 (루트 설정 파일 개수는 별도) */
 const DEFAULT_MAX_MIGRATION_SOURCE_FILES = 220;
 
-async function collectMigrationCandidateRelPaths(
-  projectRoot,
-  maxSourceFiles = DEFAULT_MAX_MIGRATION_SOURCE_FILES
-) {
+async function collectMigrationCandidateRelPaths(projectRoot, maxSourceFiles = DEFAULT_MAX_MIGRATION_SOURCE_FILES) {
   const rootCandidates = [
     'vite.config.ts',
     'vite.config.mjs',

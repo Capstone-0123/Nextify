@@ -1,6 +1,6 @@
 const fs = require('fs-extra');
 const path = require('path');
-const { generateText } = require('./gemini-client.cjs');
+const { generateText, getNextifyScopeRules } = require('./gemini-client.cjs');
 
 /** @param {string} p */
 function normRelKey(p) {
@@ -92,8 +92,12 @@ function buildApplyPrompt(question, context, fileEntries) {
     .join('\n\n');
 
   return `You are applying file edits for React → Next.js migration.
+${getNextifyScopeRules()}
 Output MUST be a single JSON object only. No markdown fences, no explanation before or after.
 Use UTF-8. Escape newlines in JSON strings properly.
+
+If the user instruction is unrelated to Nextify or React(Vite) → Next.js migration, return:
+{"files":[],"refusal":"Nextify 관련 질문이 아닌 경우 답변하지 않습니다."}
 
 Schema:
 {"files":[{"path":"<must match allowed path exactly>","content":"<complete new file source>"}]}
@@ -176,6 +180,19 @@ async function runAskApply(opts) {
   }
 
   const patches = parseApplyJson(raw);
+  if (patches.length === 0) {
+    const stripped = stripCodeFences(raw);
+    try {
+      const data = JSON.parse(stripped);
+      if (data && typeof data.refusal === 'string') {
+        throw new Error(data.refusal);
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message) {
+        throw error;
+      }
+    }
+  }
   if (patches.length === 0) {
     throw new Error('AI 응답에 적용할 files 항목이 없습니다.');
   }

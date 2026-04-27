@@ -1,7 +1,13 @@
 const fs = require('fs-extra');
-const { generateTextStream } = require('./gemini-client.cjs');
+const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
+const { generateTextStream, getNextifyScopeRules } = require('./gemini-client.cjs');
 const ora = require('ora');
 const { spawn } = require('child_process');
+
+/** Windows cmd.exe 전체 명령줄 한도(~8191) 대비 --prompt-interactive 인자 상한(여유 포함). */
+const WIN_MAX_SINGLE_LINE_PROMPT = 3500;
 
 async function readUtf8IfExists(absPath) {
   if (!absPath) return '';
@@ -34,6 +40,7 @@ function buildInteractiveSeedPrompt(session, sessionPath) {
     'You are a careful senior engineer doing CODE REVIEW for React(Vite) -> Next.js migration.',
     'Respond in Korean.',
     'Review-only mode: never apply edits automatically.',
+    getNextifyScopeRules(),
     `Step: ${step}`,
     `Session file path: ${sessionPath}`,
     `Total changed files: ${changes.length}`,
@@ -59,6 +66,51 @@ function toSingleLinePromptArg(text) {
     .replace(/\s+/g, ' ')
     .replace(/"/g, "'")
     .trim();
+}
+
+function toFwdSlash(p) {
+  return String(p || '').replace(/\\/g, '/');
+}
+
+/**
+ * 긴 시드를 파일로 옮길 때 CLI에는 짧은 포인터만 넘깁니다 (Windows 명령줄 한도 회피).
+ * @param {string} seedAbsPath
+ */
+function buildShortInteractiveSeedPointerPrompt(seedAbsPath) {
+  const fp = toFwdSlash(seedAbsPath);
+  return [
+    'Nextify React(Vite)->Next.js CODE REVIEW: UTF-8 seed file has full instructions and change metadata.',
+    'Read that file completely first (Gemini CLI @ path if needed), then continue interactive Q&A in Korean; review-only; follow guardrails in the file:',
+    `@${fp}`,
+  ].join(' ');
+}
+
+/**
+ * @param {object} session
+ * @param {string} sessionPath
+ * @returns {Promise<string>} --prompt-interactive에 넣을 문자열(전체 시드 또는 짧은 포인터)
+ */
+async function prepareInteractiveSeedForCli(session, sessionPath) {
+  const full = buildInteractiveSeedPrompt(session, sessionPath);
+  const singleLine = toSingleLinePromptArg(full);
+  const forceFile = /^1|true|yes$/i.test(String(process.env.NEXTIFY_GEMINI_CLI_SEED_FILE || ''));
+  const winTooLong =
+    process.platform === 'win32' && singleLine.length > WIN_MAX_SINGLE_LINE_PROMPT;
+
+  if (!forceFile && !winTooLong) {
+    return full;
+  }
+
+  const seedFile = path.join(
+    os.tmpdir(),
+    `nextify-gemini-interactive-seed-${crypto.randomUUID()}.txt`,
+  );
+  await fs.writeFile(seedFile, full, 'utf8');
+  // eslint-disable-next-line no-console
+  console.log(
+    `\nNextify: Gemini CLI 시드가 길어 명령줄 대신 파일로 전달합니다:\n  ${seedFile}\n`,
+  );
+  return buildShortInteractiveSeedPointerPrompt(seedFile);
 }
 
 function parseCsvList(value) {
@@ -101,6 +153,7 @@ Rules:
 - DO NOT provide patch/apply instructions as executable commands.
 - You MAY point out risks, edge cases, and propose what should be changed, but the final output must NOT be an auto-applicable patch.
 - If a fix is needed, describe the exact location and what to change conceptually.
+- ${getNextifyScopeRules().split('\n').join('\n- ')}
 
 Output format (Korean):
 1) Step: ${step}
@@ -200,15 +253,9 @@ async function runAiReviewSessionCliStream(opts) {
   let normalizedMode = mode === 'interactiveSeeded' ? 'interactive-seeded' : mode;
   if (normalizedMode === 'interactive-seeded' && !hasInteractiveTty) {
     // Gemini CLI는 --prompt-interactive를 stdin pipe 환경에서 금지합니다.
-    // 자동화/테스트 실행처럼 TTY가 없으면 seed 플래그를 빼고 interactive로 degrade합니다.
-    normalizedMode = 'interactive';
-    if (typeof onChunk === 'function') {
-      onChunk(
-        '\n[AI review interactive mode]\n' +
-          '- Non-TTY 환경이라 --prompt-interactive 주입을 생략합니다.\n' +
-          '- 대신 Gemini CLI 대화형 모드로 실행합니다.\n\n',
-      );
-    }
+    // 자동화/테스트 실행처럼 TTY가 없으면 stream 모드로 degrade해
+    // seed prompt와 범위 제한 규칙을 그대로 유지합니다.
+    normalizedMode = 'stream';
   }
 
   if (!Array.isArray(session.changes) || session.changes.length === 0) {
@@ -227,7 +274,7 @@ async function runAiReviewSessionCliStream(opts) {
   } else if (normalizedMode === 'interactive-seeded') {
     const stage1Spinner = ora('Preparing interactive review seed...').start();
     try {
-      interactiveSeedPrompt = buildInteractiveSeedPrompt(session, sessionPath);
+      interactiveSeedPrompt = await prepareInteractiveSeedForCli(session, sessionPath);
     } finally {
       stage1Spinner.stop();
     }
@@ -402,28 +449,6 @@ async function runAiReviewSessionCliStream(opts) {
       if (normalizedMode === 'stream') {
         child.stdin.write(prompt);
         child.stdin.end();
-      } else if (normalizedMode === 'interactive-seeded') {
-        if (typeof onChunk === 'function') {
-          onChunk(
-            '\n[AI review interactive seeded mode]\n' +
-              '- Session context has been injected automatically.\n' +
-              '- Ask with exact relativePath from the metadata list.\n' +
-              '- If match fails, request user confirmation/correction before analysis.\n' +
-              '- If needed, request @diffBeforePath and @diffAfterPath (or pasted content) for evidence-based before/after review.\n' +
-              '- Continue chatting in Gemini terminal. Press Ctrl+C to stop AI chat.\n\n',
-          );
-        }
-      } else {
-        // interactive mode
-        if (typeof onChunk === 'function') {
-          const changedPaths = session.changes.slice(0, 5).map((c) => c.relativePath).join(', ');
-          const hint =
-            `\n[AI review interactive mode]\n` +
-            `- You can ask Gemini about this step session: ${sessionPath}\n` +
-            `- Changed files sample: ${changedPaths || '(none)'}\n` +
-            `- Exit Gemini chat with Ctrl+C to continue orchestration wait.\n\n`;
-          onChunk(hint);
-        }
       }
     });
 
@@ -448,19 +473,6 @@ async function runAiReviewSessionStream(opts) {
   const transport = opts?.transport || 'cli';
   if (transport === 'sdk') {
     return runAiReviewSessionSdkStream(opts);
-  }
-  if (opts?.mode === 'interactive-seeded') {
-    try {
-      return await runAiReviewSessionCliStream(opts);
-    } catch (err) {
-      if (typeof opts?.onChunk === 'function') {
-        opts.onChunk(
-          '\n[AI review fallback]\n' +
-            '- interactive-seeded launch failed. Retrying in plain interactive mode.\n\n',
-        );
-      }
-      return runAiReviewSessionCliStream({ ...opts, mode: 'interactive' });
-    }
   }
   return runAiReviewSessionCliStream(opts);
 }
