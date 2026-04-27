@@ -1,7 +1,13 @@
 const fs = require('fs-extra');
+const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
 const { generateTextStream, getNextifyScopeRules } = require('./gemini-client.cjs');
 const ora = require('ora');
 const { spawn } = require('child_process');
+
+/** Windows cmd.exe 전체 명령줄 한도(~8191) 대비 --prompt-interactive 인자 상한(여유 포함). */
+const WIN_MAX_SINGLE_LINE_PROMPT = 3500;
 
 async function readUtf8IfExists(absPath) {
   if (!absPath) return '';
@@ -60,6 +66,51 @@ function toSingleLinePromptArg(text) {
     .replace(/\s+/g, ' ')
     .replace(/"/g, "'")
     .trim();
+}
+
+function toFwdSlash(p) {
+  return String(p || '').replace(/\\/g, '/');
+}
+
+/**
+ * 긴 시드를 파일로 옮길 때 CLI에는 짧은 포인터만 넘깁니다 (Windows 명령줄 한도 회피).
+ * @param {string} seedAbsPath
+ */
+function buildShortInteractiveSeedPointerPrompt(seedAbsPath) {
+  const fp = toFwdSlash(seedAbsPath);
+  return [
+    'Nextify React(Vite)->Next.js CODE REVIEW: UTF-8 seed file has full instructions and change metadata.',
+    'Read that file completely first (Gemini CLI @ path if needed), then continue interactive Q&A in Korean; review-only; follow guardrails in the file:',
+    `@${fp}`,
+  ].join(' ');
+}
+
+/**
+ * @param {object} session
+ * @param {string} sessionPath
+ * @returns {Promise<string>} --prompt-interactive에 넣을 문자열(전체 시드 또는 짧은 포인터)
+ */
+async function prepareInteractiveSeedForCli(session, sessionPath) {
+  const full = buildInteractiveSeedPrompt(session, sessionPath);
+  const singleLine = toSingleLinePromptArg(full);
+  const forceFile = /^1|true|yes$/i.test(String(process.env.NEXTIFY_GEMINI_CLI_SEED_FILE || ''));
+  const winTooLong =
+    process.platform === 'win32' && singleLine.length > WIN_MAX_SINGLE_LINE_PROMPT;
+
+  if (!forceFile && !winTooLong) {
+    return full;
+  }
+
+  const seedFile = path.join(
+    os.tmpdir(),
+    `nextify-gemini-interactive-seed-${crypto.randomUUID()}.txt`,
+  );
+  await fs.writeFile(seedFile, full, 'utf8');
+  // eslint-disable-next-line no-console
+  console.log(
+    `\nNextify: Gemini CLI 시드가 길어 명령줄 대신 파일로 전달합니다:\n  ${seedFile}\n`,
+  );
+  return buildShortInteractiveSeedPointerPrompt(seedFile);
 }
 
 function parseCsvList(value) {
@@ -223,7 +274,7 @@ async function runAiReviewSessionCliStream(opts) {
   } else if (normalizedMode === 'interactive-seeded') {
     const stage1Spinner = ora('Preparing interactive review seed...').start();
     try {
-      interactiveSeedPrompt = buildInteractiveSeedPrompt(session, sessionPath);
+      interactiveSeedPrompt = await prepareInteractiveSeedForCli(session, sessionPath);
     } finally {
       stage1Spinner.stop();
     }

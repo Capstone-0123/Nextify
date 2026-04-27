@@ -593,7 +593,7 @@ ${rewritesObjects.join(',\n')}
   return { migrated: proxyItems, skipped: skippedItems };
 }
 
-// Case c-3: server.proxy 값이 객체이며 rewrites로 이관 불가한 경우 — Gemini만 (긴 수동 가이드 없음)
+// Case c-3: server.proxy 값이 객체이며 rewrites로 이관 불가한 경우 — Gemini 제안
 async function printManualProxyMigrationGuide(cwd, skippedItems) {
   console.log(chalk.gray('\n자동 이관에서 제외된 proxy 항목:'));
   skippedItems.forEach((item, index) => {
@@ -612,11 +612,6 @@ async function printManualProxyMigrationGuide(cwd, skippedItems) {
       .slice(0, 20)
       .join(', ')}${candidateRelPaths.length > 20 ? ' ...' : ''}\n- 서버를 재시작한 뒤 동작을 검증하세요.`,
     candidateRelPaths,
-    manualGuideLines: [
-      '1. 대상: vite.config.ts의 server.proxy 중 자동 이관 제외 항목을 확인하세요.',
-      '2. 각 항목을 Next.js로 이관하세요: 단순 경로 매핑은 next.config.mjs rewrites, 조건/헤더/동적 프록시는 src/app/api Route Handler로 옮기세요.',
-      '3. 완료 후: 해당 proxy 항목을 vite.config.ts에서 제거/정리하고 저장하세요.',
-    ],
   });
   return true;
 }
@@ -1078,11 +1073,6 @@ async function migrateViteDefineLogic(cwd) {
         .slice(0, 20)
         .join(', ')}${candidateRelPaths.length > 20 ? ' ...' : ''}\n- 서버 컴포넌트 실행 시 오류가 없는지 확인하세요.`,
       candidateRelPaths,
-      manualGuideLines: [
-        '1. 대상: vite.config.ts define.global = "window" 설정을 확인하세요.',
-        '2. define.global을 제거하고, global/window 의존 코드는 \'use client\' 컴포넌트로 옮기거나 해당 라이브러리를 dynamic import({ ssr: false })로 로드하도록 분리하세요.',
-        '3. 완료 후: define.global 제거가 반영되도록 저장하세요.',
-      ],
     });
   }
 
@@ -1381,11 +1371,6 @@ async function handleComplexDefineExpressions(cwd, defineContent) {
       .slice(0, 20)
       .join(', ')}${candidateRelPaths.length > 20 ? ' ...' : ''}\n- 빌드/런타임에서 참조 오류가 없는지 검증하세요.`,
     candidateRelPaths,
-    manualGuideLines: [
-      '1. 대상: vite.config.ts define의 복잡 표현식(함수/객체/참조 등)을 확인하세요.',
-      '2. 빌드 타임 상수는 NEXT_PUBLIC_* 환경변수로 옮기고, 나머지는 src/config 같은 설정 모듈로 분리하세요(서버 전용 값은 서버 컴포넌트/Route Handler로 이동).',
-      '3. 완료 후: vite define에서 복잡 표현식을 제거하고 저장하세요.',
-    ],
   });
 }
 

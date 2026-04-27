@@ -34,7 +34,7 @@ const {
 const { generateText, createMigrationPrompt, generateTextStream } = require('./src/utils/gemini-client.cjs');
 const { runAskApply } = require('./src/utils/ai-file-apply.cjs');
 const { runAiReviewSessionStream } = require('./src/utils/ai-review-session.cjs');
-
+const { printRelPathsBlock } = require('./src/utils/path-list-print.cjs');
 const fs = require('fs-extra');
 
 const program = new Command();
@@ -387,7 +387,8 @@ program
           context,
         });
         spinner.stop();
-        console.log(chalk.green(`\n✅ 적용 완료 (${written.length}개): ${written.join(', ')}\n`));
+        printRelPathsBlock(chalk.green, '\n✅ 적용 완료', written);
+        console.log('');
         return;
       }
 
@@ -481,24 +482,6 @@ program
 // =========================================================
 // Default command: `migrate-next` (no subcommand)
 // =========================================================
-async function waitForSessionCleared(sessionPath) {
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-  while (true) {
-    if (!sessionPath) return true;
-    if (!(await fs.pathExists(sessionPath))) return true;
-
-    try {
-      const manifest = await fs.readJson(sessionPath);
-      if (!manifest?.changes || manifest.changes.length === 0) return true;
-    } catch {
-      // session.json write 중일 수 있으므로 재시도
-    }
-
-    await sleep(1500);
-  }
-}
-
 function openFirstReviewableDiff(manifest) {
   const changes = Array.isArray(manifest?.changes) ? manifest.changes : [];
   for (const change of changes) {
@@ -644,13 +627,16 @@ async function runDefaultOrchestrator() {
   );
 
   const openResult = openFirstReviewableDiff(manifest);
-  if (openResult.opened) {
-    console.log(chalk.blue(`첫 번째 diff를 ${openResult.command}에서 열었습니다.`));
-  } else {
+  if (!openResult.opened) {
     console.log(chalk.yellow('자동으로 diff를 열지 못했습니다. Nextify Review 패널에서 수동으로 열어주세요.'));
   }
 
   console.log(chalk.yellow('\n⏳ 최종 Gemini CLI 리뷰를 시작합니다.'));
+  console.log(
+    chalk.gray(
+      '   (리뷰는 view-only입니다. 세션은 IDE 패널에서 diff 확인 및 before/after 경로 복사로 진행하세요.)',
+    ),
+  );
 
   const aiAbort = new AbortController();
   const onSigint = () => {
@@ -661,10 +647,9 @@ async function runDefaultOrchestrator() {
     }
   };
 
-  const sessionClearedPromise = waitForSessionCleared(manifestPath);
   process.on('SIGINT', onSigint);
   try {
-    const aiReviewPromise = runAiReviewSessionStream({
+    await runAiReviewSessionStream({
       sessionPath: manifestPath,
       signal: aiAbort.signal,
       transport: 'cli',
@@ -673,8 +658,6 @@ async function runDefaultOrchestrator() {
       workingDirectory: targetPath,
       onChunk: (t) => process.stdout.write(t),
     });
-
-    await Promise.all([sessionClearedPromise, aiReviewPromise]);
   } catch (err) {
     if (err?.code === 'ENOENT') {
       console.error(chalk.red('\n❌ Gemini CLI를 찾을 수 없습니다.'));

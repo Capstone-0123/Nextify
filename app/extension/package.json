@@ -1,7 +1,7 @@
 {
   "name": "nextify-review",
   "displayName": "Nextify Review",
-  "description": "Review Nextify migration diffs and accept or reject them from Cursor or VSCode.",
+  "description": "Browse Nextify migration changes as a directory tree and open diffs (view-only).",
   "version": "0.0.1",
   "publisher": "local",
   "engines": {
@@ -15,10 +15,9 @@
     "onCommand:nextifyReview.focusPanel",
     "onCommand:nextifyReview.refreshSession",
     "onCommand:nextifyReview.openChange",
-    "onCommand:nextifyReview.acceptChange",
-    "onCommand:nextifyReview.rejectChange",
-    "onCommand:nextifyReview.acceptAll",
-    "onCommand:nextifyReview.discardSession"
+    "onCommand:nextifyReview.copySessionPath",
+    "onCommand:nextifyReview.copyBeforePath",
+    "onCommand:nextifyReview.copyAfterPath"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -33,23 +32,19 @@
       },
       {
         "command": "nextifyReview.openChange",
-        "title": "Nextify Review: Open Change"
+        "title": "Nextify Review: Open Selected Diff"
       },
       {
-        "command": "nextifyReview.acceptChange",
-        "title": "Nextify Review: Accept Change"
+        "command": "nextifyReview.copySessionPath",
+        "title": "Nextify Review: Copy session.json Path"
       },
       {
-        "command": "nextifyReview.rejectChange",
-        "title": "Nextify Review: Reject Change"
+        "command": "nextifyReview.copyBeforePath",
+        "title": "Nextify Review: Copy BEFORE Path"
       },
       {
-        "command": "nextifyReview.acceptAll",
-        "title": "Nextify Review: Accept All"
-      },
-      {
-        "command": "nextifyReview.discardSession",
-        "title": "Nextify Review: Discard Session"
+        "command": "nextifyReview.copyAfterPath",
+        "title": "Nextify Review: Copy AFTER Path"
       }
     ],
     "views": {
