@@ -10,7 +10,13 @@ async function cloneProject(source, destination) {
     await fs.copy(source, destination, {
       filter: (src) => {
         // 복사 제외 폴더 목록
-        if (src.includes('node_modules') || src.includes('.git') || src.includes('.next') || src.includes('dist')) {
+        if (
+          src.includes('node_modules') ||
+          src.includes('.git') ||
+          src.includes('.next') ||
+          src.includes('dist') ||
+          src.includes('.nextify')
+        ) {
           return false;
         }
         return true;

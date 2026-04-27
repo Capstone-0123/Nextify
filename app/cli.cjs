@@ -150,6 +150,45 @@ program
         console.log(chalk.blue(`\n📂 작업 경로가 변경되었습니다: ${targetPath}`));
       }
 
+      // Nextify 메타 저장 (baseline Vite 경로 기록)
+      try {
+        const fs = require('fs-extra');
+        const metaDir = path.join(targetPath, '.nextify');
+        const metaPath = path.join(metaDir, 'meta.json');
+        await fs.ensureDir(metaDir);
+        let sourceViteProjectRoot = mode === 'copy' ? cwd : null;
+
+        // inplace라면 step1 적용 전에 Vite baseline 스냅샷 자동 생성
+        // (step1이 package.json/scripts 등을 Next로 바꿔서 원본이 사라지기 때문)
+        if (mode !== 'copy') {
+          const resolvedTargetPath = path.resolve(targetPath);
+          const parentDir = path.dirname(resolvedTargetPath);
+          const projectName = path.basename(resolvedTargetPath);
+          const baselineSnapshotRoot = path.join(
+            parentDir,
+            `${projectName}__nextify_snapshots`,
+            'vite-baseline'
+          );
+          const exists = await fs.pathExists(baselineSnapshotRoot);
+          if (!exists) {
+            console.log(chalk.gray('\n[inplace] Vite baseline 스냅샷 생성 중...'));
+            await cloneProject(targetPath, baselineSnapshotRoot);
+            console.log(chalk.gray(`[inplace] Vite baseline 스냅샷 생성 완료: ${baselineSnapshotRoot}`));
+          }
+          sourceViteProjectRoot = baselineSnapshotRoot;
+        }
+
+        const meta = {
+          createdAt: new Date().toISOString(),
+          migrationRoot: targetPath,
+          sourceViteProjectRoot,
+          inplace: mode !== 'copy',
+        };
+        await fs.writeJson(metaPath, meta, { spaces: 2 });
+      } catch (e) {
+        console.log(chalk.yellow(`⚠️  .nextify/meta.json 저장 실패: ${e.message}`));
+      }
+
       //  Step 1 실행
       await runStep1(targetPath);
 
@@ -258,12 +297,59 @@ program
 program
   .command('step7')
   .description('7단계: next/image, next/font, Dynamic Import 적용 및 React 흔적 정리')
-  .action(async () => {
+  .action(async (options) => {
     try {
       // Step 7 실행
       await runStep7(process.cwd());
     } catch (error) {
       console.error(chalk.red('\n❌ Step 7 오류 발생:'), error);
+      process.exit(1);
+    }
+  });
+
+// =========================================================
+// Command: Report (no migration)
+// =========================================================
+program
+  .command('report')
+  .description('성능 비교 레포트 생성 (레포트 명령으로 통합)')
+  .option('--run-step7', '레포트 생성 전에 Step7 최적화를 먼저 적용')
+  .option('--baseline <path>', 'Vite 원본 프로젝트 루트 경로 (메타가 없으면 필수)')
+  .option('--output <path>', '생성할 마크다운 레포트 파일 경로 (기본: <projectRoot>/nextify-performance-report.md)')
+  .option('--runs <number>', 'Lighthouse 측정 횟수 (기본 5)', (v) => Number(v), 5)
+  .option('--warmup-runs <number>', 'Lighthouse 워밍업 횟수 (기본 1)', (v) => Number(v), 1)
+  .action(async (options) => {
+    try {
+      const projectRoot = process.cwd();
+      const outputPath = options.output ? path.resolve(options.output) : path.join(projectRoot, 'nextify-performance-report.md');
+      const baselineViteRoot = options.baseline ? path.resolve(options.baseline) : undefined;
+      const lighthouseRuns = Number.isFinite(options.runs) && options.runs > 0 ? Math.floor(options.runs) : 5;
+      const warmupRuns =
+        Number.isFinite(options.warmupRuns) && options.warmupRuns >= 0
+          ? Math.floor(options.warmupRuns)
+          : 1;
+
+      if (options.runStep7) {
+        await runStep7(projectRoot, {
+          report: true,
+          baselineViteRoot,
+          outputPath,
+          lighthouseRuns,
+          warmupRuns,
+        });
+        return;
+      }
+
+      const { generatePerformanceReport } = require('./src/step7/performance-report.cjs');
+      await generatePerformanceReport({
+        projectRoot,
+        baselineViteRoot,
+        outputMarkdownPath: outputPath,
+        lighthouseRuns,
+        warmupRuns,
+      });
+    } catch (error) {
+      console.error(chalk.red('\n❌ report 오류 발생:'), error);
       process.exit(1);
     }
   });
