@@ -301,10 +301,23 @@ function analyzeStorageAccess(content) {
   const results = [];
   const lines = content.split('\n');
   let inCreateBlock = false;
+  let braceDepth = 0;
+
+  const countBraces = (line) => {
+    let open = 0;
+    let close = 0;
+    for (const ch of line) {
+      if (ch === '{') open += 1;
+      if (ch === '}') close += 1;
+    }
+    return { open, close };
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const trimmedLine = line.trim();
+
+    const { open, close } = countBraces(line);
 
     // create 블록 감지
     if (trimmedLine.includes('create<') || trimmedLine.includes('create(')) {
@@ -314,8 +327,12 @@ function analyzeStorageAccess(content) {
       inCreateBlock = false;
     }
 
-    // create 블록 안은 건너뜀
-    if (inCreateBlock) continue;
+    // create 블록 안, 또는 함수/블록 내부는 건너뜀 (모듈 최상위만 스캔)
+    if (inCreateBlock || braceDepth > 0) {
+      braceDepth += open - close;
+      if (braceDepth < 0) braceDepth = 0;
+      continue;
+    }
 
     // localStorage.getItem 패턴 찾기
     const storageMatch = trimmedLine.match(/^(const|let|var)\s+(\w+)\s*=\s*(localStorage|sessionStorage)\.getItem\s*\(\s*['"]([^'"]+)['"]\s*\)/);
@@ -353,6 +370,9 @@ function analyzeStorageAccess(content) {
         relatedStateFields: findRelatedStateFields(content, derivedVarName || storageVarName)
       });
     }
+
+    braceDepth += open - close;
+    if (braceDepth < 0) braceDepth = 0;
   }
 
   return results;
@@ -462,7 +482,14 @@ function removeStorageLines(content, info) {
 function insertHelperFunctions(content, helperFunctions) {
   if (helperFunctions.length === 0) return content;
 
-  const helperCode = helperFunctions.map(h => h.code).join('\n');
+  const dedupedHelpers = helperFunctions.filter((h) => {
+    if (!h?.name) return false;
+    const existingPattern = new RegExp(`\\bconst\\s+${h.name}\\s*=\\s*\\(`);
+    return !existingPattern.test(content);
+  });
+  if (dedupedHelpers.length === 0) return content;
+
+  const helperCode = dedupedHelpers.map(h => h.code).join('\n');
   
   // export const useXxxStore = create 패턴 찾기
   const createPattern = /(\n)(export\s+const\s+use\w+Store\s*=\s*create)/;
@@ -967,7 +994,8 @@ async function injectHydrateToProvider(projectRoot, stores) {
         // 화살표 함수는 직접 수정이 어려우므로 텍스트 기반으로 처리
         await sourceFile.save();
         let content = await fs.readFile(providerPath, 'utf-8');
-        content = injectUseEffectTextBased(content, stores);
+        const injectionResult = injectUseEffectTextBased(content, stores);
+        content = injectionResult.content;
         await fs.writeFile(providerPath, content);
         return;
       }
@@ -977,7 +1005,8 @@ async function injectHydrateToProvider(projectRoot, stores) {
   // function 선언인 경우도 텍스트 기반으로 처리 (더 안전함)
   await sourceFile.save();
   let content = await fs.readFile(providerPath, 'utf-8');
-  content = injectUseEffectTextBased(content, stores);
+  const injectionResult = injectUseEffectTextBased(content, stores);
+  content = injectionResult.content;
   await fs.writeFile(providerPath, content);
 }
 
@@ -985,6 +1014,8 @@ async function injectHydrateToProvider(projectRoot, stores) {
  * 텍스트 기반 useEffect 주입 (더 정확한 위치에 삽입)
  */
 function injectUseEffectTextBased(content, stores) {
+  let addedUseClient = false;
+
   // hydrate 호출 코드 생성
   const hydrateCalls = stores.map(store => {
     if (store.type === 'persistence') {
@@ -1004,7 +1035,11 @@ function injectUseEffectTextBased(content, stores) {
   }
 
   if (hydrateCalls.length === 0) {
-    return content;
+    const ensured = ensureUseClientDirective(content);
+    return {
+      content: ensured.content,
+      addedUseClient: ensured.addedUseClient,
+    };
   }
 
   const useEffectCode = `
@@ -1020,7 +1055,11 @@ ${hydrateCalls.join('\n')}
       /(useEffect\(\(\)\s*=>\s*\{)/,
       `$1\n${hydrateCalls.join('\n')}`
     );
-    return content;
+    const ensured = ensureUseClientDirective(content);
+    return {
+      content: ensured.content,
+      addedUseClient: ensured.addedUseClient,
+    };
   }
 
   // return 문 바로 앞에 useEffect 추가
@@ -1030,7 +1069,11 @@ ${hydrateCalls.join('\n')}
       /(\s+)(return\s*\()/,
       `$1${useEffectCode}$1$2`
     );
-    return content;
+    const ensured = ensureUseClientDirective(content);
+    return {
+      content: ensured.content,
+      addedUseClient: ensured.addedUseClient,
+    };
   }
 
   // 방법 2: return <Fragment> 또는 return <> 패턴
@@ -1039,10 +1082,36 @@ ${hydrateCalls.join('\n')}
       /(\s+)(return\s*<)/,
       `$1${useEffectCode}$1$2`
     );
-    return content;
+    const ensured = ensureUseClientDirective(content);
+    return {
+      content: ensured.content,
+      addedUseClient: ensured.addedUseClient,
+    };
   }
 
-  return content;
+  const ensured = ensureUseClientDirective(content);
+  addedUseClient = ensured.addedUseClient;
+  return {
+    content: ensured.content,
+    addedUseClient,
+  };
+}
+
+function ensureUseClientDirective(content) {
+  // BOM/공백/주석 이후 첫 코드 줄에 "use client"가 이미 있으면 유지
+  if (/^\uFEFF?\s*['"]use client['"]\s*;?/m.test(content)) {
+    return { content, addedUseClient: false };
+  }
+
+  const trimmedStart = content.trimStart();
+  const usesUseEffect = /\buseEffect\s*\(/.test(content) || /\buseEffect\b/.test(content);
+  if (!usesUseEffect) {
+    return { content, addedUseClient: false };
+  }
+
+  const lineBreak = content.includes('\r\n') ? '\r\n' : '\n';
+  const nextContent = `'use client';${lineBreak}${lineBreak}${trimmedStart}`;
+  return { content: nextContent, addedUseClient: true };
 }
 
 // ============================================================================

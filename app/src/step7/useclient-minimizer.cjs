@@ -13,6 +13,35 @@ function hasUseClientDirective(content) {
   return /^\s*['"]use client['"]\s*;?/m.test(head);
 }
 
+function requiresClientBoundary(content, relPath = '') {
+  const normalizedRel = relPath.replace(/\\/g, '/');
+
+  // App Router entry files are server-first by design.
+  if (/^src\/app\/.*\/(page|layout)\.(t|j)sx?$/.test(normalizedRel)) {
+    return false;
+  }
+
+  // React client hooks and Next client hooks.
+  if (/\buse(State|Effect|LayoutEffect|InsertionEffect|Reducer|Ref|Memo|Callback|ImperativeHandle|SyncExternalStore|Transition|DeferredValue|Id)\s*\(/.test(content)) {
+    return true;
+  }
+  if (/\buseRouter\s*\(/.test(content) || /\buseSearchParams\s*\(/.test(content) || /\busePathname\s*\(/.test(content) || /\buseSelectedLayoutSegment(s)?\s*\(/.test(content)) {
+    return true;
+  }
+
+  // Browser-only APIs.
+  if (/\bwindow\b|\bdocument\b|\blocalStorage\b|\bsessionStorage\b|\bnavigator\b|\bmatchMedia\b|\bIntersectionObserver\b|\bResizeObserver\b|\bMutationObserver\b/.test(content)) {
+    return true;
+  }
+
+  // Event handlers in JSX usually mean interactive client component.
+  if (/\son[A-Z][A-Za-z0-9_]*\s*=/.test(content)) {
+    return true;
+  }
+
+  return false;
+}
+
 async function collectSourceFiles(dir) {
   const out = [];
   if (!fs.existsSync(dir)) return out;
@@ -61,18 +90,37 @@ async function minimizeUseClientForBundle(projectRoot) {
 
   const candidateRelPaths = Array.from(
     new Set(
-      useClientFiles.map((p) => toRel(projectRoot, p)).concat(
-        ['src/app/layout.tsx', 'src/app/page.tsx'].filter((rel) =>
-          fs.existsSync(path.join(projectRoot, rel))
-        )
-      )
+      useClientFiles.map((p) => toRel(projectRoot, p))
     )
   );
+
+  const removableCandidateRelPaths = [];
+  const protectedClientRelPaths = [];
+
+  for (const relPath of candidateRelPaths) {
+    const absPath = path.join(projectRoot, relPath);
+    let content = '';
+    try {
+      content = await fs.readFile(absPath, 'utf-8');
+    } catch {
+      continue;
+    }
+
+    if (requiresClientBoundary(content, relPath)) {
+      protectedClientRelPaths.push(relPath);
+      continue;
+    }
+    removableCandidateRelPaths.push(relPath);
+  }
+
+  if (removableCandidateRelPaths.length === 0) {
+    return;
+  }
 
   await stopAndOfferGeminiApply({
     projectRoot,
     discoveryLine: `"use client" 지시문이 ${useClientFiles.length}개 파일에서 발견되었습니다. JS 번들 최적화를 위해 최소화가 필요합니다.`,
-    discoverySources: candidateRelPaths,
+    discoverySources: removableCandidateRelPaths,
     instructionForAi: `Next.js App Router 최적화 작업입니다.
 
 목표:
@@ -86,6 +134,9 @@ async function minimizeUseClientForBundle(projectRoot) {
 4) 상태관리 파일 검토: store, interactive widget처럼 클라이언트 실행이 꼭 필요한 파일에만 "use client"를 유지하세요.
 
 작업 규칙:
+0) 절대 규칙(반드시 준수):
+   - React/Next client hook(useState/useEffect/useRouter 등), 브라우저 API(window/document/localStorage 등), JSX 이벤트 핸들러(onClick 등)를 사용하는 파일에서는 절대 "use client"를 제거하지 마세요.
+   - 위 조건에 해당하는 파일은 수정 대상에서 제외하세요.
 1) 아래 대상 파일들에서 "use client"를 제거해도 되는 파일은 제거하세요.
    - React Hook(useState/useEffect/useLayoutEffect/useRef 등), 브라우저 API(window/document/localStorage), 이벤트 핸들러(onClick 등), 클라이언트 전용 라이브러리 사용이 없으면 제거 후보입니다.
 2) 클라이언트 전용 로직이 반드시 필요한 파일은 "use client"를 유지하세요.
@@ -93,10 +144,10 @@ async function minimizeUseClientForBundle(projectRoot) {
 4) 기존 동작을 보존하고, 서버/클라이언트 경계를 깨지 않도록 안전하게 수정하세요.
 5) 새 파일 생성 없이 현재 파일들만 수정하세요.
 `,
-    manualFallback: `수동 처리 필요: "use client"를 실제로 필요한 leaf 컴포넌트에만 남기고, 불필요한 파일에서는 제거/경계 분리를 해주세요.\n- 후보 파일(일부): ${candidateRelPaths
+    manualFallback: `수동 처리 필요: "use client"를 실제로 필요한 leaf 컴포넌트에만 남기고, 불필요한 파일에서는 제거/경계 분리를 해주세요.\n- 제외(클라이언트 필요) 파일 수: ${protectedClientRelPaths.length}\n- 후보 파일(일부): ${removableCandidateRelPaths
       .slice(0, 20)
-      .join(', ')}${candidateRelPaths.length > 20 ? ' ...' : ''}\n- 빌드/런타임이 깨지지 않는지 검증하세요.`,
-    candidateRelPaths,
+      .join(', ')}${removableCandidateRelPaths.length > 20 ? ' ...' : ''}\n- 빌드/런타임이 깨지지 않는지 검증하세요.`,
+    candidateRelPaths: removableCandidateRelPaths,
   });
 }
 
