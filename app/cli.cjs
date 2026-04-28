@@ -35,6 +35,7 @@ const { generateText, createMigrationPrompt, generateTextStream } = require('./s
 const { runAskApply } = require('./src/utils/ai-file-apply.cjs');
 const { runAiReviewSessionStream } = require('./src/utils/ai-review-session.cjs');
 const { printRelPathsBlock } = require('./src/utils/path-list-print.cjs');
+const { generatePerformanceReport } = require('./src/step7/performance-report.cjs');
 const fs = require('fs-extra');
 
 const program = new Command();
@@ -45,9 +46,9 @@ program.addHelpText(
   'after',
   `\n예시:\n` +
     `  migrate-next\n` +
-    `    - step1~step7을 순차 실행한 뒤, 최종 diff + Gemini CLI 대화형 리뷰(수정 불가)를 한 번만 진행합니다.\n` +
+    `    - step1~step7을 순차 실행한 뒤, 최종 diff + Gemini CLI 대화형 리뷰(수정 불가) + 성능 레포트를 한 번에 진행합니다.\n` +
     `    - Gemini CLI(\`gemini\`)가 PATH에 설치되어 있어야 하며, Ctrl+C는 현재 AI 리뷰만 중단합니다.\n` +
-    `    - Nextify Review 패널에서 Accept/Reject로 최종 세션을 비운 뒤 마이그레이션을 마무리합니다.\n` +
+    `    - Nextify Review 패널에서 최종 diff를 확인하고, 성능 레포트(nextify-performance-report.md)까지 생성됩니다.\n` +
     `\n레거시(기존 step1 preview clone 방식):\n` +
     `  migrate-next step1 --review\n`,
 );
@@ -170,6 +171,7 @@ program
 
       if (mode === 'copy') {
         await cloneProject(cwd, targetPath);
+        process.chdir(targetPath);
         console.log(chalk.blue(`\n📂 작업 경로가 변경되었습니다: ${targetPath}`));
       }
 
@@ -202,6 +204,40 @@ program
         console.log(chalk.white('   - Cursor/VSCode의 Nextify Review 패널에서 Accept / Reject 하세요.'));
         console.log(chalk.white(`   - 세션 파일: ${reviewSession.manifestPath}`));
         return;
+      }
+
+      // Nextify 메타 저장 (baseline Vite 경로 기록)
+      try {
+        const metaDir = path.join(targetPath, '.nextify');
+        const metaPath = path.join(metaDir, 'meta.json');
+        await fs.ensureDir(metaDir);
+        let sourceViteProjectRoot = mode === 'copy' ? cwd : null;
+
+        // inplace라면 step1 적용 전에 Vite baseline 스냅샷 자동 생성
+        // (step1이 package.json/scripts 등을 Next로 바꿔서 원본이 사라지기 때문)
+        if (mode !== 'copy') {
+          const resolvedTargetPath = path.resolve(targetPath);
+          const parentDir = path.dirname(resolvedTargetPath);
+          const projectName = path.basename(resolvedTargetPath);
+          const baselineSnapshotRoot = path.join(parentDir, `${projectName}__nextify_snapshots`, 'vite-baseline');
+          const exists = await fs.pathExists(baselineSnapshotRoot);
+          if (!exists) {
+            console.log(chalk.gray('\n[inplace] Vite baseline 스냅샷 생성 중...'));
+            await cloneProject(targetPath, baselineSnapshotRoot);
+            console.log(chalk.gray(`[inplace] Vite baseline 스냅샷 생성 완료: ${baselineSnapshotRoot}`));
+          }
+          sourceViteProjectRoot = baselineSnapshotRoot;
+        }
+
+        const meta = {
+          createdAt: new Date().toISOString(),
+          migrationRoot: targetPath,
+          sourceViteProjectRoot,
+          inplace: mode !== 'copy',
+        };
+        await fs.writeJson(metaPath, meta, { spaces: 2 });
+      } catch (e) {
+        console.log(chalk.yellow(`⚠️  .nextify/meta.json 저장 실패: ${e.message}`));
       }
 
       //  Step 1 실행
@@ -312,12 +348,59 @@ program
 program
   .command('step7')
   .description('7단계: next/image, next/font, Dynamic Import 적용 및 React 흔적 정리')
-  .action(async () => {
+  .action(async (options) => {
     try {
       // Step 7 실행
       await runStep7(process.cwd());
     } catch (error) {
       console.error(chalk.red('\n❌ Step 7 오류 발생:'), error);
+      process.exit(1);
+    }
+  });
+
+// =========================================================
+// Command: Report (no migration)
+// =========================================================
+program
+  .command('report')
+  .description('성능 비교 레포트 생성 (레포트 명령으로 통합)')
+  .option('--run-step7', '레포트 생성 전에 Step7 최적화를 먼저 적용')
+  .option('--baseline <path>', 'Vite 원본 프로젝트 루트 경로 (메타가 없으면 필수)')
+  .option('--output <path>', '생성할 마크다운 레포트 파일 경로 (기본: <projectRoot>/nextify-performance-report.md)')
+  .option('--runs <number>', 'Lighthouse 측정 횟수 (기본 5)', (v) => Number(v), 5)
+  .option('--warmup-runs <number>', 'Lighthouse 워밍업 횟수 (기본 1)', (v) => Number(v), 1)
+  .action(async (options) => {
+    try {
+      const projectRoot = process.cwd();
+      const outputPath = options.output ? path.resolve(options.output) : path.join(projectRoot, 'nextify-performance-report.md');
+      const baselineViteRoot = options.baseline ? path.resolve(options.baseline) : undefined;
+      const lighthouseRuns = Number.isFinite(options.runs) && options.runs > 0 ? Math.floor(options.runs) : 5;
+      const warmupRuns =
+        Number.isFinite(options.warmupRuns) && options.warmupRuns >= 0
+          ? Math.floor(options.warmupRuns)
+          : 1;
+
+      if (options.runStep7) {
+        await runStep7(projectRoot, {
+          report: true,
+          baselineViteRoot,
+          outputPath,
+          lighthouseRuns,
+          warmupRuns,
+        });
+        return;
+      }
+
+      const { generatePerformanceReport } = require('./src/step7/performance-report.cjs');
+      await generatePerformanceReport({
+        projectRoot,
+        baselineViteRoot,
+        outputMarkdownPath: outputPath,
+        lighthouseRuns,
+        warmupRuns,
+      });
+    } catch (error) {
+      console.error(chalk.red('\n❌ report 오류 발생:'), error);
       process.exit(1);
     }
   });
@@ -505,6 +588,39 @@ async function cleanupStaleStepArtifacts(projectRoot) {
   }
 }
 
+async function ensureOrchestratorMeta(cwd, targetPath, mode) {
+  const metaDir = path.join(targetPath, '.nextify');
+  const metaPath = path.join(metaDir, 'meta.json');
+  await fs.ensureDir(metaDir);
+
+  let sourceViteProjectRoot = mode === 'copy' ? cwd : null;
+
+  // inplace에서는 원본 Vite 기준점을 미리 보존해야 레포트 비교가 가능합니다.
+  if (mode !== 'copy') {
+    const resolvedTargetPath = path.resolve(targetPath);
+    const parentDir = path.dirname(resolvedTargetPath);
+    const projectName = path.basename(resolvedTargetPath);
+    const baselineSnapshotRoot = path.join(parentDir, `${projectName}__nextify_snapshots`, 'vite-baseline');
+    const exists = await fs.pathExists(baselineSnapshotRoot);
+    if (!exists) {
+      console.log(chalk.gray('\n[inplace] Vite baseline 스냅샷 생성 중...'));
+      await cloneProject(targetPath, baselineSnapshotRoot);
+      console.log(chalk.gray(`[inplace] Vite baseline 스냅샷 생성 완료: ${baselineSnapshotRoot}`));
+    }
+    sourceViteProjectRoot = baselineSnapshotRoot;
+  }
+
+  const existingMeta = (await fs.pathExists(metaPath)) ? await fs.readJson(metaPath).catch(() => ({})) : {};
+  const meta = {
+    ...existingMeta,
+    createdAt: existingMeta.createdAt || new Date().toISOString(),
+    migrationRoot: targetPath,
+    sourceViteProjectRoot,
+    inplace: mode !== 'copy',
+  };
+  await fs.writeJson(metaPath, meta, { spaces: 2 });
+}
+
 function summarizeChangeTypes(changes) {
   const summary = { create: 0, modify: 0, delete: 0 };
   for (const change of Array.isArray(changes) ? changes : []) {
@@ -513,6 +629,53 @@ function summarizeChangeTypes(changes) {
     }
   }
   return summary;
+}
+
+function normalizeErrorLike(errorLike) {
+  if (errorLike instanceof Error) return errorLike;
+  if (typeof errorLike === 'string') return new Error(errorLike);
+  try {
+    return new Error(JSON.stringify(errorLike));
+  } catch {
+    return new Error(String(errorLike));
+  }
+}
+
+async function runPerformanceReportSafely(reportOptions) {
+  let capturedRuntimeError = null;
+  const onUncaughtException = (error) => {
+    capturedRuntimeError = normalizeErrorLike(error);
+  };
+  const onUnhandledRejection = (reason) => {
+    capturedRuntimeError = normalizeErrorLike(reason);
+  };
+
+  process.on('uncaughtException', onUncaughtException);
+  process.on('unhandledRejection', onUnhandledRejection);
+
+  const reportPromise = generatePerformanceReport(reportOptions);
+  let watcherId;
+  try {
+    await Promise.race([
+      reportPromise,
+      new Promise((_, reject) => {
+        watcherId = setInterval(() => {
+          if (capturedRuntimeError) {
+            clearInterval(watcherId);
+            reject(capturedRuntimeError);
+          }
+        }, 100);
+      }),
+    ]);
+    if (watcherId) clearInterval(watcherId);
+    return { success: true };
+  } catch (error) {
+    if (watcherId) clearInterval(watcherId);
+    return { success: false, error: normalizeErrorLike(error) };
+  } finally {
+    process.off('uncaughtException', onUncaughtException);
+    process.off('unhandledRejection', onUnhandledRejection);
+  }
 }
 
 async function runDefaultOrchestrator() {
@@ -583,11 +746,13 @@ async function runDefaultOrchestrator() {
     }
 
     await cloneProject(cwd, targetPath);
+    process.chdir(targetPath);
     console.log(chalk.blue(`\n📂 작업 경로가 변경되었습니다: ${targetPath}`));
   }
 
   // 이전 실행에서 남아있는 step 아티팩트를 정리합니다.
   await cleanupStaleStepArtifacts(targetPath);
+  await ensureOrchestratorMeta(cwd, targetPath, mode);
 
   const stepEntries = [
     ['step1', runStep1],
@@ -626,6 +791,39 @@ async function runDefaultOrchestrator() {
     ),
   );
 
+  // 1) 성능 레포트 생성
+  console.log(chalk.yellow('\n📊 성능 레포트 생성을 시작합니다.'));
+  const reportPath = path.join(targetPath, 'nextify-performance-report.md');
+  const reportResult = await runPerformanceReportSafely({
+    projectRoot: targetPath,
+    outputMarkdownPath: reportPath,
+  });
+  if (!reportResult.success) {
+    console.log(chalk.yellow(`⚠️  성능 레포트 생성에 실패했습니다: ${reportResult.error.message}`));
+    console.log(chalk.gray('   - 마이그레이션 결과는 유지됩니다. 필요 시 `migrate-next report`로 재시도하세요.'));
+  }
+
+  // 2) 코드 리뷰 여부 확인
+  const { useReview } = await inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'useReview',
+      message: 'diff 및 AI를 통한 코드 리뷰를 진행하시겠습니까?',
+      default: true,
+    },
+  ]);
+
+  if (!useReview) {
+    const installCmd = getInstallCommand(pm);
+    console.log(chalk.green('\n✔ 마이그레이션 완료.'));
+    console.log(chalk.yellow('\n👉 다음 단계 안내'));
+    console.log(chalk.white(`   - ${installCmd} (의존성 설치)`));
+    console.log(chalk.white('   - 마이그레이션된 프로젝트에서 빌드/실행을 확인하세요.'));
+    console.log(chalk.white(`   - 성능 레포트 확인: ${reportPath}`));
+    return;
+  }
+
+  // 3) 코드 리뷰 진행
   const openResult = openFirstReviewableDiff(manifest);
   if (!openResult.opened) {
     console.log(chalk.yellow('자동으로 diff를 열지 못했습니다. Nextify Review 패널에서 수동으로 열어주세요.'));
@@ -668,12 +866,13 @@ async function runDefaultOrchestrator() {
     process.off('SIGINT', onSigint);
   }
 
-  console.log(chalk.green('\n✔ Final review complete.'));
+  console.log(chalk.green('\n✔ 코드 리뷰 완료.'));
 
   const installCmd = getInstallCommand(pm);
   console.log(chalk.yellow('\n👉 다음 단계 안내'));
   console.log(chalk.white(`   - ${installCmd} (의존성 설치)`));
-  console.log(chalk.white('   - 마이그레이션된 프로젝트에서 빌드/실행을 확인하세요. '));
+  console.log(chalk.white('   - 마이그레이션된 프로젝트에서 빌드/실행을 확인하세요.'));
+  console.log(chalk.white(`   - 성능 레포트 확인: ${reportPath}`));
 }
 
 // Only run default orchestrator when user calls `migrate-next` with no subcommand.

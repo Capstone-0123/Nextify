@@ -15,10 +15,12 @@
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
     "chalk": "^4.1.2",
+    "chrome-launcher": "^1.2.0",
     "commander": "^11.1.0",
     "dotenv": "^16.4.5",
     "fs-extra": "^11.3.3",
     "inquirer": "^8.0.0",
+    "lighthouse": "^12.8.0",
     "ora": "^5.4.1",
     "ts-morph": "^27.0.2"
   },

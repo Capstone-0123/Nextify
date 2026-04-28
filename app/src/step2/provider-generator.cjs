@@ -342,45 +342,80 @@ function findRootComponentName(renderJsx) {
 }
 
 /**
- * 컴포넌트 파일에서 return 문의 JSX 추출
+ * 블록(또는 화살표 함수 본문)에서 첫 번째 의미 있는 return 표현식 추출
  */
-function findComponentReturnJsx(sourceFile) {
-  // 함수 선언 찾기 (function App() { ... })
-  const functions = sourceFile.getFunctions();
-  for (const func of functions) {
-    const returnStatements = func.getDescendantsOfKind(SyntaxKind.ReturnStatement);
+function getFirstReturnExpressionFromBody(body) {
+  if (!body) return null;
+  if (body.getKind() === SyntaxKind.Block) {
+    const returnStatements = body.getDescendantsOfKind(SyntaxKind.ReturnStatement);
     for (const ret of returnStatements) {
       const expression = ret.getExpression();
-      if (expression) {
-        return expression;
-      }
+      if (expression) return expression;
     }
+    return null;
+  }
+  // 직접 JSX 반환: () => (<div>...</div>) 또는 () => <>...</>
+  if (
+    body.getKind() === SyntaxKind.ParenthesizedExpression ||
+    body.getKind() === SyntaxKind.JsxElement ||
+    body.getKind() === SyntaxKind.JsxFragment
+  ) {
+    return body;
+  }
+  return null;
+}
+
+/**
+ * 이름이 일치하는 함수 선언(function Name)의 return JSX 추출
+ */
+function findReturnJsxFromNamedFunction(sourceFile, componentName) {
+  if (!componentName) return null;
+  const func = sourceFile.getFunction(componentName);
+  if (!func) return null;
+  const body = func.getBody();
+  return getFirstReturnExpressionFromBody(body);
+}
+
+/**
+ * 이름이 일치하는 const Name = () => ... 화살표 컴포넌트의 return JSX 추출
+ */
+function findReturnJsxFromNamedArrowComponent(sourceFile, componentName) {
+  if (!componentName) return null;
+  const varDecl = sourceFile.getVariableDeclaration(componentName);
+  if (!varDecl) return null;
+  const initializer = varDecl.getInitializer();
+  if (!initializer || initializer.getKind() !== SyntaxKind.ArrowFunction) return null;
+  return getFirstReturnExpressionFromBody(initializer.getBody());
+}
+
+/**
+ * 컴포넌트 파일에서 return 문의 JSX 추출
+ * @param {import('ts-morph').SourceFile} sourceFile
+ * @param {string | null} preferredComponentName - 예: main에서 렌더하는 루트 컴포넌트명 'App', App.tsx 직접 스캔 시 'App'
+ *        파일 상단의 다른 함수(PartnerGuard 등)의 return을 잡지 않도록 지정한다.
+ */
+function findComponentReturnJsx(sourceFile, preferredComponentName = null) {
+  if (preferredComponentName) {
+    const fromFn = findReturnJsxFromNamedFunction(sourceFile, preferredComponentName);
+    if (fromFn) return fromFn;
+    const fromArrow = findReturnJsxFromNamedArrowComponent(sourceFile, preferredComponentName);
+    if (fromArrow) return fromArrow;
   }
 
-  // 화살표 함수 찾기 (const App = () => { ... })
+  // 하위 호환: 이름을 모를 때는 기존처럼 첫 번째 함수의 첫 return (구 프로젝트)
+  const functions = sourceFile.getFunctions();
+  for (const func of functions) {
+    const body = func.getBody();
+    const expr = getFirstReturnExpressionFromBody(body);
+    if (expr) return expr;
+  }
+
   const variableDeclarations = sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration);
   for (const varDecl of variableDeclarations) {
     const initializer = varDecl.getInitializer();
     if (initializer && initializer.getKind() === SyntaxKind.ArrowFunction) {
-      const body = initializer.getBody();
-
-      // 직접 JSX 반환: () => (<div>...</div>)
-      if (body.getKind() === SyntaxKind.ParenthesizedExpression ||
-          body.getKind() === SyntaxKind.JsxElement ||
-          body.getKind() === SyntaxKind.JsxFragment) {
-        return body;
-      }
-
-      // 블록 내 return: () => { return (<div>...</div>) }
-      if (body.getKind() === SyntaxKind.Block) {
-        const returnStatements = body.getDescendantsOfKind(SyntaxKind.ReturnStatement);
-        for (const ret of returnStatements) {
-          const expression = ret.getExpression();
-          if (expression) {
-            return expression;
-          }
-        }
-      }
+      const expr = getFirstReturnExpressionFromBody(initializer.getBody());
+      if (expr) return expr;
     }
   }
 
@@ -500,7 +535,7 @@ async function extractProviderTree(projectRoot) {
           }
 
           // App.tsx의 return JSX에서 Provider 추출
-          const rootReturnJsx = findComponentReturnJsx(rootSourceFile);
+          const rootReturnJsx = findComponentReturnJsx(rootSourceFile, rootComponentName);
 
           if (rootReturnJsx) {
             const rootProviders = extractProvidersFromJsx(rootReturnJsx, rootImportMap);
@@ -541,7 +576,7 @@ async function extractProviderTree(projectRoot) {
           combinedImportMap.set(key, value);
         }
 
-        const appReturnJsx = findComponentReturnJsx(appSourceFile);
+        const appReturnJsx = findComponentReturnJsx(appSourceFile, 'App');
         if (appReturnJsx) {
           const appProviders = extractProvidersFromJsx(appReturnJsx, appImportMap);
 
@@ -782,6 +817,58 @@ function collectDependencyImports(sourceFile, dependencies, targetFilePath) {
 }
 
 /**
+ * Provider props에 사용된 변수 중 import로 들어온 식별자 수집
+ * 예: <ThemeProvider theme={theme}> 에서 theme import 누락 방지
+ */
+function collectProviderPropImports(sourceFile, providers, targetFilePath) {
+  const imports = [];
+  const sourceFilePath = sourceFile.getFilePath();
+  const propVariables = new Set();
+
+  for (const provider of providers) {
+    for (const prop of provider.props) {
+      if (prop.isVariable && prop.value) {
+        propVariables.add(prop.value);
+      }
+    }
+  }
+
+  if (propVariables.size === 0) return imports;
+
+  for (const importDecl of sourceFile.getImportDeclarations()) {
+    const modulePath = importDecl.getModuleSpecifierValue();
+    const newPath = calculateRelativePath(modulePath, sourceFilePath, targetFilePath);
+
+    const defaultImport = importDecl.getDefaultImport();
+    const namedImports = importDecl.getNamedImports();
+    const namespaceImport = importDecl.getNamespaceImport();
+
+    const matchedDefault = defaultImport && propVariables.has(defaultImport.getText());
+    const matchedNamed = namedImports.filter((n) => {
+      const localName = n.getAliasNode()?.getText() || n.getName();
+      return propVariables.has(localName);
+    });
+    const matchedNamespace = namespaceImport && propVariables.has(namespaceImport.getText());
+
+    if (!matchedDefault && matchedNamed.length === 0 && !matchedNamespace) continue;
+
+    imports.push({
+      originalPath: modulePath,
+      newPath,
+      defaultImport: matchedDefault ? defaultImport.getText() : null,
+      namedImports: matchedNamed.map((n) => {
+        const alias = n.getAliasNode()?.getText();
+        return alias ? `${n.getName()} as ${alias}` : n.getName();
+      }),
+      namespaceImport: matchedNamespace ? namespaceImport.getText() : null,
+      type: 'provider-prop',
+    });
+  }
+
+  return imports;
+}
+
+/**
  * Import 구문 문자열 생성
  */
 function generateImportStatements(imports) {
@@ -795,6 +882,7 @@ function generateImportStatements(imports) {
         path: imp.newPath,
         defaultImport: imp.defaultImport,
         namedImports: new Set(imp.namedImports),
+        namespaceImport: imp.namespaceImport || null,
       });
     } else {
       const existing = mergedImports.get(key);
@@ -802,6 +890,9 @@ function generateImportStatements(imports) {
         existing.defaultImport = imp.defaultImport;
       }
       imp.namedImports.forEach(n => existing.namedImports.add(n));
+      if (imp.namespaceImport && !existing.namespaceImport) {
+        existing.namespaceImport = imp.namespaceImport;
+      }
     }
   }
 
@@ -812,6 +903,10 @@ function generateImportStatements(imports) {
 
     if (imp.defaultImport) {
       parts.push(imp.defaultImport);
+    }
+
+    if (imp.namespaceImport) {
+      parts.push(`* as ${imp.namespaceImport}`);
     }
 
     if (imp.namedImports.size > 0) {
@@ -864,6 +959,7 @@ async function migrateProviderImports(projectRoot, providers, sourceFiles, entry
   let allProviderImports = [];
   let allDependencies = [];
   let allDependencyImports = [];
+  let allProviderPropImports = [];
 
   for (const sourceFile of files) {
     const providerImports = collectProviderImports(sourceFile, providers, targetFilePath);
@@ -874,9 +970,12 @@ async function migrateProviderImports(projectRoot, providers, sourceFiles, entry
 
     const dependencyImports = collectDependencyImports(sourceFile, dependencies, targetFilePath);
     allDependencyImports.push(...dependencyImports);
+
+    const providerPropImports = collectProviderPropImports(sourceFile, providers, targetFilePath);
+    allProviderPropImports.push(...providerPropImports);
   }
 
-  const allImports = [...allProviderImports, ...allDependencyImports];
+  const allImports = [...allProviderImports, ...allDependencyImports, ...allProviderPropImports];
   const importStatements = generateImportStatements(allImports);
 
   if (needsUseStateImport(allDependencies)) {

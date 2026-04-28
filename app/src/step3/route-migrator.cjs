@@ -23,19 +23,40 @@ function convertDynamicSegment(segment) {
  * 경로를 Next.js 폴더 구조로 변환
  * 예: /users/:id → users/[id]
  */
+// function pathToFolderStructure(routePath) {
+//   if (!routePath || routePath === '/') {
+//     return [];
+//   }
+
+//   const segments = routePath
+//     .split('/')
+//     .filter(s => s && s !== '/')
+//     .map(convertDynamicSegment);
+
+//   return segments;
+// }
 function pathToFolderStructure(routePath) {
   if (!routePath || routePath === '/') {
     return [];
   }
 
+  // ✅ 추가된 부분: React Router의 '*' (와일드카드)를 Next.js의 Catch-all 폴더명으로 변환
+  if (routePath === '*') {
+    return ['[...slug]'];
+  }
+
+  // 만약 path="about/*" 같은 형태가 있다면
+  if (routePath.includes('*')) {
+    routePath = routePath.replace(/\*/g, '[...slug]');
+  }
+
   const segments = routePath
     .split('/')
-    .filter(s => s && s !== '/')
+    .filter((s) => s && s !== '/')
     .map(convertDynamicSegment);
 
   return segments;
 }
-
 // ============================================================================
 // Route 태그 파싱 및 추출
 // ============================================================================
@@ -48,9 +69,7 @@ function extractRouteInfo(routeNode, routeElement = null) {
   const indexAttr = routeNode.getAttribute('index');
   const elementAttr = routeNode.getAttribute('element');
 
-  const pathValue = pathAttr
-    ? pathAttr.getInitializer()?.getText().replace(/['"]/g, '')
-    : null;
+  const pathValue = pathAttr ? pathAttr.getInitializer()?.getText().replace(/['"]/g, '') : null;
   const isIndex = !!indexAttr;
   // element 속성의 JSX AST 노드 추출
   let elementJsxNode = null;
@@ -62,9 +81,11 @@ function extractRouteInfo(routeNode, routeElement = null) {
         const expression = initializer.getExpression();
         if (expression) {
           // JSX Element 또는 Fragment인 경우
-          if (expression.getKind() === SyntaxKind.JsxElement ||
-              expression.getKind() === SyntaxKind.JsxSelfClosingElement ||
-              expression.getKind() === SyntaxKind.JsxFragment) {
+          if (
+            expression.getKind() === SyntaxKind.JsxElement ||
+            expression.getKind() === SyntaxKind.JsxSelfClosingElement ||
+            expression.getKind() === SyntaxKind.JsxFragment
+          ) {
             elementJsxNode = expression;
           }
         }
@@ -73,7 +94,11 @@ function extractRouteInfo(routeNode, routeElement = null) {
   }
 
   // element에서 컴포넌트 이름 추출 (하위 호환성)
-  const elementValue = elementJsxNode ? elementJsxNode.getText() : (elementAttr ? elementAttr.getInitializer()?.getText() : null);
+  const elementValue = elementJsxNode
+    ? elementJsxNode.getText()
+    : elementAttr
+      ? elementAttr.getInitializer()?.getText()
+      : null;
   let componentName = null;
   if (elementValue) {
     const match = elementValue.match(/<(\w+)/);
@@ -86,14 +111,14 @@ function extractRouteInfo(routeNode, routeElement = null) {
   // Route Element의 자식 노드에서 Route를 찾아야 함
   let hasChildren = false;
   let childRoutes = [];
-  
+
   if (routeElement) {
     // Route Element의 모든 하위 노드를 재귀적으로 탐색하여 Route 찾기
     function findChildRoutes(node, depth = 0) {
       if (!node) return;
-      
+
       const kind = node.getKind();
-      
+
       // JsxSelfClosingElement인 경우 (<Route />)
       if (kind === SyntaxKind.JsxSelfClosingElement) {
         const tagName = node.getTagNameNode().getText();
@@ -112,7 +137,7 @@ function extractRouteInfo(routeNode, routeElement = null) {
       else if (kind === SyntaxKind.JsxElement) {
         const opening = node.getOpeningElement();
         const tagName = opening ? opening.getTagNameNode().getText() : '';
-        
+
         if (tagName === 'Route') {
           hasChildren = true;
           const childInfo = extractRouteInfo(opening, node);
@@ -123,7 +148,7 @@ function extractRouteInfo(routeNode, routeElement = null) {
           });
           return; // Route를 찾았으므로 더 깊이 들어가지 않음
         }
-        
+
         // Route가 아니면 자식 탐색
         const children = node.getJsxChildren();
         for (const child of children) {
@@ -155,7 +180,7 @@ function extractRouteInfo(routeNode, routeElement = null) {
       }
       // 다른 노드 타입은 무시
     }
-    
+
     // Route Element의 직접 자식부터 탐색 시작
     const directChildren = routeElement.getJsxChildren();
     for (let i = 0; i < directChildren.length; i++) {
@@ -185,20 +210,20 @@ function findAllRoutes(sourceFile) {
   // 먼저 모든 Route를 찾고, 자식 Route를 식별
   const allRouteElements = sourceFile.getDescendantsOfKind(SyntaxKind.JsxElement);
   const allSelfClosingRoutes = sourceFile.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement);
-  
+
   // 1단계: 모든 Route를 찾고 자식 Route를 식별
   for (const element of allRouteElements) {
     const opening = element.getOpeningElement();
     if (opening && opening.getTagNameNode().getText() === 'Route') {
       const info = extractRouteInfo(opening, element);
-      
+
       // 자식 Route 노드들을 추적
       if (info.childRoutes && info.childRoutes.length > 0) {
         for (const childRoute of info.childRoutes) {
           childRouteNodes.add(childRoute.node);
         }
       }
-      
+
       routes.push({
         node: opening,
         element: element,
@@ -235,7 +260,7 @@ function findAllRoutes(sourceFile) {
   }
 
   // 3단계: 자식 Route가 아닌 최상위 Route만 반환
-  const topLevelRoutes = routes.filter(route => !childRouteNodes.has(route.node));
+  const topLevelRoutes = routes.filter((route) => !childRouteNodes.has(route.node));
   return topLevelRoutes;
 }
 
@@ -378,7 +403,7 @@ function collectComponentIdentifiers(jsxNode, sourceFile, identifiers = new Set(
   if (kind === SyntaxKind.JsxElement) {
     const opening = jsxNode.getOpeningElement();
     const tagName = opening.getTagNameNode().getText();
-    
+
     // 대문자로 시작하는 것은 컴포넌트로 간주
     if (tagName && tagName[0] === tagName[0].toUpperCase() && tagName[0] !== tagName[0].toLowerCase()) {
       identifiers.add(tagName);
@@ -422,11 +447,9 @@ function jsxNodeToString(jsxNode) {
  */
 function replaceOutletWithChildren(jsxText) {
   if (!jsxText) return jsxText;
-  
+
   // <Outlet /> 또는 <Outlet></Outlet> 패턴을 {children}으로 치환
-  return jsxText
-    .replace(/<Outlet\s*\/>/g, '{children}')
-    .replace(/<Outlet>[\s\S]*?<\/Outlet>/g, '{children}');
+  return jsxText.replace(/<Outlet\s*\/>/g, '{children}').replace(/<Outlet>[\s\S]*?<\/Outlet>/g, '{children}');
 }
 
 /**
@@ -436,13 +459,13 @@ function collectImportStatements(sourceFile, componentNames, targetFilePath) {
   const imports = new Map(); // modulePath -> { defaultImport, namedImports: Set }
 
   for (const componentName of componentNames) {
-    const importDecl = sourceFile.getImportDeclaration(decl => {
+    const importDecl = sourceFile.getImportDeclaration((decl) => {
       const defaultImport = decl.getDefaultImport();
       if (defaultImport && defaultImport.getText() === componentName) {
         return true;
       }
       const namedImports = decl.getNamedImports();
-      return namedImports.some(n => {
+      return namedImports.some((n) => {
         const name = n.getAliasNode()?.getText() || n.getName();
         return name === componentName;
       });
@@ -467,7 +490,7 @@ function collectImportStatements(sourceFile, componentNames, targetFilePath) {
       if (defaultImport && defaultImport.getText() === componentName) {
         importInfo.defaultImport = componentName;
       } else {
-        const matchedNamed = namedImports.find(n => {
+        const matchedNamed = namedImports.find((n) => {
           const name = n.getAliasNode()?.getText() || n.getName();
           return name === componentName;
         });
@@ -585,14 +608,14 @@ function generateLayoutContent(routeInfo, sourceFile, targetFilePath) {
     if (kind === SyntaxKind.JsxElement) {
       const opening = jsxNode.getOpeningElement();
       const tagName = opening.getTagNameNode().getText();
-      
+
       // 컴포넌트 식별자 수집
       componentIdentifiers.add(tagName);
-      
+
       // 모든 속성(Props) 추출
       const attributes = opening.getAttributes();
       const propsString = attributes
-        .map(attr => {
+        .map((attr) => {
           if (attr.getKind() === SyntaxKind.JsxAttribute) {
             const name = attr.getNameNode().getText();
             const initializer = attr.getInitializer();
@@ -609,7 +632,7 @@ function generateLayoutContent(routeInfo, sourceFile, targetFilePath) {
         .join(' ');
 
       const propsSection = propsString ? ` ${propsString}` : '';
-      
+
       // Outlet을 children으로 치환 (명세 3.2.2)
       // 자식 노드에서 Outlet 찾기
       const children = jsxNode.getJsxChildren();
@@ -729,7 +752,7 @@ async function generatePageAndFolder(projectRoot, routeInfo, sourceFile, sourceF
 
   // 경로를 폴더 구조로 변환
   let routePath = routeInfo.path;
-  
+
   // 상대 경로인 경우 부모 경로와 결합
   if (routePath) {
     if (!routePath.startsWith('/')) {
@@ -749,9 +772,7 @@ async function generatePageAndFolder(projectRoot, routeInfo, sourceFile, sourceF
     routePath = parentPath;
   }
 
-  const folderSegments = routePath
-    ? pathToFolderStructure(routePath)
-    : [];
+  const folderSegments = routePath ? pathToFolderStructure(routePath) : [];
 
   // ✅ 수정: 루트 경로 처리 (명세 2.1.1, 2.3)
   if (routePath === '/' || routeInfo.isIndex) {
@@ -766,16 +787,25 @@ async function generatePageAndFolder(projectRoot, routeInfo, sourceFile, sourceF
 
       // ✅ 수정: 부모 Route가 중첩 라우트이면서 index Route를 함께 가지는 경우 (명세 2.3)
       // index Route가 있으면 해당 디렉터리 바로 아래에 page.tsx 추가 생성
-      const hasIndexRoute = routeInfo.childRoutes.some(child => child.isIndex);
+      const hasIndexRoute = routeInfo.childRoutes.some((child) => child.isIndex);
       if (hasIndexRoute) {
         const pagePath = path.join(appDir, 'page.tsx');
         if (!fs.existsSync(pagePath)) {
-          const indexRoute = routeInfo.childRoutes.find(child => child.isIndex);
+          const indexRoute = routeInfo.childRoutes.find((child) => child.isIndex);
           const conditionalInfo = detectConditionalRoute(indexRoute.elementValue);
           const isConditional = !!conditionalInfo;
           const content = generatePageContent(indexRoute, sourceFile, pagePath, isConditional, conditionalInfo);
           await fs.writeFile(pagePath, content);
         }
+      }
+
+      // path="/" 부모 아래의 path="*", "shop" 등 비-index 자식은 기존에 return 으로 건너뛰어
+      // app/[...slug]/page.tsx 등이 생성되지 않던 원인 → 동일하게 재귀 처리
+      for (const childRoute of routeInfo.childRoutes) {
+        if (childRoute.isIndex && !childRoute.path) {
+          continue;
+        }
+        await generatePageAndFolder(projectRoot, childRoute, sourceFile, sourceFilePath, routePath);
       }
     } else {
       // 자식이 없으면 page.tsx 생성
@@ -802,7 +832,7 @@ async function generatePageAndFolder(projectRoot, routeInfo, sourceFile, sourceF
     // 부모 라우트가 위치한 폴더 바로 아래에 별도 폴더 생성 없이 page.tsx 생성
     const parentDir = path.join(appDir, ...pathToFolderStructure(parentPath));
     const pagePath = path.join(parentDir, 'page.tsx');
-    
+
     if (fs.existsSync(pagePath)) {
       return;
     }
@@ -826,11 +856,11 @@ async function generatePageAndFolder(projectRoot, routeInfo, sourceFile, sourceF
     }
 
     // ✅ 수정: 부모 Route가 중첩 라우트이면서 index Route를 함께 가지는 경우 (명세 2.3)
-    const hasIndexRoute = routeInfo.childRoutes.some(child => child.isIndex);
+    const hasIndexRoute = routeInfo.childRoutes.some((child) => child.isIndex);
     if (hasIndexRoute) {
       const pagePath = path.join(targetDir, 'page.tsx');
       if (!fs.existsSync(pagePath)) {
-        const indexRoute = routeInfo.childRoutes.find(child => child.isIndex);
+        const indexRoute = routeInfo.childRoutes.find((child) => child.isIndex);
         const conditionalInfo = detectConditionalRoute(indexRoute.elementValue);
         const isConditional = !!conditionalInfo;
         const content = generatePageContent(indexRoute, sourceFile, pagePath, isConditional, conditionalInfo);
@@ -844,13 +874,7 @@ async function generatePageAndFolder(projectRoot, routeInfo, sourceFile, sourceF
       if (childRoute.isIndex && !childRoute.path) {
         continue;
       }
-      await generatePageAndFolder(
-        projectRoot,
-        childRoute,
-        sourceFile,
-        sourceFilePath,
-        routePath
-      );
+      await generatePageAndFolder(projectRoot, childRoute, sourceFile, sourceFilePath, routePath);
     }
   } else {
     // 자식이 없으면 page.tsx 생성
@@ -886,12 +910,8 @@ function parseRouteObjectArray(arrayNode) {
         const pathProp = element.getProperty('path');
         const elementProp = element.getProperty('element');
 
-        const pathValue = pathProp
-          ? pathProp.getInitializer()?.getText().replace(/['"]/g, '')
-          : null;
-        const elementValue = elementProp
-          ? elementProp.getInitializer()?.getText()
-          : null;
+        const pathValue = pathProp ? pathProp.getInitializer()?.getText().replace(/['"]/g, '') : null;
+        const elementValue = elementProp ? elementProp.getInitializer()?.getText() : null;
 
         let componentName = null;
         if (elementValue) {
@@ -958,7 +978,7 @@ async function findAllRouteFiles(projectRoot) {
       const relativePath = path.relative(srcDir, fullPath);
 
       if (entry.isDirectory()) {
-        if (!ignoreDirs.some(ignore => relativePath.includes(ignore))) {
+        if (!ignoreDirs.some((ignore) => relativePath.includes(ignore))) {
           await findFiles(fullPath);
         }
       } else if (entry.isFile()) {
@@ -994,7 +1014,7 @@ async function migrateRoutes(projectRoot) {
       const sourceFile = project.addSourceFileAtPath(filePath);
       const routes = findAllRoutes(sourceFile);
       if (routes.length > 0) {
-        routes.forEach(route => {
+        routes.forEach((route) => {
           route.sourceFilePath = filePath;
         });
         allRoutesFromAllFiles.push(...routes);
@@ -1010,11 +1030,11 @@ async function migrateRoutes(projectRoot) {
 
   // 1. Route 태그 찾기 (최상위 Route만)
   const allRoutes = allRoutesFromAllFiles;
-  
+
   // 최상위 Route만 필터링 (부모 Route의 자식이 아닌 것들)
   // 자식 Route는 childRoutes 배열에 포함되어 있으므로 별도로 처리할 필요 없음
   const processedChildNodes = new Set();
-  
+
   // 모든 Route의 자식 Route 노드를 수집
   for (const route of allRoutes) {
     if (route.childRoutes && route.childRoutes.length > 0) {
@@ -1024,7 +1044,7 @@ async function migrateRoutes(projectRoot) {
     }
   }
 
-  const topLevelRoutes = allRoutes.filter(route => {
+  const topLevelRoutes = allRoutes.filter((route) => {
     const routePath = route.path || '/';
 
     // 이미 다른 Route의 자식으로 포함되어 있는지 확인

@@ -15,6 +15,7 @@ async function cloneProject(source, destination) {
           src.includes('.git') ||
           src.includes('.next') ||
           src.includes('dist') ||
+          src.includes('.nextify') ||
           src.includes('.ai-migration')
         ) {
           return false;
