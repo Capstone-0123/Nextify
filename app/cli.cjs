@@ -34,6 +34,7 @@ const {
 const { generateText, createMigrationPrompt, generateTextStream } = require('./src/utils/gemini-client.cjs');
 const { runAskApply } = require('./src/utils/ai-file-apply.cjs');
 const { runAiReviewSessionStream } = require('./src/utils/ai-review-session.cjs');
+const { ensureGeminiCliReady } = require('./src/utils/gemini-cli-setup.cjs');
 const { printRelPathsBlock } = require('./src/utils/path-list-print.cjs');
 const { generatePerformanceReport } = require('./src/step7/performance-report.cjs');
 const fs = require('fs-extra');
@@ -47,7 +48,8 @@ program.addHelpText(
   `\n예시:\n` +
     `  migrate-next\n` +
     `    - step1~step7을 순차 실행한 뒤, 최종 diff + Gemini CLI 대화형 리뷰(수정 불가) + 성능 레포트를 한 번에 진행합니다.\n` +
-    `    - Gemini CLI(\`gemini\`)가 PATH에 설치되어 있어야 하며, Ctrl+C는 현재 AI 리뷰만 중단합니다.\n` +
+    `    - 리뷰 시작 전 Gemini CLI(\`gemini\`) 설치 여부를 확인하고, 없으면 자동 설치를 시도합니다.\n` +
+    `    - Ctrl+C는 현재 AI 리뷰만 중단합니다.\n` +
     `    - Nextify Review 패널에서 최종 diff를 확인하고, 성능 레포트(nextify-performance-report.md)까지 생성됩니다.\n` +
     `\n레거시(기존 step1 preview clone 방식):\n` +
     `  migrate-next step1 --review\n`,
@@ -827,6 +829,36 @@ async function runDefaultOrchestrator() {
   const openResult = openFirstReviewableDiff(manifest);
   if (!openResult.opened) {
     console.log(chalk.yellow('자동으로 diff를 열지 못했습니다. Nextify Review 패널에서 수동으로 열어주세요.'));
+  }
+
+  console.log(chalk.yellow('\n🔎 Gemini CLI 설치 상태를 확인합니다.'));
+  try {
+    const setup = await ensureGeminiCliReady({
+      pm,
+      cwd: targetPath,
+      onInfo: (msg) => console.log(chalk.gray(`   - ${msg}`)),
+    });
+    if (setup.installedNow) {
+      console.log(chalk.green('✅ Gemini CLI 자동 설치 및 검증 완료.'));
+    } else {
+      console.log(chalk.gray('   - Gemini CLI가 이미 설치되어 있습니다.'));
+    }
+  } catch (err) {
+    const fallbackInstall =
+      pm === 'yarn'
+        ? 'yarn global add @google/gemini-cli'
+        : pm === 'pnpm'
+          ? 'pnpm add -g @google/gemini-cli'
+          : 'npm install -g @google/gemini-cli';
+    console.error(chalk.red('\n❌ Gemini CLI 자동 설치에 실패했습니다.'));
+    if (err?.lastError?.message) {
+      console.error(chalk.red(`   - 원인: ${err.lastError.message}`));
+    } else if (err?.message) {
+      console.error(chalk.red(`   - 원인: ${err.message}`));
+    }
+    console.log(chalk.yellow('   - 수동 설치 후 다시 실행하세요:'));
+    console.log(chalk.white(`     ${fallbackInstall}`));
+    throw err;
   }
 
   console.log(chalk.yellow('\n⏳ 최종 Gemini CLI 리뷰를 시작합니다.'));

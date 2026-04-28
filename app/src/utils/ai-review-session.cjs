@@ -375,7 +375,7 @@ async function runAiReviewSessionCliStream(opts) {
       const chosen = spawnWithCandidates(spawnCandidates);
       if (!chosen) {
         const guidance = new Error(
-          'Gemini CLI command not found. Install Gemini CLI and ensure `gemini` (or `gemini.cmd` on Windows) is available in PATH.',
+          'Gemini CLI command not found. Ensure `gemini` (or `gemini.cmd` on Windows) is available in PATH. If you launched from `migrate-next` default orchestrator, rerun so auto-install can run before review.',
         );
         guidance.code = 'ENOENT';
         return fail(guidance);
@@ -389,7 +389,7 @@ async function runAiReviewSessionCliStream(opts) {
       child.on('error', (err) => {
         if (err && err.code === 'ENOENT') {
           const guidance = new Error(
-            'Gemini CLI command not found. Install Gemini CLI and ensure `gemini` (or `gemini.cmd` on Windows) is available in PATH.',
+            'Gemini CLI command not found. Ensure `gemini` (or `gemini.cmd` on Windows) is available in PATH. If you launched from `migrate-next` default orchestrator, rerun so auto-install can run before review.',
           );
           guidance.code = 'ENOENT';
           return fail(guidance);
