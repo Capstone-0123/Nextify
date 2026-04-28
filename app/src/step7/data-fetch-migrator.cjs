@@ -85,6 +85,7 @@ async function optimizeDataFetchingPlacement(projectRoot) {
   await stopAndOfferGeminiApply({
     projectRoot,
     discoveryLine: `클라이언트 컴포넌트의 useEffect 기반 데이터 패칭이 ${candidateAbsFiles.length}개 파일에서 감지되었습니다.`,
+    discoverySources: candidateRelPaths,
     instructionForAi: `Next.js App Router 최적화 작업입니다.
 
 목표:

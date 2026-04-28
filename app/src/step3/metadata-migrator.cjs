@@ -504,7 +504,7 @@ function generateStaticMetadataCode(title, metadata, viewport) {
 
 /**
  * 동적 메타데이터용 최소 뼈대.
- * 직후 stopAndOfferGeminiApply(step1과 동일 흐름)로 채움.
+ * 직후 stopAndOfferGeminiApply로 채움.
  */
 function generateDynamicMetadataStub(patterns) {
   let code = `import type { Metadata } from 'next';\n\n`;
@@ -1026,9 +1026,13 @@ async function migratePageMetadata(projectRoot, pageFilePath, componentFilePath)
 
       const candidateRelPaths = await collectMigrationCandidateRelPaths(projectRoot);
 
+      const metadataDiscoveryPaths = [...new Set([pageRel, componentRel].filter(Boolean))];
+      const metadataDiscoveryCount = metadataDiscoveryPaths.length;
+
       await stopAndOfferGeminiApply({
         projectRoot,
-        discoveryLine: `${pageRel} 에서 동적 메타데이터(generateMetadata)가 감지되었습니다.`,
+        discoveryLine: `동적 메타데이터(generateMetadata)가 ${metadataDiscoveryCount}개 파일에서 감지되었습니다.`,
+        discoverySources: metadataDiscoveryPaths,
         instructionForAi: `Next.js App Router 마이그레이션입니다. 동적 메타데이터를 generateMetadata로 완성하세요.
 
 - 수정 대상: ${pageRel} 의 export async function generateMetadata — 빈 title/description 및 서버에서 실행 가능한 데이터 로딩을 이 저장소의 기존 패턴(API 모듈, fetch 등)에 맞게 완성하세요.
@@ -1049,10 +1053,12 @@ ${JSON.stringify(dynamicExpressions, null, 2)}
 
 Helmet 내부 발췌:
 ${helmetSnippet}`,
+        manualFallback: `수동 처리 필요: ${pageRel}의 generateMetadata/Metadata 타입을 Next.js App Router 패턴으로 완성하세요.\n- 후보 파일(일부): ${candidateRelPaths
+          .slice(0, 20)
+          .join(', ')}${candidateRelPaths.length > 20 ? ' ...' : ''}\n- 구현 후 서버 렌더링/빌드를 검증하세요.`,
         candidateRelPaths,
       });
     }
-
     await commentOutHelmet(componentFilePath, helmetContent);
   }
 

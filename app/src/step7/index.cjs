@@ -56,7 +56,7 @@ async function runStep7(projectRoot, options = {}) {
     await optimizeDataFetchingPlacement(projectRoot);
     console.log('데이터 패칭 위치 최적화 완료');
 
-    // "use client" 최소화 실행 (JS 번들 최적화)
+    // "use client" 최소화 실행
     console.log('"use client" 최소화 시작');
     await minimizeUseClientForBundle(projectRoot);
     console.log('"use client" 최소화 완료');

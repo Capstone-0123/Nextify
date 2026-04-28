@@ -28,7 +28,7 @@ function collectFontAiCandidates(projectRoot, primaryRel) {
 // next/font 적용 메인 함수
 //=========================================================
 async function applyNextFont(projectRoot) {
-  // Case d 체크: 수동 처리 대상인지 확인
+  // Case d 체크: Gemini 자동 수정이 필요한지 확인
   await checkManualProcessingCases(projectRoot);
 
   // Case a: index.html에서 Google Fonts <link>를 사용하는 경우
@@ -42,7 +42,7 @@ async function applyNextFont(projectRoot) {
 }
 
 //=========================================================
-// Case d: 수동 처리 대상 체크
+// Case d: Gemini 자동 수정이 필요한 경우 체크
 //=========================================================
 async function checkManualProcessingCases(projectRoot) {
   const srcDir = path.join(projectRoot, 'src');
@@ -65,6 +65,7 @@ async function checkManualProcessingCases(projectRoot) {
         projectRoot,
         discoveryLine:
           'CSS 변수(--font-...) 또는 font-family fallback 체인이 복잡하게 구성된 스타일이 발견되었습니다.',
+        discoverySources: [rel],
         instructionForAi: `Next.js App Router로 마이그레이션합니다. ${rel} 및 layout에서 --font- CSS 변수와 font-family를 next/font 패턴에 맞게 수정하세요.`,
         candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
       });
@@ -103,6 +104,7 @@ async function checkManualProcessingCases(projectRoot) {
       await stopAndOfferGeminiApply({
         projectRoot,
         discoveryLine: 'FontFace API로 동적 폰트를 로드하는 코드가 발견되었습니다.',
+        discoverySources: [rel],
         instructionForAi: `Next.js에서 ${rel}의 FontFace 사용을 next/font/local 기반으로 바꾸세요.`,
         candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
       });
@@ -114,6 +116,7 @@ async function checkManualProcessingCases(projectRoot) {
       await stopAndOfferGeminiApply({
         projectRoot,
         discoveryLine: 'document.fonts.load 등으로 동적 폰트를 로드하는 코드가 발견되었습니다.',
+        discoverySources: [rel],
         instructionForAi: `Next.js에서 ${rel}의 fonts.load 사용을 next/font/local 기반으로 바꾸세요.`,
         candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
       });
@@ -140,6 +143,7 @@ async function checkManualProcessingCases(projectRoot) {
             await stopAndOfferGeminiApply({
               projectRoot,
               discoveryLine: 'Google Fonts가 아닌 외부 CDN 폰트 링크가 발견되었습니다.',
+              discoverySources: [rel],
               instructionForAi: `Next.js로 마이그레이션합니다. ${rel}의 외부 폰트 링크를 next/font/local 또는 적절한 next/font 사용으로 바꾸세요.`,
               candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
             });
@@ -208,13 +212,14 @@ async function migrateGoogleFontsFromIndexHtml(projectRoot) {
     }
   }
 
-  // 여러 개의 family 파라미터가 동시에 존재하는 경우 수동 처리 대상
+  // 여러 개의 family 파라미터가 동시에 존재하는 경우 Gemini 제안
   const familyMatches = htmlContent.match(/family=([^:&]+)/g);
   if (familyMatches && familyMatches.length > 1) {
     const rel = relFromRoot(projectRoot, indexHtmlPath);
     await stopAndOfferGeminiApply({
       projectRoot,
       discoveryLine: 'Google Fonts URL에 family 파라미터가 여러 개인 링크가 발견되었습니다.',
+      discoverySources: [rel],
       instructionForAi: `${rel}의 Google Fonts를 여러 next/font/google 임포트로 나누고 layout에 반영한 뒤 링크를 제거하세요.`,
       candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
     });
@@ -272,13 +277,14 @@ async function migrateGoogleFontsFromCssImport(projectRoot) {
       continue;
     }
 
-    // 여러 개의 family 파라미터가 동시에 존재하는 경우 수동 처리 대상
+    // 여러 개의 family 파라미터가 동시에 존재하는 경우 Gemini 제안
     const familyMatches = cssContent.match(/family=([^:&]+)/g);
     if (familyMatches && familyMatches.length > 1) {
       const rel = relFromRoot(projectRoot, cssFilePath);
       await stopAndOfferGeminiApply({
         projectRoot,
         discoveryLine: 'CSS @import Google Fonts에 family 파라미터가 여러 개인 구문이 발견되었습니다.',
+        discoverySources: [rel],
         instructionForAi: `${rel}의 @import Google Fonts를 next/font/google로 옮기고 CSS를 정리하세요.`,
         candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
       });
@@ -402,7 +408,7 @@ async function migrateLocalFontsFromFontFace(projectRoot) {
       continue;
     }
 
-    // 여러 @font-face 선언이 하나의 font-family로 묶여 있는 경우 수동 처리 대상
+    // 여러 @font-face 선언이 하나의 font-family로 묶여 있는 경우 Gemini 제안
     const fontFamilyNames = new Set();
     for (const fontFace of fontFaceMatches) {
       const familyMatch = fontFace.match(/font-family\s*:\s*["']?([^"';}]+)["']?/i);
@@ -416,6 +422,7 @@ async function migrateLocalFontsFromFontFace(projectRoot) {
       await stopAndOfferGeminiApply({
         projectRoot,
         discoveryLine: '동일 font-family에 @font-face 선언이 여러 개 묶여 있는 CSS가 발견되었습니다.',
+        discoverySources: [rel],
         instructionForAi: `${rel}의 @font-face들을 next/font/local 한 번으로 정리하고 layout/className을 맞추세요.`,
         candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
       });

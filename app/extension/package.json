@@ -1,0 +1,60 @@
+{
+  "name": "nextify-review",
+  "displayName": "Nextify Review",
+  "description": "Browse Nextify migration changes as a directory tree and open diffs (view-only).",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:nextifyReview.panel",
+    "onCommand:nextifyReview.focusPanel",
+    "onCommand:nextifyReview.refreshSession",
+    "onCommand:nextifyReview.openChange",
+    "onCommand:nextifyReview.copySessionPath",
+    "onCommand:nextifyReview.copyBeforePath",
+    "onCommand:nextifyReview.copyAfterPath"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "nextifyReview.focusPanel",
+        "title": "Nextify Review: Focus Panel"
+      },
+      {
+        "command": "nextifyReview.refreshSession",
+        "title": "Nextify Review: Refresh Session"
+      },
+      {
+        "command": "nextifyReview.openChange",
+        "title": "Nextify Review: Open Selected Diff"
+      },
+      {
+        "command": "nextifyReview.copySessionPath",
+        "title": "Nextify Review: Copy session.json Path"
+      },
+      {
+        "command": "nextifyReview.copyBeforePath",
+        "title": "Nextify Review: Copy BEFORE Path"
+      },
+      {
+        "command": "nextifyReview.copyAfterPath",
+        "title": "Nextify Review: Copy AFTER Path"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "type": "webview",
+          "id": "nextifyReview.panel",
+          "name": "Nextify Review"
+        }
+      ]
+    }
+  }
+}
