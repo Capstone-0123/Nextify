@@ -742,6 +742,40 @@ async function runDefaultOrchestrator() {
     ),
   );
 
+  // 1) 성능 레포트 생성
+  console.log(chalk.yellow('\n📊 성능 레포트 생성을 시작합니다.'));
+  const reportPath = path.join(targetPath, 'nextify-performance-report.md');
+  try {
+    await generatePerformanceReport({
+      projectRoot: targetPath,
+      outputMarkdownPath: reportPath,
+    });
+  } catch (err) {
+    console.log(chalk.yellow(`⚠️  성능 레포트 생성에 실패했습니다: ${err.message}`));
+    console.log(chalk.gray('   - 마이그레이션 결과는 유지됩니다. 필요 시 `migrate-next report`로 재시도하세요.'));
+  }
+
+  // 2) 코드 리뷰 여부 확인
+  const { useReview } = await inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'useReview',
+      message: 'diff 및 AI를 통한 코드 리뷰를 진행하시겠습니까?',
+      default: true,
+    },
+  ]);
+
+  if (!useReview) {
+    const installCmd = getInstallCommand(pm);
+    console.log(chalk.green('\n✔ 마이그레이션 완료.'));
+    console.log(chalk.yellow('\n👉 다음 단계 안내'));
+    console.log(chalk.white(`   - ${installCmd} (의존성 설치)`));
+    console.log(chalk.white('   - 마이그레이션된 프로젝트에서 빌드/실행을 확인하세요.'));
+    console.log(chalk.white(`   - 성능 레포트 확인: ${reportPath}`));
+    return;
+  }
+
+  // 3) 코드 리뷰 진행
   const openResult = openFirstReviewableDiff(manifest);
   if (!openResult.opened) {
     console.log(chalk.yellow('자동으로 diff를 열지 못했습니다. Nextify Review 패널에서 수동으로 열어주세요.'));
@@ -784,19 +818,7 @@ async function runDefaultOrchestrator() {
     process.off('SIGINT', onSigint);
   }
 
-  console.log(chalk.green('\n✔ Final review complete.'));
-
-  console.log(chalk.yellow('\n📊 성능 레포트 생성을 시작합니다.'));
-  const reportPath = path.join(targetPath, 'nextify-performance-report.md');
-  try {
-    await generatePerformanceReport({
-      projectRoot: targetPath,
-      outputMarkdownPath: reportPath,
-    });
-  } catch (err) {
-    console.log(chalk.yellow(`⚠️  성능 레포트 생성에 실패했습니다: ${err.message}`));
-    console.log(chalk.gray('   - 마이그레이션 결과는 유지됩니다. 필요 시 `migrate-next report`로 재시도하세요.'));
-  }
+  console.log(chalk.green('\n✔ 코드 리뷰 완료.'));
 
   const installCmd = getInstallCommand(pm);
   console.log(chalk.yellow('\n👉 다음 단계 안내'));
