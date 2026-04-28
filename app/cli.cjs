@@ -48,6 +48,8 @@ program.addHelpText(
   `\n예시:\n` +
     `  migrate-next\n` +
     `    - step1~step7을 순차 실행한 뒤, 최종 diff + Gemini CLI 대화형 리뷰(수정 불가) + 성능 레포트를 한 번에 진행합니다.\n` +
+    `  migrate-next steps\n` +
+    `    - step1~step7만 순차 실행합니다. (성능 레포트/AI 리뷰 제외)\n` +
     `    - 리뷰 시작 전 Gemini CLI(\`gemini\`) 설치 여부를 확인하고, 없으면 자동 설치를 시도합니다.\n` +
     `    - Ctrl+C는 현재 AI 리뷰만 중단합니다.\n` +
     `    - Nextify Review 패널에서 최종 diff를 확인하고, 성능 레포트(nextify-performance-report.md)까지 생성됩니다.\n` +
@@ -356,6 +358,41 @@ program
       await runStep7(process.cwd());
     } catch (error) {
       console.error(chalk.red('\n❌ Step 7 오류 발생:'), error);
+      process.exit(1);
+    }
+  });
+
+// =========================================================
+// Command: Steps (step1~step7 only)
+// =========================================================
+program
+  .command('steps')
+  .description('step1~step7 순차 실행 (성능 레포트/AI 리뷰 제외)')
+  .action(async () => {
+    try {
+      const projectRoot = process.cwd();
+      const stepEntries = [
+        ['step1', runStep1],
+        ['step2', runStep2],
+        ['step3', runStep3],
+        ['step4', runStep4],
+        ['step5', runStep5],
+        ['step6', runStep6],
+        ['step7', runStep7],
+      ];
+
+      for (const [stepName, stepRunner] of stepEntries) {
+        const partNum = stepName.replace('step', '');
+        console.log(chalk.yellow(`\n==================== Part ${partNum} (${stepName}) ====================`));
+        await stepRunner(projectRoot);
+      }
+
+      console.log(chalk.green('\n✔ step1~step7 순차 실행 완료 (레포트/AI 리뷰 미실행).'));
+      console.log(chalk.yellow('\n👉 필요 시 추가 실행'));
+      console.log(chalk.white('   - 성능 레포트: migrate-next report'));
+      console.log(chalk.white('   - 전체 오케스트레이터: migrate-next'));
+    } catch (error) {
+      console.error(chalk.red('\n❌ steps 실행 중 오류 발생:'), error);
       process.exit(1);
     }
   });

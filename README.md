@@ -13,6 +13,8 @@ React to Next migration 자동화 CLI 툴 'Nextify' 개발 레포지토리입니
 # 기본 오케스트레이터(서브커맨드 없음):
 # step1~step7 순차 처리 -> 성능 레포트 생성 -> 코드 리뷰 진행 여부 확인 -> (Yes) diff 및 Gemini 대화형 리뷰(view-only)
 migrate-next
+# step1~step7만 순차 실행 (레포트/AI 리뷰 제외)
+migrate-next steps
 # 각 step 단독 실행
 migrate-next step1
 migrate-next step2
