@@ -98,7 +98,11 @@ async function stopAndOfferGeminiApply(opts) {
       context,
     });
     spinner.stop();
-    printRelPathsBlock(chalk.green, '\n✅ Gemini 적용 완료', written);
+    if (written.length > 0) {
+      printRelPathsBlock(chalk.green, '\n✅ Gemini 적용 완료', written);
+    } else {
+      console.log(chalk.gray('\nℹ️  Gemini가 적용할 변경 사항을 제안하지 않았습니다 (변경 없음).'));
+    }
     console.log(chalk.green('마이그레이션을 계속 진행합니다.\n'));
     return { applied: true };
   } catch (e) {
