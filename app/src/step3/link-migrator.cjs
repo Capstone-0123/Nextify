@@ -697,6 +697,58 @@ function migrateUseNavigate(sourceFile) {
   return modified;
 }
 
+/**
+ * useParams import를 react-router-dom -> next/navigation으로 변환
+ * 내부 사용 로직(예: const { id } = useParams())은 유지한다.
+ */
+function migrateUseParams(sourceFile) {
+  let modified = false;
+  let hasUseParamsFromReactRouter = false;
+
+  const imports = sourceFile.getImportDeclarations();
+  for (const importDecl of imports) {
+    const modulePath = importDecl.getModuleSpecifierValue();
+    if (modulePath !== 'react-router-dom') continue;
+
+    const namedImports = importDecl.getNamedImports();
+    const useParamsImport = namedImports.find((n) => n.getName() === 'useParams');
+    if (!useParamsImport) continue;
+
+    hasUseParamsFromReactRouter = true;
+    useParamsImport.remove();
+    modified = true;
+
+    const remainingImports = importDecl.getNamedImports();
+    const defaultImport = importDecl.getDefaultImport();
+    if (remainingImports.length === 0 && !defaultImport) {
+      importDecl.remove();
+    }
+  }
+
+  if (!hasUseParamsFromReactRouter) {
+    return modified;
+  }
+
+  const existingNextNav = sourceFile.getImportDeclaration(
+    (decl) => decl.getModuleSpecifierValue() === 'next/navigation',
+  );
+  if (existingNextNav) {
+    const hasUseParams = existingNextNav.getNamedImports().some((n) => n.getName() === 'useParams');
+    if (!hasUseParams) {
+      existingNextNav.addNamedImport('useParams');
+      modified = true;
+    }
+  } else {
+    sourceFile.addImportDeclaration({
+      namedImports: ['useParams'],
+      moduleSpecifier: 'next/navigation',
+    });
+    modified = true;
+  }
+
+  return modified;
+}
+
 // ============================================================================
 // 파일 처리
 // ============================================================================
@@ -743,6 +795,11 @@ async function migrateFileLinks(filePath) {
 
   // 4. useNavigate 변환 (명세 c)
   if (migrateUseNavigate(sourceFile)) {
+    modified = true;
+  }
+
+  // 5. useParams import 변환 (react-router-dom -> next/navigation)
+  if (migrateUseParams(sourceFile)) {
     modified = true;
   }
 
@@ -813,4 +870,5 @@ module.exports = {
   migrateLinkTag,
   migrateNavLink,
   migrateUseNavigate,
+  migrateUseParams,
 };
