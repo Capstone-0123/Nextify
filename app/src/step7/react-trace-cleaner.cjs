@@ -350,14 +350,14 @@ async function removeReactHelmetImports(projectRoot) {
       hasChanges = true;
     }
 
-    // Helmet 사용 코드도 주석 처리 (metadata로 변환되었을 수 있으므로)
-    // <Helmet>...</Helmet> 패턴 찾기 및 주석 처리
+    // Helmet 사용 코드 제거 (주석 중첩으로 JSX 파싱이 깨질 수 있어 주석화 대신 제거)
+    // <Helmet>...</Helmet> 패턴 찾기 및 제거
     const helmetPattern = /<Helmet[^>]*>([\s\S]*?)<\/Helmet>/g;
     const afterHelmet = content.replace(helmetPattern, (match, _inner, offset) => {
       if (indexInsideMigratedMetadataJsxComment(content, offset)) {
         return match;
       }
-      return `{/* TODO: Helmet을 Next.js metadata로 변환 필요\n${match}\n*/}`;
+      return '';
     });
     if (afterHelmet !== content) {
       content = afterHelmet;
