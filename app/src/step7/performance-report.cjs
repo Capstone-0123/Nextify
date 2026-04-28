@@ -486,11 +486,44 @@ function renderRunBreakdown(runs, metricKey, formatter) {
     .join(', ');
 }
 
-function renderMarkdownReport({ vite, nextPre7, nextPost7 }) {
-  const rows = [vite, nextPre7, nextPost7].map((t) => pickSummaryRow(t));
+function renderTargetDetail(target) {
+  const summary = target?.lighthouse?.summary || {};
+  const sizeLabel = target.kind === 'vite' ? 'Dist size dir' : 'Static size dir';
+  return `### ${target.label}
 
+- Root: \`${target.projectRoot}\`
+- URL: \`${target.url}\`
+- ${sizeLabel}: \`${target.jsPayload?.directory || 'N/A'}\` (${target.jsPayload?.human || 'N/A'})
+- Lighthouse finalUrl: \`${target.lighthouse?.finalUrl || 'N/A'}\`
+- FCP median/mean/stddev: ${formatMsToSeconds(summary.fcpMs?.median)} / ${formatMsToSeconds(summary.fcpMs?.mean)} / ${formatStddevSeconds(summary.fcpMs)} (range: ${formatRangeSeconds(summary.fcpMs)})
+- LCP median/mean/stddev: ${formatMsToSeconds(summary.lcpMs?.median)} / ${formatMsToSeconds(summary.lcpMs?.mean)} / ${formatStddevSeconds(summary.lcpMs)} (range: ${formatRangeSeconds(summary.lcpMs)})
+- SEO median/mean/stddev: ${formatScore(summary.seoScore?.median)} / ${formatScore(summary.seoScore?.mean)} / ${formatStddevScore(summary.seoScore)} (range: ${formatScoreRange(summary.seoScore)})
+- FCP run-by-run: ${renderRunBreakdown(target.lighthouse?.runs, 'fcpMs', (v) => formatMsToSeconds(v))}
+- LCP run-by-run: ${renderRunBreakdown(target.lighthouse?.runs, 'lcpMs', (v) => formatMsToSeconds(v))}
+`;
+}
+
+function renderMarkdownReport({ targets, failures }) {
+  const rows = targets.map((t) => pickSummaryRow(t));
+  const summaryRows = rows.length
+    ? rows
+        .map(
+          (row) =>
+            `| ${row.label} | ${row.fcp} | ${row.fcpStability} | ${row.lcp} | ${row.lcpStability} | ${row.seo} | ${row.seoStability} | ${row.js} |`,
+        )
+        .join('\n')
+    : '| (no successful targets) | N/A | N/A | N/A | N/A | N/A | N/A | N/A |';
+  const detailSection = targets.length
+    ? targets.map((target) => renderTargetDetail(target)).join('\n')
+    : '- 성공적으로 측정된 타깃이 없습니다.';
+  const failureSection =
+    Array.isArray(failures) && failures.length > 0
+      ? failures
+          .map((item) => `- ${item.label}: ${item.errorMessage}`)
+          .join('\n')
+      : '- 없음';
   const now = new Date().toISOString();
-  const measurementConfig = vite.lighthouse || {};
+  const measurementConfig = targets[0]?.lighthouse || {};
   const measuredRuns = measurementConfig.measuredRuns ?? DEFAULT_LIGHTHOUSE_RUNS;
   const warmupRuns = measurementConfig.warmups ?? DEFAULT_LIGHTHOUSE_WARMUP_RUNS;
 
@@ -518,51 +551,19 @@ function renderMarkdownReport({ vite, nextPre7, nextPost7 }) {
 - Lighthouse measured runs: ${measuredRuns}
 - Summary 기준: median (표준편차/범위 함께 표시)
 
-## 결과 요약 (3-way 비교)
+## 결과 요약 (${targets.length}-way, successful targets)
 
 | Target | FCP (median) | FCP σ | LCP (median) | LCP σ | SEO (median) | SEO σ | Total JS payload size |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| ${rows[0].label} | ${rows[0].fcp} | ${rows[0].fcpStability} | ${rows[0].lcp} | ${rows[0].lcpStability} | ${rows[0].seo} | ${rows[0].seoStability} | ${rows[0].js} |
-| ${rows[1].label} | ${rows[1].fcp} | ${rows[1].fcpStability} | ${rows[1].lcp} | ${rows[1].lcpStability} | ${rows[1].seo} | ${rows[1].seoStability} | ${rows[1].js} |
-| ${rows[2].label} | ${rows[2].fcp} | ${rows[2].fcpStability} | ${rows[2].lcp} | ${rows[2].lcpStability} | ${rows[2].seo} | ${rows[2].seoStability} | ${rows[2].js} |
+${summaryRows}
 
 ## 측정 상세
 
-### ${vite.label}
+${detailSection}
 
-- Root: \`${vite.projectRoot}\`
-- URL: \`${vite.url}\`
-- Dist size dir: \`${vite.jsPayload.directory}\` (${vite.jsPayload.human})
-- Lighthouse finalUrl: \`${vite.lighthouse.finalUrl}\`
-- FCP median/mean/stddev: ${formatMsToSeconds(vite.lighthouse.summary.fcpMs.median)} / ${formatMsToSeconds(vite.lighthouse.summary.fcpMs.mean)} / ${formatStddevSeconds(vite.lighthouse.summary.fcpMs)} (range: ${formatRangeSeconds(vite.lighthouse.summary.fcpMs)})
-- LCP median/mean/stddev: ${formatMsToSeconds(vite.lighthouse.summary.lcpMs.median)} / ${formatMsToSeconds(vite.lighthouse.summary.lcpMs.mean)} / ${formatStddevSeconds(vite.lighthouse.summary.lcpMs)} (range: ${formatRangeSeconds(vite.lighthouse.summary.lcpMs)})
-- SEO median/mean/stddev: ${formatScore(vite.lighthouse.summary.seoScore.median)} / ${formatScore(vite.lighthouse.summary.seoScore.mean)} / ${formatStddevScore(vite.lighthouse.summary.seoScore)} (range: ${formatScoreRange(vite.lighthouse.summary.seoScore)})
-- FCP run-by-run: ${renderRunBreakdown(vite.lighthouse.runs, 'fcpMs', (v) => formatMsToSeconds(v))}
-- LCP run-by-run: ${renderRunBreakdown(vite.lighthouse.runs, 'lcpMs', (v) => formatMsToSeconds(v))}
+## 실패 항목
 
-### ${nextPre7.label}
-
-- Root: \`${nextPre7.projectRoot}\`
-- URL: \`${nextPre7.url}\`
-- Static size dir: \`${nextPre7.jsPayload.directory}\` (${nextPre7.jsPayload.human})
-- Lighthouse finalUrl: \`${nextPre7.lighthouse.finalUrl}\`
-- FCP median/mean/stddev: ${formatMsToSeconds(nextPre7.lighthouse.summary.fcpMs.median)} / ${formatMsToSeconds(nextPre7.lighthouse.summary.fcpMs.mean)} / ${formatStddevSeconds(nextPre7.lighthouse.summary.fcpMs)} (range: ${formatRangeSeconds(nextPre7.lighthouse.summary.fcpMs)})
-- LCP median/mean/stddev: ${formatMsToSeconds(nextPre7.lighthouse.summary.lcpMs.median)} / ${formatMsToSeconds(nextPre7.lighthouse.summary.lcpMs.mean)} / ${formatStddevSeconds(nextPre7.lighthouse.summary.lcpMs)} (range: ${formatRangeSeconds(nextPre7.lighthouse.summary.lcpMs)})
-- SEO median/mean/stddev: ${formatScore(nextPre7.lighthouse.summary.seoScore.median)} / ${formatScore(nextPre7.lighthouse.summary.seoScore.mean)} / ${formatStddevScore(nextPre7.lighthouse.summary.seoScore)} (range: ${formatScoreRange(nextPre7.lighthouse.summary.seoScore)})
-- FCP run-by-run: ${renderRunBreakdown(nextPre7.lighthouse.runs, 'fcpMs', (v) => formatMsToSeconds(v))}
-- LCP run-by-run: ${renderRunBreakdown(nextPre7.lighthouse.runs, 'lcpMs', (v) => formatMsToSeconds(v))}
-
-### ${nextPost7.label}
-
-- Root: \`${nextPost7.projectRoot}\`
-- URL: \`${nextPost7.url}\`
-- Static size dir: \`${nextPost7.jsPayload.directory}\` (${nextPost7.jsPayload.human})
-- Lighthouse finalUrl: \`${nextPost7.lighthouse.finalUrl}\`
-- FCP median/mean/stddev: ${formatMsToSeconds(nextPost7.lighthouse.summary.fcpMs.median)} / ${formatMsToSeconds(nextPost7.lighthouse.summary.fcpMs.mean)} / ${formatStddevSeconds(nextPost7.lighthouse.summary.fcpMs)} (range: ${formatRangeSeconds(nextPost7.lighthouse.summary.fcpMs)})
-- LCP median/mean/stddev: ${formatMsToSeconds(nextPost7.lighthouse.summary.lcpMs.median)} / ${formatMsToSeconds(nextPost7.lighthouse.summary.lcpMs.mean)} / ${formatStddevSeconds(nextPost7.lighthouse.summary.lcpMs)} (range: ${formatRangeSeconds(nextPost7.lighthouse.summary.lcpMs)})
-- SEO median/mean/stddev: ${formatScore(nextPost7.lighthouse.summary.seoScore.median)} / ${formatScore(nextPost7.lighthouse.summary.seoScore.mean)} / ${formatStddevScore(nextPost7.lighthouse.summary.seoScore)} (range: ${formatScoreRange(nextPost7.lighthouse.summary.seoScore)})
-- FCP run-by-run: ${renderRunBreakdown(nextPost7.lighthouse.runs, 'fcpMs', (v) => formatMsToSeconds(v))}
-- LCP run-by-run: ${renderRunBreakdown(nextPost7.lighthouse.runs, 'lcpMs', (v) => formatMsToSeconds(v))}
+${failureSection}
 `;
 }
 
@@ -633,29 +634,35 @@ async function generatePerformanceReport({
 
   const preRootResolved = preStep7Root || (await createPreStep7Snapshot(projectRoot));
 
-  const vite = await measureTarget({
-    label: 'Vite+React (baseline)',
-    projectRoot: viteRootResolved,
-    kind: 'vite',
-    lighthouseRuns,
-    warmupRuns,
-  });
-  const nextPre7 = await measureTarget({
-    label: 'Next.js (step1~6)',
-    projectRoot: preRootResolved,
-    kind: 'next',
-    lighthouseRuns,
-    warmupRuns,
-  });
-  const nextPost7 = await measureTarget({
-    label: 'Next.js (step1~7)',
-    projectRoot,
-    kind: 'next',
-    lighthouseRuns,
-    warmupRuns,
-  });
+  const targets = [];
+  const failures = [];
+  const measurePlans = [
+    { label: 'Vite+React (baseline)', projectRoot: viteRootResolved, kind: 'vite' },
+    { label: 'Next.js (step1~6)', projectRoot: preRootResolved, kind: 'next' },
+    { label: 'Next.js (step1~7)', projectRoot, kind: 'next' },
+  ];
 
-  const md = renderMarkdownReport({ vite, nextPre7, nextPost7 });
+  for (const plan of measurePlans) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const measured = await measureTarget({
+        label: plan.label,
+        projectRoot: plan.projectRoot,
+        kind: plan.kind,
+        lighthouseRuns,
+        warmupRuns,
+      });
+      targets.push(measured);
+    } catch (error) {
+      failures.push({
+        label: plan.label,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+      console.log(chalk.yellow(`⚠️  [레포트] ${plan.label} 측정 실패: ${failures[failures.length - 1].errorMessage}`));
+    }
+  }
+
+  const md = renderMarkdownReport({ targets, failures });
   await fs.writeFile(outputMarkdownPath, md, 'utf-8');
 
   await ensureNextifyMeta(projectRoot, {
@@ -664,8 +671,16 @@ async function generatePerformanceReport({
       generatedAt: new Date().toISOString(),
       baselineViteRoot: viteRootResolved,
       preStep7Root: preRootResolved,
+      successfulTargets: targets.length,
+      failedTargets: failures.length,
     },
   });
+
+  if (failures.length > 0) {
+    console.log(chalk.yellow(`\n⚠️  부분 성능 레포트 생성 완료: ${outputMarkdownPath}`));
+    console.log(chalk.gray(`   - 성공: ${targets.length}, 실패: ${failures.length}\n`));
+    return;
+  }
 
   console.log(chalk.green(`\n✅ 성능 레포트 생성 완료: ${outputMarkdownPath}\n`));
 }

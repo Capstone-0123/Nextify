@@ -171,6 +171,7 @@ program
 
       if (mode === 'copy') {
         await cloneProject(cwd, targetPath);
+        process.chdir(targetPath);
         console.log(chalk.blue(`\n📂 작업 경로가 변경되었습니다: ${targetPath}`));
       }
 
@@ -630,6 +631,53 @@ function summarizeChangeTypes(changes) {
   return summary;
 }
 
+function normalizeErrorLike(errorLike) {
+  if (errorLike instanceof Error) return errorLike;
+  if (typeof errorLike === 'string') return new Error(errorLike);
+  try {
+    return new Error(JSON.stringify(errorLike));
+  } catch {
+    return new Error(String(errorLike));
+  }
+}
+
+async function runPerformanceReportSafely(reportOptions) {
+  let capturedRuntimeError = null;
+  const onUncaughtException = (error) => {
+    capturedRuntimeError = normalizeErrorLike(error);
+  };
+  const onUnhandledRejection = (reason) => {
+    capturedRuntimeError = normalizeErrorLike(reason);
+  };
+
+  process.on('uncaughtException', onUncaughtException);
+  process.on('unhandledRejection', onUnhandledRejection);
+
+  const reportPromise = generatePerformanceReport(reportOptions);
+  let watcherId;
+  try {
+    await Promise.race([
+      reportPromise,
+      new Promise((_, reject) => {
+        watcherId = setInterval(() => {
+          if (capturedRuntimeError) {
+            clearInterval(watcherId);
+            reject(capturedRuntimeError);
+          }
+        }, 100);
+      }),
+    ]);
+    if (watcherId) clearInterval(watcherId);
+    return { success: true };
+  } catch (error) {
+    if (watcherId) clearInterval(watcherId);
+    return { success: false, error: normalizeErrorLike(error) };
+  } finally {
+    process.off('uncaughtException', onUncaughtException);
+    process.off('unhandledRejection', onUnhandledRejection);
+  }
+}
+
 async function runDefaultOrchestrator() {
   const cwd = process.cwd();
 
@@ -698,6 +746,7 @@ async function runDefaultOrchestrator() {
     }
 
     await cloneProject(cwd, targetPath);
+    process.chdir(targetPath);
     console.log(chalk.blue(`\n📂 작업 경로가 변경되었습니다: ${targetPath}`));
   }
 
@@ -745,13 +794,12 @@ async function runDefaultOrchestrator() {
   // 1) 성능 레포트 생성
   console.log(chalk.yellow('\n📊 성능 레포트 생성을 시작합니다.'));
   const reportPath = path.join(targetPath, 'nextify-performance-report.md');
-  try {
-    await generatePerformanceReport({
-      projectRoot: targetPath,
-      outputMarkdownPath: reportPath,
-    });
-  } catch (err) {
-    console.log(chalk.yellow(`⚠️  성능 레포트 생성에 실패했습니다: ${err.message}`));
+  const reportResult = await runPerformanceReportSafely({
+    projectRoot: targetPath,
+    outputMarkdownPath: reportPath,
+  });
+  if (!reportResult.success) {
+    console.log(chalk.yellow(`⚠️  성능 레포트 생성에 실패했습니다: ${reportResult.error.message}`));
     console.log(chalk.gray('   - 마이그레이션 결과는 유지됩니다. 필요 시 `migrate-next report`로 재시도하세요.'));
   }
 
