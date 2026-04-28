@@ -3,6 +3,7 @@
 
 const fs = require('fs-extra');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 //=========================================================
 // React 흔적 정리 메인 함수
@@ -175,16 +176,32 @@ async function cleanPackageJson(projectRoot) {
     packageJson.devDependencies = {};
   }
 
-  if (!packageJson.devDependencies['eslint-config-next']) {
-    // 존재하지 않으면 추가 (npm install -D eslint-config-next)
-    // 실제로는 package.json에만 추가하고, 사용자가 나중에 npm install을 실행하도록 함
-    packageJson.devDependencies['eslint-config-next'] = 'latest';
-    hasChanges = true;
-  }
+  const hasEslintConfigNext = Boolean(packageJson.devDependencies['eslint-config-next']);
 
   // 변경사항이 있으면 파일 저장
   if (hasChanges) {
     await fs.writeJson(packageJsonPath, packageJson, { spaces: 2 });
+  }
+
+  // 4. eslint-config-next가 없으면 실제 설치 명령 실행
+  if (!hasEslintConfigNext) {
+    const installResult = spawnSync('npm', ['install', '-D', 'eslint-config-next'], {
+      cwd: projectRoot,
+      stdio: 'inherit',
+      shell: process.platform === 'win32',
+    });
+
+    // 설치 실패 시 최소한 package.json에는 반영되도록 fallback
+    if (installResult.status !== 0) {
+      const fallbackPackageJson = await fs.readJson(packageJsonPath);
+      if (!fallbackPackageJson.devDependencies) {
+        fallbackPackageJson.devDependencies = {};
+      }
+      if (!fallbackPackageJson.devDependencies['eslint-config-next']) {
+        fallbackPackageJson.devDependencies['eslint-config-next'] = 'latest';
+        await fs.writeJson(packageJsonPath, fallbackPackageJson, { spaces: 2 });
+      }
+    }
   }
 }
 
@@ -227,7 +244,7 @@ async function removeReactRouterImports(projectRoot) {
     const originalContent = content;
 
     // import ... from "react-router-dom" 패턴 찾기 및 삭제
-    const reactRouterPattern = /import\s+.*?\s+from\s+["']react-router-dom["'];?\s*\n?/g;
+    const reactRouterPattern = /import\s+[\s\S]*?\s+from\s+["']react-router-dom["'];?\s*\r?\n?/g;
     
     if (reactRouterPattern.test(content)) {
       content = content.replace(reactRouterPattern, '');
@@ -307,9 +324,10 @@ async function removeReactHelmetImports(projectRoot) {
     const originalContent = content;
 
     // import ... from "react-helmet" 패턴 찾기 및 삭제
-    const reactHelmetPattern = /import\s+.*?\s+from\s+["']react-helmet["'];?\s*\n?/g;
+    // 주의: 모듈 문자열 앞의 quote를 넘지 않도록 [^'"]를 사용해 다른 import까지 먹지 않게 함
+    const reactHelmetPattern = /^\s*import\s+[^'"]+\s+from\s+["']react-helmet["'];?\s*\r?\n?/gm;
     // import ... from "react-helmet-async" 패턴 찾기 및 삭제
-    const reactHelmetAsyncPattern = /import\s+.*?\s+from\s+["']react-helmet-async["'];?\s*\n?/g;
+    const reactHelmetAsyncPattern = /^\s*import\s+[^'"]+\s+from\s+["']react-helmet-async["'];?\s*\r?\n?/gm;
     
     let hasChanges = false;
     if (reactHelmetPattern.test(content)) {
@@ -332,14 +350,14 @@ async function removeReactHelmetImports(projectRoot) {
       hasChanges = true;
     }
 
-    // Helmet 사용 코드도 주석 처리 (metadata로 변환되었을 수 있으므로)
-    // <Helmet>...</Helmet> 패턴 찾기 및 주석 처리
+    // Helmet 사용 코드 제거 (주석 중첩으로 JSX 파싱이 깨질 수 있어 주석화 대신 제거)
+    // <Helmet>...</Helmet> 패턴 찾기 및 제거
     const helmetPattern = /<Helmet[^>]*>([\s\S]*?)<\/Helmet>/g;
     const afterHelmet = content.replace(helmetPattern, (match, _inner, offset) => {
       if (indexInsideMigratedMetadataJsxComment(content, offset)) {
         return match;
       }
-      return `{/* TODO: Helmet을 Next.js metadata로 변환 필요\n${match}\n*/}`;
+      return '';
     });
     if (afterHelmet !== content) {
       content = afterHelmet;
@@ -397,9 +415,9 @@ async function removeReactRefreshImports(projectRoot) {
     const originalContent = content;
 
     // import RefreshRuntime from "react-refresh/runtime" 패턴 찾기 및 삭제
-    const refreshRuntimePattern1 = /import\s+RefreshRuntime\s+from\s+["']react-refresh\/runtime["'];?\s*\n?/g;
+    const refreshRuntimePattern1 = /import\s+RefreshRuntime\s+from\s+["']react-refresh\/runtime["'];?\s*\r?\n?/g;
     // import "react-refresh/runtime" 패턴 찾기 및 삭제
-    const refreshRuntimePattern2 = /import\s+["']react-refresh\/runtime["'];?\s*\n?/g;
+    const refreshRuntimePattern2 = /import\s+["']react-refresh\/runtime["'];?\s*\r?\n?/g;
     
     let hasChanges = false;
     if (refreshRuntimePattern1.test(content)) {
@@ -462,9 +480,9 @@ async function removeReactRouterHistoryImports(projectRoot) {
     const originalContent = content;
 
     // import { createBrowserHistory } from "history" 패턴 찾기 및 삭제
-    const historyPattern1 = /import\s+\{\s*createBrowserHistory\s*\}\s+from\s+["']history["'];?\s*\n?/g;
+    const historyPattern1 = /import\s+\{\s*createBrowserHistory\s*\}\s+from\s+["']history["'];?\s*\r?\n?/g;
     // import history from "history" 패턴 찾기 및 삭제
-    const historyPattern2 = /import\s+history\s+from\s+["']history["'];?\s*\n?/g;
+    const historyPattern2 = /import\s+history\s+from\s+["']history["'];?\s*\r?\n?/g;
     
     let hasChanges = false;
     if (historyPattern1.test(content)) {

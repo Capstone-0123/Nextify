@@ -43,11 +43,26 @@ function stripCodeFences(text) {
 }
 
 /**
+ * 모델이 설명 텍스트를 섞어 보낸 경우를 대비해 첫 JSON 객체 블록을 추출.
+ * @param {string} text
+ * @returns {string}
+ */
+function extractFirstJsonObjectText(text) {
+  const t = stripCodeFences(text);
+  const first = t.indexOf('{');
+  const last = t.lastIndexOf('}');
+  if (first !== -1 && last !== -1 && last > first) {
+    return t.slice(first, last + 1).trim();
+  }
+  return t;
+}
+
+/**
  * @param {string} raw
  * @returns {{ path: string, content: string }[]}
  */
 function parseApplyJson(raw) {
-  const t = stripCodeFences(raw);
+  const t = extractFirstJsonObjectText(raw);
   const data = JSON.parse(t);
   if (!data || !Array.isArray(data.files)) {
     throw new Error('JSON 형식 오류: { "files": [ { "path", "content" } ] } 가 필요합니다.');
@@ -179,9 +194,29 @@ async function runAskApply(opts) {
     raw = await generateText(prompt);
   }
 
-  const patches = parseApplyJson(raw);
+  let patches = [];
+  try {
+    patches = parseApplyJson(raw);
+  } catch {
+    // 1차 파싱 실패 시, 스키마를 재강조해 한 번 더 요청
+    const retryPrompt = `${prompt}
+
+CRITICAL OUTPUT REQUIREMENT (RETRY):
+- Return ONLY a single JSON object.
+- The JSON MUST follow exactly this schema:
+{"files":[{"path":"<allowed path>","content":"<full file content>"}]}
+- Do not include markdown, prose, explanations, or extra keys.`;
+
+    try {
+      raw = await generateText(retryPrompt, { modelOptions: jsonModelOptions });
+    } catch {
+      raw = await generateText(retryPrompt);
+    }
+    patches = parseApplyJson(raw);
+  }
+
   if (patches.length === 0) {
-    const stripped = stripCodeFences(raw);
+    const stripped = extractFirstJsonObjectText(raw);
     try {
       const data = JSON.parse(stripped);
       if (data && typeof data.refusal === 'string') {
@@ -194,7 +229,7 @@ async function runAskApply(opts) {
     }
   }
   if (patches.length === 0) {
-    throw new Error('AI 응답에 적용할 files 항목이 없습니다.');
+    return [];
   }
 
   return applyAiFilesToDisk(projectRoot, patches, relPaths);
