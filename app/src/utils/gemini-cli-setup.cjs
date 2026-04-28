@@ -5,6 +5,19 @@ const GEMINI_PACKAGE = '@google/gemini-cli';
 let ensureInFlight = null;
 
 function resolveGeminiCommand() {
+  if (process.platform === 'win32') {
+    // Windows에서는 npm/yarn 전역 shim(.cmd)이 PATH 탐색에서 누락되는 경우가 있어
+    // cmd.exe를 통해 실제 커맨드 해석 결과를 우선 확인합니다.
+    const winProbe = spawnSync('cmd.exe', ['/d', '/s', '/c', 'gemini --version'], {
+      stdio: 'pipe',
+      encoding: 'utf8',
+      shell: false,
+    });
+    if (!winProbe.error && winProbe.status === 0) {
+      return 'gemini';
+    }
+  }
+
   const candidates = process.platform === 'win32' ? ['gemini.cmd', 'gemini'] : ['gemini'];
   for (const candidate of candidates) {
     const result = spawnSync(candidate, ['--version'], {

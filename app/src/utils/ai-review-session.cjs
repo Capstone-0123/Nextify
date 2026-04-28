@@ -37,7 +37,7 @@ function buildInteractiveSeedPrompt(session, sessionPath) {
     .join('\n');
 
   return [
-    'You are a careful senior engineer doing CODE REVIEW for React(Vite) -> Next.js migration.',
+    'You are a careful senior engineer doing CODE REVIEW for React(Vite) to Next.js migration.',
     'Respond in Korean.',
     'Review-only mode: never apply edits automatically.',
     getNextifyScopeRules(),
@@ -79,7 +79,7 @@ function toFwdSlash(p) {
 function buildShortInteractiveSeedPointerPrompt(seedAbsPath) {
   const fp = toFwdSlash(seedAbsPath);
   return [
-    'Nextify React(Vite)->Next.js CODE REVIEW: UTF-8 seed file has full instructions and change metadata.',
+    'Nextify React(Vite) to Next.js CODE REVIEW: UTF-8 seed file has full instructions and change metadata.',
     'Read that file completely first (Gemini CLI @ path if needed), then continue interactive Q&A in Korean; review-only; follow guardrails in the file:',
     `@${fp}`,
   ].join(' ');
@@ -345,24 +345,12 @@ async function runAiReviewSessionCliStream(opts) {
             // (stdout/stderr pipe는 TTY 감지를 깨서 gemini가 "No input provided via stdin"으로 종료할 수 있습니다.)
             // usage limit fallback은 exit code(현재 gemini-cli가 usage limit에서 code=42 반환)를 기준으로 처리합니다.
             const stdio = normalizedMode === 'stream' ? ['pipe', 'pipe', 'pipe'] : 'inherit';
-            const isWin = process.platform === 'win32';
-            if (isWin) {
-              // Windows + shell:true 조합에서 긴 인자/특수문자 파싱이 깨질 수 있어
-              // cmd.exe 래퍼로 명시 실행합니다.
-              child = spawn('cmd.exe', ['/d', '/s', '/c', candidate, ...effectiveArgs], {
-                stdio,
-                cwd: workingDirectory,
-                windowsHide: true,
-                shell: false,
-              });
-            } else {
-              child = spawn(candidate, effectiveArgs, {
-                stdio,
-                cwd: workingDirectory,
-                windowsHide: true,
-                shell: false,
-              });
-            }
+            child = spawn(candidate, effectiveArgs, {
+              stdio,
+              cwd: workingDirectory,
+              windowsHide: true,
+              shell: false,
+            });
             return candidate;
           } catch (err) {
             if (err && err.code === 'ENOENT') continue;
