@@ -8,6 +8,7 @@ const { cleanReactTrace } = require('./react-trace-cleaner.cjs');
 const { minimizeUseClientForBundle } = require('./useclient-minimizer.cjs');
 const { optimizeDataFetchingPlacement } = require('./data-fetch-migrator.cjs');
 const { generatePerformanceReport, createPreStep7Snapshot } = require('./performance-report.cjs');
+const { runFinalTypecheckReport } = require('./typecheck-report.cjs');
 const chalk = require('chalk');
 const path = require('path');
 
@@ -70,6 +71,17 @@ async function runStep7(projectRoot, options = {}) {
     console.log('React 흔적 정리 시작');
     await cleanReactTrace(projectRoot);
     console.log('React 흔적 정리 완료');
+
+    // 최종 타입 검사 (자동 수정 없이 잠재적 빌드 에러만 경고로 출력)
+    // - LLM 호출 없음, 토큰 0
+    // - 실패해도 마이그레이션 흐름을 막지 않음
+    try {
+      console.log('TypeScript 타입 검사 시작 (tsc --noEmit, 경고 출력)');
+      await runFinalTypecheckReport(projectRoot);
+      console.log('TypeScript 타입 검사 완료');
+    } catch (typecheckErr) {
+      console.log(chalk.gray(`   ⚠️  타입 검사 단계 무시: ${typecheckErr?.message || typecheckErr}`));
+    }
 
     // 성능 레포트 생성
     if (options.report) {
