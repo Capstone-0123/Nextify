@@ -11,6 +11,225 @@ const { cloneProject } = require('../utils/copy.cjs');
 const DEFAULT_LIGHTHOUSE_RUNS = 5;
 const DEFAULT_LIGHTHOUSE_WARMUP_RUNS = 1;
 
+// 마이그레이션 도구(app/) 루트. 이 파일은 app/src/step7/performance-report.cjs 이므로 두 단계 위가 app/.
+const MIGRATOR_APP_ROOT = path.resolve(__dirname, '..', '..');
+// lighthouse v12는 Node 18.18 이상을 요구합니다.
+const LIGHTHOUSE_MIN_NODE_MAJOR = 18;
+// require(esm)이 기본 동작하는 Node 버전 (Node 22.12+).
+const REQUIRE_ESM_DEFAULT_MAJOR = 22;
+const REQUIRE_ESM_DEFAULT_MINOR = 12;
+
+function parseNodeVersion(versionString = process.version) {
+  // process.version 예: 'v20.11.1'
+  const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(versionString);
+  if (!match) return { major: 0, minor: 0, patch: 0 };
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+  };
+}
+
+function assertNodeVersionSupportsLighthouse() {
+  const { major } = parseNodeVersion();
+  if (major === 0) return; // 알 수 없으면 통과 (이후 단계에서 다른 에러로 잡힘)
+  if (major < LIGHTHOUSE_MIN_NODE_MAJOR) {
+    throw new Error(
+      `Lighthouse 측정은 Node.js ${LIGHTHOUSE_MIN_NODE_MAJOR} 이상이 필요합니다.\n` +
+        `현재 Node 버전: ${process.version}\n` +
+        `해결: nvm/Volta/winget 등으로 Node LTS(권장: 22.x)를 설치한 뒤 다시 실행하세요.\n` +
+        `  - nvm:   nvm install --lts && nvm use --lts\n` +
+        `  - winget: winget install OpenJS.NodeJS.LTS\n`
+    );
+  }
+}
+
+/**
+ * 마이그레이션 도구의 app/node_modules 안에 lighthouse 패키지가 실제로 풀려 있는지 확인.
+ * package-lock.json은 있는데 node_modules가 비어있는 경우(npm install 미수행)도 잡습니다.
+ */
+async function lighthousePackageInstalled() {
+  const pkgPath = path.join(MIGRATOR_APP_ROOT, 'node_modules', 'lighthouse', 'package.json');
+  return fs.pathExists(pkgPath);
+}
+
+async function chromeLauncherPackageInstalled() {
+  const pkgPath = path.join(MIGRATOR_APP_ROOT, 'node_modules', 'chrome-launcher', 'package.json');
+  return fs.pathExists(pkgPath);
+}
+
+/**
+ * app/ 디렉터리에서 npm install 1회 시도 (자동 복구).
+ * 실패하면 사용자에게 수동 안내 메시지를 던집니다.
+ */
+async function tryAutoInstallMigratorDeps() {
+  const pm = detectPackageManager(MIGRATOR_APP_ROOT) || 'npm';
+  console.log(
+    chalk.yellow(
+      `\n⚠️  Lighthouse 측정을 위한 의존성(lighthouse, chrome-launcher)을 찾지 못했습니다.\n` +
+        `   ${MIGRATOR_APP_ROOT} 에서 ${pm} install 을 자동 실행합니다...`
+    )
+  );
+  try {
+    if (pm === 'yarn') {
+      await runCommand('yarn', ['install'], { cwd: MIGRATOR_APP_ROOT });
+    } else if (pm === 'pnpm') {
+      await runCommand('pnpm', ['install'], { cwd: MIGRATOR_APP_ROOT });
+    } else if (pm === 'bun') {
+      await runCommand('bun', ['install'], { cwd: MIGRATOR_APP_ROOT });
+    } else {
+      await runCommand('npm', ['install'], { cwd: MIGRATOR_APP_ROOT });
+    }
+    console.log(chalk.green('   ✔ 자동 설치 완료. 다시 시도합니다.\n'));
+    return true;
+  } catch (installErr) {
+    throw new Error(
+      `Lighthouse 의존성 자동 설치에 실패했습니다.\n` +
+        `다음 명령을 직접 실행한 뒤 다시 시도하세요.\n` +
+        `  cd "${MIGRATOR_APP_ROOT}"\n` +
+        `  ${pm} install\n` +
+        `(Windows PowerShell에서는 경로에 공백이 있어도 따옴표로 감싸세요)\n` +
+        `자동 설치 오류: ${installErr.message}`
+    );
+  }
+}
+
+/**
+ * lighthouse(ESM) + chrome-launcher(CJS) 의존성을 안전하게 로드.
+ * - lighthouse는 v10+ 부터 ESM-only이므로 dynamic import() 사용.
+ * - 모듈을 못 찾으면 1회에 한해 자동 설치 후 재시도.
+ * - 실패 케이스별로 정확한 한국어 에러 메시지를 던집니다.
+ */
+async function loadLighthouseDeps({ allowAutoInstall = true } = {}) {
+  if (!(await lighthousePackageInstalled()) || !(await chromeLauncherPackageInstalled())) {
+    if (allowAutoInstall) {
+      await tryAutoInstallMigratorDeps();
+      return loadLighthouseDeps({ allowAutoInstall: false });
+    }
+    throw new Error(
+      `lighthouse 또는 chrome-launcher 패키지가 ${MIGRATOR_APP_ROOT}/node_modules 에 없습니다.\n` +
+        `해결: 다음 명령을 실행하세요.\n` +
+        `  cd "${MIGRATOR_APP_ROOT}"\n` +
+        `  rm -rf node_modules package-lock.json && npm install\n` +
+        `(Windows PowerShell: Remove-Item -Recurse -Force node_modules, package-lock.json; npm install)`
+    );
+  }
+
+  let lighthouseModule;
+  let chromeLauncherModule;
+  try {
+    // lighthouse는 ESM이므로 반드시 dynamic import 사용 (require는 Node<22.12에서 ERR_REQUIRE_ESM).
+    lighthouseModule = await import('lighthouse');
+  } catch (e) {
+    const code = e?.code || '';
+    const msg = e?.message || String(e);
+    if (code === 'ERR_REQUIRE_ESM' || /ERR_REQUIRE_ESM/.test(msg)) {
+      throw new Error(
+        `lighthouse는 ESM 전용 패키지인데 현재 환경에서 import에 실패했습니다.\n` +
+          `현재 Node 버전: ${process.version}\n` +
+          `해결: Node.js ${REQUIRE_ESM_DEFAULT_MAJOR}.${REQUIRE_ESM_DEFAULT_MINOR} 이상(LTS 22.x 권장)으로 업그레이드하세요.\n` +
+          `원본 오류: ${msg}`
+      );
+    }
+    if (
+      code === 'ERR_MODULE_NOT_FOUND' ||
+      code === 'MODULE_NOT_FOUND' ||
+      /Cannot find (module|package)/.test(msg)
+    ) {
+      if (allowAutoInstall) {
+        await tryAutoInstallMigratorDeps();
+        return loadLighthouseDeps({ allowAutoInstall: false });
+      }
+      throw new Error(
+        `lighthouse 모듈을 가져오지 못했습니다.\n` +
+          `해결:\n` +
+          `  cd "${MIGRATOR_APP_ROOT}"\n` +
+          `  npm install\n` +
+          `원본 오류: ${msg}`
+      );
+    }
+    throw new Error(
+      `lighthouse 로드 중 알 수 없는 오류가 발생했습니다.\n` +
+        `현재 Node 버전: ${process.version}\n` +
+        `원본 오류: ${msg}`
+    );
+  }
+
+  try {
+    chromeLauncherModule = require('chrome-launcher');
+  } catch (e) {
+    if (allowAutoInstall) {
+      await tryAutoInstallMigratorDeps();
+      return loadLighthouseDeps({ allowAutoInstall: false });
+    }
+    throw new Error(
+      `chrome-launcher 모듈을 가져오지 못했습니다.\n` +
+        `해결:\n` +
+        `  cd "${MIGRATOR_APP_ROOT}"\n` +
+        `  npm install chrome-launcher\n` +
+        `원본 오류: ${e?.message || String(e)}`
+    );
+  }
+
+  const lighthouseRunner =
+    (typeof lighthouseModule === 'function' && lighthouseModule) ||
+    lighthouseModule?.default ||
+    lighthouseModule?.lighthouse ||
+    null;
+
+  if (typeof lighthouseRunner !== 'function') {
+    throw new Error(
+      `lighthouse는 로드되었지만 실행 함수를 찾지 못했습니다 (모듈이 깨진 것으로 보입니다).\n` +
+        `해결: app/ 의 의존성을 정리하고 다시 설치하세요.\n` +
+        `  cd "${MIGRATOR_APP_ROOT}"\n` +
+        `  rm -rf node_modules package-lock.json && npm install\n` +
+        `(Windows PowerShell: Remove-Item -Recurse -Force node_modules, package-lock.json; npm install)`
+    );
+  }
+
+  return { lighthouseRunner, chromeLauncher: chromeLauncherModule };
+}
+
+/**
+ * 시스템에 설치된 Chrome/Chromium/Edge 경로를 찾아 반환. 없으면 null.
+ */
+function findChromeInstallation(chromeLauncher) {
+  try {
+    const Launcher = chromeLauncher?.Launcher || chromeLauncher?.default?.Launcher;
+    if (Launcher && typeof Launcher.getInstallations === 'function') {
+      const installs = Launcher.getInstallations();
+      if (Array.isArray(installs) && installs.length > 0) return installs[0];
+    }
+  } catch {
+    // chrome-launcher 내부 탐지 실패도 "Chrome 미설치"로 간주
+  }
+  return null;
+}
+
+function chromeMissingErrorMessage() {
+  const platform = process.platform;
+  const lines = [
+    '시스템에 Chrome (또는 Chromium/Edge)이 설치되어 있지 않거나 자동 탐지에 실패했습니다.',
+    'Lighthouse는 헤드리스 Chrome으로 측정하므로 Chrome 계열 브라우저 설치가 필수입니다.',
+    '',
+    '설치 방법:',
+  ];
+  if (platform === 'win32') {
+    lines.push('  - 다운로드: https://www.google.com/chrome/');
+    lines.push('  - 또는 winget: winget install Google.Chrome');
+  } else if (platform === 'darwin') {
+    lines.push('  - 다운로드: https://www.google.com/chrome/');
+    lines.push('  - 또는 Homebrew: brew install --cask google-chrome');
+  } else {
+    lines.push('  - Ubuntu/Debian: sudo apt-get install -y google-chrome-stable 또는 chromium-browser');
+    lines.push('  - Fedora/RHEL: sudo dnf install -y google-chrome-stable 또는 chromium');
+  }
+  lines.push('');
+  lines.push('설치 후에도 같은 에러가 나면 환경변수 CHROME_PATH 에 실행 파일 경로를 지정하세요.');
+  lines.push('  예) Windows PowerShell: $env:CHROME_PATH="C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"');
+  return lines.join('\n');
+}
+
 async function getFreePort(preferred = 4173) {
   function canListen(port) {
     return new Promise((resolve) => {
@@ -187,41 +406,47 @@ async function startServer(projectRoot, kind, port) {
 }
 
 async function runLighthouseOnce(url) {
-  let lighthouseRunner;
-  let chromeLauncher;
-  try {
-    // Lazy-load so step1~6 don't require these deps.
-    const lighthouseModule = require('lighthouse');
-    lighthouseRunner =
-      (typeof lighthouseModule === 'function' && lighthouseModule) ||
-      lighthouseModule?.default ||
-      lighthouseModule?.lighthouse;
-    chromeLauncher = require('chrome-launcher');
-  } catch (e) {
-    throw new Error(
-      `성능 레포트 생성에 필요한 의존성이 없습니다. app 폴더에서 의존성을 설치하세요.\n` +
-        `예: (app 디렉터리에서) npm install\n` +
-        `원본 오류: ${e.message}`
-    );
+  // 1) Node 버전 사전 체크 (lighthouse v12는 Node 18+ 필요)
+  assertNodeVersionSupportsLighthouse();
+
+  // 2) lighthouse(ESM) + chrome-launcher 로드 (필요 시 자동 npm install 1회 시도)
+  const { lighthouseRunner, chromeLauncher } = await loadLighthouseDeps();
+
+  // 3) Chrome 사전 탐지
+  const chromePath = findChromeInstallation(chromeLauncher);
+  if (!chromePath) {
+    throw new Error(chromeMissingErrorMessage());
   }
 
   const baseTmp = path.join(os.tmpdir(), 'nextify-lighthouse');
   await fs.ensureDir(baseTmp);
   const userDataDir = await fs.mkdtemp(path.join(baseTmp, 'profile-'));
 
-  const chrome = await chromeLauncher.launch({
-    chromeFlags: [
-      '--headless',
-      '--no-sandbox',
-      '--disable-gpu',
-      `--user-data-dir=${userDataDir}`,
-    ],
-  });
+  // 4) Chrome 실행 (실패하면 별도 가이드)
+  let chrome;
   try {
-    if (typeof lighthouseRunner !== 'function') {
-      throw new Error('lighthouse 모듈 로드 실패: 실행 함수를 찾지 못했습니다.');
-    }
-
+    chrome = await chromeLauncher.launch({
+      chromePath,
+      chromeFlags: [
+        '--headless',
+        '--no-sandbox',
+        '--disable-gpu',
+        `--user-data-dir=${userDataDir}`,
+      ],
+    });
+  } catch (launchErr) {
+    throw new Error(
+      `Chrome 헤드리스 실행에 실패했습니다.\n` +
+        `시도한 Chrome 경로: ${chromePath}\n` +
+        `현재 OS: ${process.platform}\n` +
+        `해결 가이드:\n` +
+        `  - 다른 Chrome 인스턴스가 실행 중이면 종료한 뒤 다시 시도하세요.\n` +
+        `  - 백신/회사 보안 정책이 Chrome 헤드리스를 차단하는지 확인하세요.\n` +
+        `  - Linux 서버라면 의존 라이브러리(libnss3, libgbm1 등) 설치 여부를 확인하세요.\n` +
+        `원본 오류: ${launchErr?.message || String(launchErr)}`
+    );
+  }
+  try {
     const options = {
       port: chrome.port,
       logLevel: 'error',
