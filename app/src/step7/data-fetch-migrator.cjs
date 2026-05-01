@@ -122,6 +122,8 @@ async function optimizeDataFetchingPlacement(projectRoot) {
 - [ ] JSX에서 참조하는 모든 변수/함수가 여전히 정의되어 있는가? (예: onClick={handleX}의 handleX가 여전히 있는가?)
 - [ ] React import가 (사용 중이라면) 그대로 유지되는가? \`import { useState } from 'react'\`가 한 줄에 여러 hook을 가져온다면, 그 중 하나만 제거하고 나머지는 유지하는가?
 - [ ] 'use client' 지시문은 hook이 남아있다면 그대로 유지되는가?
+- [ ] 변경 결과 파일의 모든 모듈-스코프 \`let\`/\`const\`/\`var\` 선언과 import 식별자가 어딘가에서 최소 1회 이상 참조되는가? (TS \`noUnusedLocals\` 빌드 에러 방지: "declared but its value is never read")
+- [ ] 자기-설명 주석("Moved to ...", "SSR-safe", "Intentional SSR-breaking" 등)을 추가하지 않았는가?
 
 [좋은 예 — "데이터 fetch 전용" useEffect 이동]
 원본 (page.tsx, 'use client' 사용):

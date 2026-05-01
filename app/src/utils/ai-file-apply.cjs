@@ -1,6 +1,7 @@
 const fs = require('fs-extra');
 const path = require('path');
 const { generateText, getNextifyScopeRules } = require('./gemini-client.cjs');
+const { sweepAfterAiApply } = require('./post-ai-sweep.cjs');
 
 /** @param {string} p */
 function normRelKey(p) {
@@ -232,7 +233,30 @@ CRITICAL OUTPUT REQUIREMENT (RETRY):
     return [];
   }
 
-  return applyAiFilesToDisk(projectRoot, patches, relPaths);
+  const written = await applyAiFilesToDisk(projectRoot, patches, relPaths);
+
+  // ──────────────────────────────────────────────────────────────────
+  // 결정론적 후처리 (Gemini 호출 없음, 토큰 비용 0).
+  // - 사용처 없는 `let X = INIT; if (typeof <browserGlobal> ...) { X = ... }` 제거
+  // - "Intentional SSR-breaking" 같은 AI 자기-설명 주석 제거
+  // 안전망 자체의 실패는 마이그레이션을 막지 않습니다.
+  // ──────────────────────────────────────────────────────────────────
+  try {
+    const { removedTargets } = await sweepAfterAiApply(projectRoot, written);
+    if (removedTargets.length > 0) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `   🧹 사용처 없는 dead-guard ${removedTargets.length}개를 자동 정리했습니다.`
+      );
+    }
+  } catch (sweepErr) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `   ⚠️  AI 후처리 sweep 중 오류(무시 가능): ${sweepErr?.message || sweepErr}`
+    );
+  }
+
+  return written;
 }
 
 module.exports = {

@@ -157,6 +157,7 @@ async function minimizeUseClientForBundle(projectRoot) {
 - [ ] 함수 본문, JSX, return 문이 원본과 완벽히 동일한가?
 - [ ] 변경 사항이 오직 'use client' 지시문 한 줄 삭제뿐인가?
 - [ ] 파일 줄 수가 원본 대비 1~2줄만 줄었는가? (3줄 이상 줄었다면 과잉 삭제이므로 금지)
+- [ ] 모듈-스코프 \`let\`/\`const\`/\`var\` 선언과 import 식별자 모두가 여전히 어딘가에서 최소 1회 이상 참조되는가? (TS \`noUnusedLocals\` 빌드 에러 방지)
 
 [좋은 예]
 원본:
