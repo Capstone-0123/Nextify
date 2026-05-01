@@ -699,11 +699,13 @@ function migrateUseNavigate(sourceFile) {
 
 /**
  * useParams import를 react-router-dom -> next/navigation으로 변환
- * 내부 사용 로직(예: const { id } = useParams())은 유지한다.
+ * 또한 next/navigation의 useParams는 `T | null`을 반환하므로,
+ * 객체 디스트럭처 사용처(`const { id } = useParams<...>()`)에 `?? {}`를 자동으로 추가해 빌드 에러를 방지한다.
  */
 function migrateUseParams(sourceFile) {
   let modified = false;
   let hasUseParamsFromReactRouter = false;
+  let hasUseParamsFromNextNav = false;
 
   const imports = sourceFile.getImportDeclarations();
   for (const importDecl of imports) {
@@ -725,24 +727,80 @@ function migrateUseParams(sourceFile) {
     }
   }
 
-  if (!hasUseParamsFromReactRouter) {
-    return modified;
-  }
-
+  // 이미 next/navigation의 useParams를 사용하고 있는 파일도 사용처 보정 대상
   const existingNextNav = sourceFile.getImportDeclaration(
     (decl) => decl.getModuleSpecifierValue() === 'next/navigation',
   );
   if (existingNextNav) {
-    const hasUseParams = existingNextNav.getNamedImports().some((n) => n.getName() === 'useParams');
-    if (!hasUseParams) {
-      existingNextNav.addNamedImport('useParams');
+    hasUseParamsFromNextNav = existingNextNav
+      .getNamedImports()
+      .some((n) => n.getName() === 'useParams');
+  }
+
+  if (!hasUseParamsFromReactRouter && !hasUseParamsFromNextNav) {
+    return modified;
+  }
+
+  if (hasUseParamsFromReactRouter) {
+    if (existingNextNav) {
+      const hasUseParams = existingNextNav.getNamedImports().some((n) => n.getName() === 'useParams');
+      if (!hasUseParams) {
+        existingNextNav.addNamedImport('useParams');
+        modified = true;
+      }
+    } else {
+      sourceFile.addImportDeclaration({
+        namedImports: ['useParams'],
+        moduleSpecifier: 'next/navigation',
+      });
       modified = true;
     }
-  } else {
-    sourceFile.addImportDeclaration({
-      namedImports: ['useParams'],
-      moduleSpecifier: 'next/navigation',
-    });
+  }
+
+  // 사용처 보정: next/navigation의 useParams는 T | null을 반환하므로,
+  // `const { id } = useParams<...>();` 처럼 객체 디스트럭처를 하면 TS 빌드 에러가 난다.
+  // 안전하게 `... ?? {}` 폴백을 자동으로 붙인다.
+  if (patchUseParamsCallSites(sourceFile)) {
+    modified = true;
+  }
+
+  return modified;
+}
+
+/**
+ * 동일 파일 내 useParams 호출 사용처를 점검해 빌드 에러를 막는 폴백을 추가.
+ * - 객체 디스트럭처 좌변(`const { id } = useParams<T>()`) 호출에만 `?? {}` 추가.
+ * - 이미 폴백/단언이 붙은 호출(`useParams() ?? ...`, `useParams() as ...`, `useParams()!` 등)은 건드리지 않음.
+ * - 디스트럭처가 아닌 호출(`const params = useParams()`)은 안전하므로 변경하지 않음.
+ */
+function patchUseParamsCallSites(sourceFile) {
+  let modified = false;
+
+  const callExpressions = sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression);
+  for (const callExpr of callExpressions) {
+    const expression = callExpr.getExpression();
+    if (!expression || expression.getText() !== 'useParams') continue;
+
+    // 부모 검사: 변수 선언자에서 객체 디스트럭처 패턴인 경우만 대상
+    const varDecl = callExpr.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
+    if (!varDecl) continue;
+
+    // 변수 초기화식의 최상위 노드가 이 callExpr 자신이거나, 우리가 다루는 패턴인지 확인
+    // (이미 `?? {}`/`as ...`/`!` 등이 감싸고 있으면 부모가 다른 종류로 잡힌다)
+    const initializer = varDecl.getInitializer();
+    if (!initializer) continue;
+    if (initializer !== callExpr) continue; // 이미 다른 표현식으로 감싸져 있으면 건너뜀
+
+    // 좌변이 객체 디스트럭처여야 함
+    const nameNode = varDecl.getNameNode();
+    if (!nameNode || nameNode.getKind() !== SyntaxKind.ObjectBindingPattern) continue;
+
+    // 호출의 텍스트 자체에 '??' 또는 'as '가 이미 들어가 있으면 보호 (방어적)
+    const callText = callExpr.getText();
+    if (/\?\?\s*\{/.test(callText)) continue;
+
+    // 안전한 폴백 추가
+    callExpr.replaceWithText(`${callText} ?? {}`);
     modified = true;
   }
 
