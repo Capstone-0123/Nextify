@@ -1631,14 +1631,109 @@ async function migrateBrowserAPIs(projectRoot) {
     discoverySources: candidateRelPathsArr,
     instructionForAi: `다음 파일들에서 브라우저 전용 API 접근이 서버 렌더/Next.js App Router 환경에서 깨질 수 있는 부분을 찾아서 수정하세요.
 
-요구사항:
-1) window/document/localStorage/sessionStorage/navigator 등은 서버에서 실행되지 않도록 처리하세요.
-   - 최상단(모듈 스코프)에서 직접 접근하는 코드는 제거하거나 typeof window !== 'undefined' 가드로 감싸고,
-   - 렌더 중 실행되는 값이면 useEffect로 옮기고 hydration-safe하게 상태 기본값을 둡니다.
-2) DOM 이벤트 등록/해제(addEventListener/removeEventListener)는 useEffect 안에서 수행하고 cleanup을 추가하세요.
-3) localStorage/sessionStorage 읽기/쓰기 로직은 서버에서 실행되지 않게 보호하세요.
-4) 필요한 경우 해당 파일(또는 관련 컴포넌트)에 'use client'를 추가해 클라이언트 전용으로 실행되게 만드세요.
-5) 코드가 빌드되도록 타입/문법을 유지하고, 불필요한 TODO 주석을 추가하지 마세요.
+[작업 범위(매우 중요)]
+이 작업의 유일한 목적은 브라우저 전용 API(window/document/localStorage/sessionStorage/navigator/location/history/matchMedia/IntersectionObserver/ResizeObserver/MutationObserver/requestAnimationFrame 등)가 서버 렌더 시 ReferenceError를 일으키지 않도록 보호하는 것입니다.
+파일에 있는 다른 코드(특히 React hook과 그 import)는 절대 변경/삭제하지 마세요.
+
+[절대 변경 금지(엄수)]
+다음 항목은 한 글자도 추가/삭제/수정하지 마세요. 의심스러우면 그 파일을 원본 그대로 반환하세요.
+- import 문 — 특히 'react'에서 가져오는 hook들(useState, useEffect, useLayoutEffect, useInsertionEffect, useRef, useMemo, useCallback, useReducer, useContext, useImperativeHandle, useSyncExternalStore, useTransition, useDeferredValue, useId 등)은 사용 중인 한 절대 제거 금지
+- 'next/navigation', 'next/router'에서 가져오는 hook import (useRouter, useSearchParams, usePathname 등)
+- 사용 중인 모든 hook 호출
+- 사용자 정의 hook(use로 시작하는 함수)
+- 함수/컴포넌트의 시그니처, props, 타입, 인터페이스
+- JSX 구조, JSX 안의 이벤트 핸들러(onClick 등)
+- 데이터 패칭 코드, 비즈니스 로직, 상태 관리 호출(zustand의 create 등)
+- 주석, 빈 줄, 들여쓰기, 따옴표 종류
+
+[허용되는 변경(이것만 가능)]
+1) 모듈 스코프(파일 최상단, 함수/컴포넌트 바깥)에서 브라우저 API를 직접 참조하는 코드만 다음 중 하나로 처리:
+   - 가능하면 그 파일에 이미 정의된 컴포넌트/함수 안으로 이동
+   - 또는 \`typeof window !== 'undefined'\` (또는 typeof document/navigator) 가드로 감싸고, 서버에서는 안전한 기본값 사용
+2) 렌더 본문(JSX 직전)에서 직접 브라우저 API를 참조하는 코드는 useEffect 안으로 이동하고 useState로 hydration-safe한 기본값 유지
+   - 새 useState/useEffect를 추가할 때만 'react' import에 해당 hook을 추가 (이미 import되어 있다면 추가하지 말고 그대로 유지)
+3) DOM 이벤트 등록/해제(addEventListener/removeEventListener)는 useEffect 안에서 수행하고 cleanup return을 추가
+4) localStorage/sessionStorage 읽기/쓰기는 \`typeof window !== 'undefined'\` 또는 useEffect 안으로 이동
+5) 위 변경으로 클라이언트 실행이 필요해진 파일에만 최상단에 'use client' 한 줄 추가 (이미 있으면 추가하지 말 것)
+
+[추가가 아닌 "축소" 금지]
+- 기존 useState/useEffect/useRef/useMemo/useCallback/useReducer 호출을 절대 제거하지 마세요.
+- 기존 import에서 사용 중인 named import를 절대 제거하지 마세요.
+- "리팩터링 김에" 코드를 단순화하지 마세요. 오직 브라우저 API 가드/이동만 수행하세요.
+
+[자기 검증 체크리스트 — 출력 직전에 반드시 수행]
+각 파일에 대해 순서대로 점검. 하나라도 NO면 그 파일은 원본 그대로 반환하세요.
+- [ ] 원본의 모든 import가 그대로 유지되는가? (브라우저 API 보호를 위해 새 hook을 추가할 때만 named import에 추가, 절대 삭제 없음)
+- [ ] 원본에 있던 모든 useState/useEffect/useRef/useMemo/useCallback/useReducer 호출이 그대로 남아있는가?
+- [ ] JSX에서 참조하는 모든 변수/함수가 여전히 정의되어 있는가?
+- [ ] 변경 사항이 오직 (a) 브라우저 API 가드 추가, (b) 모듈 스코프 → 함수/effect 안으로 이동, (c) 'use client' 추가뿐인가?
+- [ ] 이미 \`typeof window\` 등으로 가드된 코드를 중복 처리하지 않았는가?
+
+[좋은 예 — 모듈 스코프 가드]
+원본:
+\`\`\`
+const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+export const Theme = () => <div>{isDark ? 'dark' : 'light'}</div>;
+\`\`\`
+수정 후(허용):
+\`\`\`
+const isDark = typeof window !== 'undefined'
+  ? window.matchMedia('(prefers-color-scheme: dark)').matches
+  : false;
+export const Theme = () => <div>{isDark ? 'dark' : 'light'}</div>;
+\`\`\`
+
+[좋은 예 — 렌더 중 접근 → useEffect로]
+원본:
+\`\`\`
+'use client';
+import { useState } from 'react';
+export default function Width() {
+  const [w, setW] = useState(window.innerWidth);
+  return <div>{w}</div>;
+}
+\`\`\`
+수정 후(허용 — 기존 useState 호출/import는 보존, useEffect만 추가):
+\`\`\`
+'use client';
+import { useState, useEffect } from 'react';
+export default function Width() {
+  const [w, setW] = useState(0);
+  useEffect(() => { setW(window.innerWidth); }, []);
+  return <div>{w}</div>;
+}
+\`\`\`
+
+[나쁜 예 — 절대 이렇게 하지 마세요]
+원본:
+\`\`\`
+'use client';
+import { useState, useEffect } from 'react';
+export default function Counter() {
+  const [n, setN] = useState(0);
+  useEffect(() => { document.title = String(n); }, [n]);
+  return <button onClick={() => setN(n + 1)}>{n}</button>;
+}
+\`\`\`
+잘못된 수정(금지 — useState/useEffect 호출이 사라지고 import도 망가짐):
+\`\`\`
+'use client';
+export default function Counter() {
+  if (typeof document !== 'undefined') document.title = '0';
+  return <button>0</button>;
+}
+\`\`\`
+이 경우 올바른 동작: \`document.title = String(n)\`은 이미 useEffect 안에 있어 SSR 안전합니다. 이 파일은 변경 불필요. 원본 그대로 반환.
+
+[불확실할 때의 기본 동작]
+- 안전하게 가드/이동할 수 없으면 원본을 그대로 반환하세요.
+- 이미 보호되어 있는(typeof window 등) 코드는 다시 건드리지 마세요.
+- 변경할 파일이 하나도 없다면 \`{"files":[]}\`로 반환해도 됩니다.
+
+[출력 형식]
+- 변경한 파일만 files 배열에 포함.
+- 새 파일 생성 금지.
+- 불필요한 TODO/FIXME/NOTE 주석 추가 금지.
 
 반드시 서버에서 실행 가능한 코드만 남기고, 동작을 최대한 유지하세요.`,
     manualFallback: `수동 처리 필요: 브라우저 전용 API 사용 코드를 Next.js(App Router) 서버/클라이언트 경계에 맞게 보호/분리하세요.\n- 후보 파일(일부): ${candidateRelPathsArr
