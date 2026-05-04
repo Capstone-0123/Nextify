@@ -1,6 +1,28 @@
 #!/usr/bin/env node
-// .env.local 파일 로드 (가장 먼저 실행)
-require('dotenv').config({ path: require('path').join(__dirname, '.env.local') });
+const path = require('path');
+const dotenv = require('dotenv');
+
+(function loadProjectEnvFiles() {
+  const fs = require('fs');
+  const root = process.cwd();
+  const merged = {};
+  for (const name of ['.env', '.env.local']) {
+    const abs = path.join(root, name);
+    if (!fs.existsSync(abs)) continue;
+    try {
+      Object.assign(merged, dotenv.parse(fs.readFileSync(abs, 'utf8')));
+    } catch {
+      // 손상된 파일 등은 건너뜀
+    }
+  }
+  for (const [k, v] of Object.entries(merged)) {
+    if (process.env[k] === undefined) {
+      process.env[k] = v;
+    }
+  }
+})();
+// 전역 패키지 옆 .env.local: 위·셸에서 아직 없는 변수만 채움
+dotenv.config({ path: path.join(__dirname, '.env.local') });
 
 // =========================================================
 // Node.js 버전 사전 체크 (가장 먼저, 다른 require보다 앞)
@@ -62,7 +84,6 @@ require('dotenv').config({ path: require('path').join(__dirname, '.env.local') }
 const { Command } = require('commander');
 const chalk = require('chalk');
 const inquirer = require('inquirer');
-const path = require('path');
 
 // 모듈 경로 변경 (step 폴더의 index.cjs )
 const { runStep1 } = require('./src/step1/index.cjs');

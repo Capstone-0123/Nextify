@@ -1,10 +1,10 @@
 {
   "name": "nextify-cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "CLI tool for migrating React (Vite) projects to Next.js",
   "license": "MIT",
   "bin": {
-    "migrate-next": "./cli.cjs"
+    "migrate-next": "cli.cjs"
   },
   "type": "commonjs",
   "files": [
