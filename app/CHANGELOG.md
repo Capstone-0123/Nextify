@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2 — 2026-05-04
+
+### Changed
+
+- **프로젝트 루트 `.env` / `.env.local`:** `migrate-next` 실행 시 `process.cwd()` 기준으로 두 파일을 병합해 적용합니다 (파일 간 우선순위는 `.env.local` > `.env`). **셸/OS에 이미 있는 환경 변수는 건드리지 않습니다.** 그다음 패키지 옆 `__dirname/.env.local` 은 dotenv로 남은 키만 채웁니다.
+
 ## 0.1.1 — 2026-05-04
 
 ### Added
