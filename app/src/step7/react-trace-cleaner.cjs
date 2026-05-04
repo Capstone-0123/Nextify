@@ -3,7 +3,54 @@
 
 const fs = require('fs-extra');
 const path = require('path');
+const chalk = require('chalk');
 const { spawnSync } = require('child_process');
+const { detectPackageManager } = require('../utils/project-info.cjs');
+
+function spawnInstall(cmd, args, cwd) {
+  return spawnSync(cmd, args, {
+    cwd,
+    stdio: 'inherit',
+    shell: process.platform === 'win32',
+  });
+}
+
+/**
+ * eslint-config-next를 devDependency로 설치합니다.
+ * npm은 peer dependency 충돌(ERESOLVE)이 자주 나므로 실패 시 --legacy-peer-deps로 1회 재시도합니다.
+ * @returns {boolean} 설치 성공 여부
+ */
+function tryInstallEslintConfigNext(projectRoot) {
+  const pm = detectPackageManager(projectRoot);
+
+  if (pm === 'yarn') {
+    const r = spawnInstall('yarn', ['add', '-D', 'eslint-config-next'], projectRoot);
+    return r.status === 0;
+  }
+  if (pm === 'pnpm') {
+    const r = spawnInstall('pnpm', ['add', '-D', 'eslint-config-next'], projectRoot);
+    return r.status === 0;
+  }
+  if (pm === 'bun') {
+    const r = spawnInstall('bun', ['add', '-d', 'eslint-config-next'], projectRoot);
+    return r.status === 0;
+  }
+
+  const first = spawnInstall('npm', ['install', '-D', 'eslint-config-next'], projectRoot);
+  if (first.status === 0) return true;
+
+  console.log(
+    chalk.yellow(
+      '\n⚠️  npm install eslint-config-next 가 peer dependency 충돌로 실패했습니다. --legacy-peer-deps 로 재시도합니다.\n'
+    )
+  );
+  const second = spawnInstall(
+    'npm',
+    ['install', '-D', 'eslint-config-next', '--legacy-peer-deps'],
+    projectRoot
+  );
+  return second.status === 0;
+}
 
 //=========================================================
 // React 흔적 정리 메인 함수
@@ -185,14 +232,10 @@ async function cleanPackageJson(projectRoot) {
 
   // 4. eslint-config-next가 없으면 실제 설치 명령 실행
   if (!hasEslintConfigNext) {
-    const installResult = spawnSync('npm', ['install', '-D', 'eslint-config-next'], {
-      cwd: projectRoot,
-      stdio: 'inherit',
-      shell: process.platform === 'win32',
-    });
+    const installedOk = tryInstallEslintConfigNext(projectRoot);
 
-    // 설치 실패 시 최소한 package.json에는 반영되도록 fallback
-    if (installResult.status !== 0) {
+    // 설치 실패 시 최소한 package.json에는 반영되도록 fallback (node_modules에는 없을 수 있음)
+    if (!installedOk) {
       const fallbackPackageJson = await fs.readJson(packageJsonPath);
       if (!fallbackPackageJson.devDependencies) {
         fallbackPackageJson.devDependencies = {};
@@ -201,6 +244,21 @@ async function cleanPackageJson(projectRoot) {
         fallbackPackageJson.devDependencies['eslint-config-next'] = 'latest';
         await fs.writeJson(packageJsonPath, fallbackPackageJson, { spaces: 2 });
       }
+
+      console.log(
+        chalk.yellow.bold('\n⚠️  React 흔적 정리: eslint-config-next 자동 설치에 실패했습니다.\n') +
+          chalk.yellow(
+            '   마이그레이션 단계 자체는 계속 진행되지만, ESLint용 패키지는 아직 설치되지 않았을 수 있습니다.\n\n' +
+              '   흔한 원인:\n' +
+              '   • npm ERESOLVE: next와 react/react-dom 버전이 peer dependency 규칙과 맞지 않음\n' +
+              '   • 로그에 "react@undefined"가 보이면 package-lock.json 과 package.json 불일치 또는 손상 가능성\n\n' +
+              '   수동으로 프로젝트 루트에서 다음을 시도하세요:\n' +
+              `   • npm:  npm install -D eslint-config-next --legacy-peer-deps\n` +
+              `   • 또는: npm install --legacy-peer-deps\n` +
+              `   • yarn/pnpm 사용 시: 해당 도구로 eslint-config-next 추가 후 install\n\n` +
+              '   (Node가 spawn 시 shell 옵션 경고를 내면 DEP0190 — 보안 권고일 뿐, 위 npm 실패와는 별개입니다.)\n'
+          )
+      );
     }
   }
 }

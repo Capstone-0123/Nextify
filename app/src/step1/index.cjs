@@ -7,6 +7,7 @@ const {
   migrateViteDefine,
   updateTsConfig,
 } = require('./step1-env.cjs');
+const { ensureWatcherFriendlySettings } = require('../utils/watcher-friendly.cjs');
 const chalk = require('chalk');
 
 /**
@@ -14,6 +15,15 @@ const chalk = require('chalk');
  */
 async function runStep1(projectRoot) {
   console.log(chalk.blue.bold('파트 1 시작'));
+
+  // 0. (사전) 워처 친화 설정 — .ai-migration/, node_modules/ 등을 .vscode/settings.json에서 제외해
+  //    F5 Extension Development Host에서 EMFILE 무한 루프가 뜨지 않도록 함.
+  //    파싱 실패/쓰기 실패 등은 모두 마이그레이션을 막지 않음.
+  try {
+    await ensureWatcherFriendlySettings(projectRoot);
+  } catch {
+    // ignore — 안전망 자체가 마이그레이션을 막지 않음
+  }
 
   // 1. package.json 수정
   console.log('package.json 의존성 및 스크립트 수정 시작');

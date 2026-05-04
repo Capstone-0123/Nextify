@@ -2,6 +2,63 @@
 // .env.local 파일 로드 (가장 먼저 실행)
 require('dotenv').config({ path: require('path').join(__dirname, '.env.local') });
 
+// =========================================================
+// Node.js 버전 사전 체크 (가장 먼저, 다른 require보다 앞)
+//  - Lighthouse v12가 Node 18.18+ 를 요구하고, ts-morph 등 일부 의존성도 최신 Node에서 안정.
+//  - 미달 시 step1을 시작하기 전에 즉시 종료해서 팀원들이 시간을 낭비하지 않게 합니다.
+//  - 권장 LTS 22.x. 의존성 미설치 등 다른 에러로 메시지가 가려지지 않도록 가장 먼저 검사합니다.
+// =========================================================
+(function ensureNodeVersion() {
+  const REQUIRED_MAJOR = 18;
+  const REQUIRED_MINOR = 18;
+  const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(process.version || '');
+  if (!match) return; // 알 수 없으면 통과
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  const tooOld =
+    major < REQUIRED_MAJOR || (major === REQUIRED_MAJOR && minor < REQUIRED_MINOR);
+  if (!tooOld) return;
+
+  // chalk가 아직 require되지 않았을 수 있으니 ANSI escape를 직접 사용 (의존성 무관 안전)
+  const RED = '\x1b[31m';
+  const YELLOW = '\x1b[33m';
+  const CYAN = '\x1b[36m';
+  const RESET = '\x1b[0m';
+  const BOLD = '\x1b[1m';
+
+  const lines = [
+    '',
+    `${RED}${BOLD}❌ Node.js 버전이 너무 낮습니다.${RESET}`,
+    `${YELLOW}현재 Node 버전: ${process.version}${RESET}`,
+    `${YELLOW}필요 최소 버전: v${REQUIRED_MAJOR}.${REQUIRED_MINOR}.0 (권장: LTS 22.x)${RESET}`,
+    '',
+    'Nextify는 Lighthouse(v12) 기반 성능 측정과 최신 ESM 모듈에 의존하므로',
+    `Node.js v${REQUIRED_MAJOR}.${REQUIRED_MINOR} 이상이 필요합니다.`,
+    '',
+    `${CYAN}업그레이드 방법:${RESET}`,
+  ];
+
+  if (process.platform === 'win32') {
+    lines.push('  - winget:  winget install OpenJS.NodeJS.LTS');
+    lines.push('  - 직접 다운로드: https://nodejs.org/ko/download');
+    lines.push('  - nvm-windows: https://github.com/coreybutler/nvm-windows/releases');
+    lines.push('      예) nvm install lts && nvm use lts');
+  } else if (process.platform === 'darwin') {
+    lines.push('  - Homebrew: brew install node@22');
+    lines.push('  - nvm:      nvm install --lts && nvm use --lts');
+  } else {
+    lines.push('  - nvm:           nvm install --lts && nvm use --lts');
+    lines.push('  - NodeSource:    https://github.com/nodesource/distributions');
+  }
+
+  lines.push('');
+  lines.push(`${YELLOW}업그레이드 후 ${BOLD}node -v${RESET}${YELLOW}로 버전을 확인하고 다시 실행하세요.${RESET}`);
+  lines.push('');
+
+  console.error(lines.join('\n'));
+  process.exit(1);
+})();
+
 const { Command } = require('commander');
 const chalk = require('chalk');
 const inquirer = require('inquirer');
@@ -409,10 +466,20 @@ program
 program
   .command('step7')
   .description('7단계: next/image, next/font, Dynamic Import 적용 및 React 흔적 정리')
+  .option('--no-typecheck-autofix', '결정론적 TypeScript 자동 수정을 비활성화 (기본: 활성화, 토큰 비용 0)')
+  .option('--no-typecheck-ai-fix', 'AI 기반 잔여 빌드 에러 보정을 비활성화 (기본: 활성화, GEMINI_API_KEY 필요)')
+  .option(
+    '--typecheck-ai-fix-budget <n>',
+    'AI 보정 시 1회 세션에서 의뢰할 최대 파일 수 (기본 5)',
+    (v) => Number(v),
+  )
   .action(async (options) => {
     try {
-      // Step 7 실행
-      await runStep7(process.cwd());
+      await runStep7(process.cwd(), {
+        typecheckAutofix: options.typecheckAutofix,
+        typecheckAiFix: options.typecheckAiFix,
+        typecheckAiFixBudget: options.typecheckAiFixBudget,
+      });
     } catch (error) {
       console.error(chalk.red('\n❌ Step 7 오류 발생:'), error);
       process.exit(1);

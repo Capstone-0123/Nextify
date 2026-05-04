@@ -8,6 +8,7 @@ const { cleanReactTrace } = require('./react-trace-cleaner.cjs');
 const { minimizeUseClientForBundle } = require('./useclient-minimizer.cjs');
 const { optimizeDataFetchingPlacement } = require('./data-fetch-migrator.cjs');
 const { generatePerformanceReport, createPreStep7Snapshot } = require('./performance-report.cjs');
+const { runFinalTypecheckReport } = require('./typecheck-report.cjs');
 const chalk = require('chalk');
 const path = require('path');
 
@@ -70,6 +71,23 @@ async function runStep7(projectRoot, options = {}) {
     console.log('React 흔적 정리 시작');
     await cleanReactTrace(projectRoot);
     console.log('React 흔적 정리 완료');
+
+    // 최종 타입 검사 + 자동 수정
+    // 흐름: tsc 1차 → 결정론적 autofix(토큰 0) → tsc 2차 → AI 1회 보정(옵션) → tsc 3차 → 회귀 롤백 → 최종 리포트
+    // - 결정론(autofix)은 항상 시도, 토큰 비용 0
+    // - AI 보정은 GEMINI_API_KEY 있을 때만 자동 실행, 파일당 1회·최대 N개 파일 캡으로 비용 통제
+    // - 실패해도 마이그레이션 흐름을 막지 않음 (best-effort)
+    try {
+      console.log('TypeScript 타입 검사 + 자동 수정 시작 (tsc --noEmit)');
+      await runFinalTypecheckReport(projectRoot, {
+        autofix: options.typecheckAutofix !== false,
+        aiFix: options.typecheckAiFix !== false,
+        aiFixBudget: options.typecheckAiFixBudget,
+      });
+      console.log('TypeScript 타입 검사 완료');
+    } catch (typecheckErr) {
+      console.log(chalk.gray(`   ⚠️  타입 검사 단계 무시: ${typecheckErr?.message || typecheckErr}`));
+    }
 
     // 성능 레포트 생성
     if (options.report) {
