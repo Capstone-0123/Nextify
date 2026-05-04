@@ -87,6 +87,10 @@ const {
   createStepReviewSession,
   createSnapshotReviewSession,
   openReviewDiff,
+  getReviewExtensionStatus,
+  focusReviewPanel,
+  installReviewExtension,
+  REVIEW_EXTENSION_MARKET_ID,
 } = require('./src/utils/review-session.cjs');
 const { generateText, createMigrationPrompt, generateTextStream } = require('./src/utils/gemini-client.cjs');
 const { runAskApply } = require('./src/utils/ai-file-apply.cjs');
@@ -95,10 +99,59 @@ const { ensureGeminiCliReady } = require('./src/utils/gemini-cli-setup.cjs');
 const { printRelPathsBlock } = require('./src/utils/path-list-print.cjs');
 const { generatePerformanceReport } = require('./src/step7/performance-report.cjs');
 const fs = require('fs-extra');
+const pkg = require('./package.json');
+
+async function ensureReviewExtensionReady() {
+  const status = getReviewExtensionStatus();
+  if (status.editorAvailable && status.installed) {
+    return { installed: true, status };
+  }
+
+  if (!status.editorAvailable) {
+    console.log(chalk.yellow('VS Code/Cursor 명령(`code` 또는 `cursor`)을 찾지 못했습니다.'));
+    console.log(chalk.white('   - 에디터를 설치한 뒤 아래에서 확장을 설치하세요:'));
+    console.log(chalk.white(`     https://marketplace.visualstudio.com/items?itemName=${REVIEW_EXTENSION_MARKET_ID}`));
+    return { installed: false, status };
+  }
+
+  const assumeYes = process.env.NEXTIFY_ASSUME_YES === '1';
+  let doInstall = assumeYes;
+  if (!assumeYes) {
+    const answer = await inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'doInstall',
+        default: true,
+        message: 'Nextify Review 확장이 설치되어 있지 않습니다. 지금 설치할까요?',
+      },
+    ]);
+    doInstall = answer.doInstall;
+  }
+
+  if (!doInstall) {
+    console.log(chalk.white(`   - 수동: code --install-extension ${REVIEW_EXTENSION_MARKET_ID}`));
+    console.log(chalk.white(`   - 또는: https://marketplace.visualstudio.com/items?itemName=${REVIEW_EXTENSION_MARKET_ID}`));
+    return { installed: false, status };
+  }
+
+  const result = installReviewExtension(status.command);
+  if (!result.installed) {
+    console.log(chalk.yellow('자동 설치에 실패했습니다. 수동 설치 후 다시 시도하세요.'));
+    console.log(chalk.white(`   - 수동: ${status.command} --install-extension ${REVIEW_EXTENSION_MARKET_ID}`));
+    return { installed: false, status };
+  }
+
+  const newStatus = getReviewExtensionStatus();
+  if (newStatus.installed && newStatus.command) {
+    return { installed: true, status: newStatus };
+  }
+  // 설치 직후 `--list-extensions` 가 아직 갱신되지 않은 경우에도 포커스 시도용
+  return { installed: true, status: { editorAvailable: true, installed: true, command: status.command } };
+}
 
 const program = new Command();
 
-program.name('migrate-next').description('React(Vite) 프로젝트를 Next.js로 마이그레이션하는 CLI').version('0.1.0');
+program.name('migrate-next').description('React(Vite) 프로젝트를 Next.js로 마이그레이션하는 CLI').version(pkg.version);
 
 program.addHelpText(
   'after',
@@ -247,6 +300,10 @@ program
 
         console.log(chalk.green(`\n✔ Step 1 preview 생성 완료 (${reviewSession.manifest.changes.length}개 변경)`));
         console.log(chalk.white(`리뷰 대상 변경 파일: ${reviewSession.manifest.changes.length}개`));
+        const extReady = await ensureReviewExtensionReady();
+        if (extReady.installed && extReady.status?.command) {
+          focusReviewPanel(extReady.status);
+        }
         const openResult = openFirstReviewableDiff(reviewSession.manifest);
 
         if (openResult.opened) {
@@ -930,6 +987,10 @@ async function runDefaultOrchestrator() {
   }
 
   // 3) 코드 리뷰 진행
+  const extReady = await ensureReviewExtensionReady();
+  if (extReady.installed && extReady.status?.command) {
+    focusReviewPanel(extReady.status);
+  }
   const openResult = openFirstReviewableDiff(manifest);
   if (!openResult.opened) {
     console.log(chalk.yellow('자동으로 diff를 열지 못했습니다. Nextify Review 패널에서 수동으로 열어주세요.'));

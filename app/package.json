@@ -1,16 +1,38 @@
 {
-  "name": "step1-all",
-  "version": "0.1.0",
-  "description": "Vite React Project to Next.js Migration Tool",
+  "name": "nextify-cli",
+  "version": "0.1.1",
+  "description": "CLI tool for migrating React (Vite) projects to Next.js",
+  "license": "MIT",
   "bin": {
     "migrate-next": "./cli.cjs"
   },
+  "type": "commonjs",
   "files": [
     "cli.cjs",
-    "src"
+    "src",
+    "CHANGELOG.md"
   ],
+  "keywords": [
+    "nextjs",
+    "react",
+    "vite",
+    "migration",
+    "cli"
+  ],
+  "homepage": "https://github.com/Capstone-0123/Nextify",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Capstone-0123/Nextify.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Capstone-0123/Nextify/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"No tests configured\" && exit 0",
+    "pack:check": "npm pack --dry-run"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
