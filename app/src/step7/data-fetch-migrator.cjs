@@ -115,6 +115,11 @@ async function optimizeDataFetchingPlacement(projectRoot) {
 - UI 상태 useState (loading, error, modalOpen, isHovered, formValues, currentTab 등): 그대로 유지
 - 타이머/이벤트/observer를 다루는 useEffect: 그대로 유지
 
+[Server Component 변환 시 안전 수칙 — \`dynamic(..., { ssr: false })\` 절대 금지]
+- "use client" 가 제거되어 Server Component 가 되거나 새로 작성되는 파일(page.tsx/layout.tsx 등)에는 절대로 \`dynamic(..., { ssr: false })\` 호출이나 \`next/dynamic\` import 를 새로 추가하지 마세요. Next.js App Router 가 빌드를 거부합니다 ("ssr: false is not allowed with next/dynamic in Server Components").
+- 변환 대상 파일에 이미 \`dynamic(..., { ssr: false })\` 가 있다면, 그 파일은 본질적으로 클라이언트 의존이 있다는 신호이므로 Server Component 변환 자체를 시도하지 말고 원본 그대로 반환하세요.
+- 데이터 패칭을 Server Component 로 옮길 때 추가로 필요한 import 는 오직 (a) \`fetch\` 호출에 필요한 것뿐입니다. \`dynamic\`, \`next/dynamic\` 은 이 작업의 도구가 아닙니다.
+
 [자기 검증 체크리스트 — 출력 직전에 반드시 수행]
 각 파일에 대해 순서대로 점검. 하나라도 NO면 그 파일은 원본 그대로 반환하세요.
 - [ ] 변경 후 파일에서 사용되는 모든 식별자(useState, useEffect, useRef, useMemo, useCallback 등)가 여전히 import 또는 선언되어 있는가?

@@ -34,6 +34,45 @@ const AI_META_COMMENT_PATTERNS = [
 // 처리 대상 확장자
 const SUPPORTED_EXT = /\.(t|j)sx?$/;
 
+// ---- Server Component 판정 ------------------------------------------------
+
+/**
+ * 파일 본문 첫 비주석 statement가 'use client' 인지 확인.
+ */
+function hasUseClientDirective(content) {
+  return /^\s*(?:\/\*[\s\S]*?\*\/\s*|\/\/[^\n]*\n\s*)*['"]use client['"]\s*;?/.test(content);
+}
+
+/**
+ * App Router 특수 파일(page/layout/template/loading/not-found/default)인지 확인.
+ * error.tsx 는 의무 Client Component 이므로 제외.
+ */
+function isAppRouterServerSpecialFile(relPath) {
+  const norm = String(relPath).replace(/\\/g, '/');
+  return /(?:^|\/)(?:src\/)?app\/(?:.+\/)?(?:page|layout|template|loading|not-found|default)\.tsx?$/.test(norm);
+}
+
+/**
+ * metadata / generateMetadata export 가 있는 파일인지 확인.
+ */
+function hasMetadataExport(content) {
+  if (/\bexport\s+(?:const|let|var|function|async\s+function)\s+(?:metadata|generateMetadata)\b/.test(content)) {
+    return true;
+  }
+  return /\bexport\s*\{[^}]*\b(?:metadata|generateMetadata)\b[^}]*\}/.test(content);
+}
+
+/**
+ * 파일이 (a) 'use client' 가 없고 (b) Server Component 표지를 가졌는지 판정.
+ * 이런 파일에서는 dynamic(..., { ssr: false }) 가 빌드 에러를 일으킴.
+ */
+function isServerComponentFile(relPath, content) {
+  if (hasUseClientDirective(content)) return false;
+  if (hasMetadataExport(content)) return true;
+  if (isAppRouterServerSpecialFile(relPath)) return true;
+  return false;
+}
+
 // ---- AST helpers -----------------------------------------------------------
 
 /**
@@ -124,6 +163,78 @@ function isIdentifierUsed(sourceFile, varDeclarationNode, ifStatementNode, varNa
   return false;
 }
 
+// ---- Server Component 의 dynamic(ssr:false) 무력화 ------------------------
+
+/**
+ * Server Component 파일에서 `dynamic(<loader>, { ssr: false })` 패턴의 `ssr: false` 만
+ * 결정론적으로 제거. 옵션 객체가 비면 두 번째 인자 자체도 함께 제거.
+ *
+ * 이유:
+ *   - Next.js App Router 는 Server Component 에서 `ssr: false` 를 허용하지 않음
+ *     (Turbopack 빌드 시 "ssr: false is not allowed with next/dynamic in Server Components" 에러).
+ *   - dynamic() 자체는 Server Component 에서도 합법(코드 스플리팅 용도).
+ *
+ * @returns {{ changed: boolean, fixedTargets: string[] }}
+ */
+function stripSsrFalseInServerComponent(sourceFile, relPath) {
+  const fullText = sourceFile.getFullText();
+  const fixedTargets = [];
+
+  // 빠른 거름망: 'ssr' 단어가 없으면 처리할 게 없음
+  if (!fullText.includes('ssr')) return { changed: false, fixedTargets };
+  if (!isServerComponentFile(relPath, fullText)) return { changed: false, fixedTargets };
+
+  let modified = false;
+  const callExprs = sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression);
+
+  for (const call of callExprs) {
+    const calleeText = call.getExpression().getText();
+    // dynamic(...) 또는 someAlias.dynamic(...) 가 아닌 단순 dynamic 호출만 대상
+    if (calleeText !== 'dynamic') continue;
+
+    const args = call.getArguments();
+    if (args.length < 2) continue;
+
+    const optionsArg = args[1];
+    if (optionsArg.getKind() !== SyntaxKind.ObjectLiteralExpression) continue;
+
+    // ssr: false 프로퍼티 찾아 제거
+    const props = optionsArg.getProperties();
+    let removedSsr = false;
+    for (const prop of props) {
+      if (prop.getKind() !== SyntaxKind.PropertyAssignment) continue;
+      const nameNode = prop.getNameNode?.();
+      if (!nameNode || nameNode.getText() !== 'ssr') continue;
+      const initializer = prop.getInitializer?.();
+      if (initializer && initializer.getText() === 'false') {
+        prop.remove();
+        removedSsr = true;
+        modified = true;
+      }
+    }
+
+    if (!removedSsr) continue;
+
+    // 컴포넌트 식별자(있다면) 추적용
+    const parentVarDecl = call.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
+    const compName = parentVarDecl ? parentVarDecl.getName() : '<inline>';
+    fixedTargets.push(`${relPath}:${compName}`);
+
+    // 옵션 객체가 비면 두 번째 인자 자체 제거
+    const remainingProps = optionsArg.getProperties();
+    if (remainingProps.length === 0) {
+      try {
+        // ts-morph는 인덱스 기반 removeArgument 를 제공
+        call.removeArgument(1);
+      } catch {
+        // 실패해도 ssr: false 는 이미 제거된 상태이므로 빌드는 안전
+      }
+    }
+  }
+
+  return { changed: modified, fixedTargets };
+}
+
 // ---- 메인 sweep -----------------------------------------------------------
 
 /**
@@ -184,6 +295,21 @@ async function sweepSingleFile(projectRoot, relPath) {
   if (cleaned !== fullText) {
     sourceFile.replaceWithText(cleaned);
     modified = true;
+  }
+
+  // 3) Server Component 에 박힌 dynamic(..., { ssr: false }) 의 ssr: false 만 제거
+  //    - Turbopack/Next.js App Router 빌드 에러 사전 차단
+  //    - dynamic() 자체는 보존 (코드 스플리팅 의도 유지)
+  try {
+    const { changed: ssrChanged, fixedTargets } = stripSsrFalseInServerComponent(sourceFile, relPath);
+    if (ssrChanged) {
+      modified = true;
+      for (const t of fixedTargets) {
+        removedTargets.push(`ssr:false@${t}`);
+      }
+    }
+  } catch {
+    // 안전망 자체가 마이그레이션을 막지 않도록 조용히 무시
   }
 
   if (modified) {

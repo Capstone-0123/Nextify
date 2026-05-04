@@ -1692,6 +1692,12 @@ async function migrateBrowserAPIs(projectRoot) {
 - 기존 import에서 사용 중인 named import를 절대 제거하지 마세요.
 - "리팩터링 김에" 코드를 단순화하지 마세요. 오직 브라우저 API 가드/이동만 수행하세요.
 
+[Server Component 안전 수칙(매우 중요) — \`dynamic(..., { ssr: false })\` 사용 금지]
+- 이 작업에서는 절대 \`dynamic(...)\` 호출을 새로 만들거나 \`{ ssr: false }\` 옵션을 추가하지 마세요. \`next/dynamic\` import 도 추가 금지.
+- \`ssr: false\` 는 Next.js App Router 의 Server Component (\`'use client'\` 가 없거나 \`export const metadata\`/\`generateMetadata\` 를 가진 \`page.tsx\`/\`layout.tsx\`/\`template.tsx\` 등) 에 들어가면 빌드 자체가 실패합니다 ("ssr: false is not allowed with next/dynamic in Server Components").
+- 이미 파일에 \`dynamic(..., { ssr: false })\` 가 있더라도 그대로 유지하고, 새로 추가하지 마세요. 옵션을 옮기거나 변경하지도 마세요.
+- 브라우저 API 보호는 (A) \`typeof window\` 가드 또는 (B) useEffect 이동, 그리고 필요한 파일에만 \`'use client'\` 한 줄 추가 — 이 세 가지로만 해결합니다. \`dynamic({ ssr: false })\` 는 이 작업의 도구가 아닙니다.
+
 [자기 검증 체크리스트 — 출력 직전에 반드시 수행]
 각 파일에 대해 순서대로 점검. 하나라도 NO면 그 파일은 원본 그대로 반환하세요.
 - [ ] 원본의 모든 import가 그대로 유지되는가? (브라우저 API 보호를 위해 새 hook을 추가할 때만 named import에 추가, 절대 삭제 없음)

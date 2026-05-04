@@ -149,6 +149,7 @@ async function minimizeUseClientForBundle(projectRoot) {
 5) 클라이언트 전용 라이브러리: zustand의 create, recoil, jotai, react-query/tanstack-query의 useQuery/useMutation, swr, framer-motion, react-hook-form, react-spring 등
 6) Context Provider 내부에서 상태/이펙트를 다루는 컴포넌트
 7) Class component가 lifecycle 메서드(componentDidMount 등)를 가진 경우
+8) \`dynamic(..., { ssr: false })\` 또는 \`dynamic(..., { ssr:false })\` 패턴이 본문에 존재하는 경우 — \`ssr: false\` 는 Client Component 에서만 합법이므로 \`'use client'\` 를 제거하면 즉시 빌드 에러("ssr: false is not allowed with next/dynamic in Server Components")가 발생합니다. 이런 파일은 그대로 두세요.
 
 [자기 검증 체크리스트 — 출력 직전에 반드시 수행]
 각 파일에 대해 다음을 순서대로 점검하고, 하나라도 NO면 그 파일은 원본 content를 그대로 반환하세요.
@@ -158,6 +159,7 @@ async function minimizeUseClientForBundle(projectRoot) {
 - [ ] 변경 사항이 오직 'use client' 지시문 한 줄 삭제뿐인가?
 - [ ] 파일 줄 수가 원본 대비 1~2줄만 줄었는가? (3줄 이상 줄었다면 과잉 삭제이므로 금지)
 - [ ] 모듈-스코프 \`let\`/\`const\`/\`var\` 선언과 import 식별자 모두가 여전히 어딘가에서 최소 1회 이상 참조되는가? (TS \`noUnusedLocals\` 빌드 에러 방지)
+- [ ] 본문에 \`dynamic(..., { ssr: false })\` 가 있는 파일에서 \`'use client'\` 를 제거하지 않았는가? (제거 시 즉시 빌드 에러)
 
 [좋은 예]
 원본:
