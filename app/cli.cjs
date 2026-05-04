@@ -409,10 +409,20 @@ program
 program
   .command('step7')
   .description('7단계: next/image, next/font, Dynamic Import 적용 및 React 흔적 정리')
+  .option('--no-typecheck-autofix', '결정론적 TypeScript 자동 수정을 비활성화 (기본: 활성화, 토큰 비용 0)')
+  .option('--no-typecheck-ai-fix', 'AI 기반 잔여 빌드 에러 보정을 비활성화 (기본: 활성화, GEMINI_API_KEY 필요)')
+  .option(
+    '--typecheck-ai-fix-budget <n>',
+    'AI 보정 시 1회 세션에서 의뢰할 최대 파일 수 (기본 5)',
+    (v) => Number(v),
+  )
   .action(async (options) => {
     try {
-      // Step 7 실행
-      await runStep7(process.cwd());
+      await runStep7(process.cwd(), {
+        typecheckAutofix: options.typecheckAutofix,
+        typecheckAiFix: options.typecheckAiFix,
+        typecheckAiFixBudget: options.typecheckAiFixBudget,
+      });
     } catch (error) {
       console.error(chalk.red('\n❌ Step 7 오류 발생:'), error);
       process.exit(1);
