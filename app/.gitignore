@@ -39,3 +39,6 @@ test-results/
 
 my-test-app/
 temp/
+
+# VSIX 패키지 산출물 (마켓플레이스 배포 시 로컬 빌드)
+*.vsix

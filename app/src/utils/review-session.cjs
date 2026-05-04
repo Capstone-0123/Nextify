@@ -6,7 +6,15 @@ const { spawnSync } = require('child_process');
 const { cloneProject } = require('./copy.cjs');
 
 const REVIEW_ROOT_DIR = '.ai-migration';
-const REVIEW_EXTENSION_ID = 'nextify-review';
+/** Visual Studio Marketplace 확장 ID (`vsce publish` / `code --install-extension` 용). */
+const REVIEW_EXTENSION_MARKET_ID = 'capstone0123.nextify-review';
+/** Marketplace / 로컬 모두: `code --list-extensions` 에는 `publisher.nextify-review` 형태로 나옵니다. */
+function extensionListIncludesNextifyReview(lines) {
+  return lines.some((line) => {
+    const s = String(line || '').trim().toLowerCase();
+    return s === 'nextify-review' || s.endsWith('.nextify-review');
+  });
+}
 const EXCLUDED_DIRS = new Set(['.git', '.next', 'dist', 'node_modules', REVIEW_ROOT_DIR]);
 
 function getEditorCommands() {
@@ -245,7 +253,7 @@ function getReviewExtensionStatus() {
       .map((line) => line.trim().toLowerCase())
       .filter(Boolean);
 
-    if (lines.includes(REVIEW_EXTENSION_ID)) {
+    if (extensionListIncludesNextifyReview(lines)) {
       return {
         editorAvailable: true,
         installed: true,
@@ -286,6 +294,39 @@ function focusReviewPanel(extensionStatus = null) {
     return { opened: true, command: status.command };
   }
   return { opened: false, command: status.command, reason: 'focus-command-failed' };
+}
+
+/**
+ * @param {string|null|undefined} commandHint `code` / `cursor` 등 에디터 CLI (PATH 상 실행 파일명)
+ * @returns {{ installed: boolean, command: string|null, reason?: string, stderr?: string, stdout?: string }}
+ */
+function installReviewExtension(commandHint) {
+  if (!commandHint) {
+    return { installed: false, command: null, reason: 'no-command' };
+  }
+
+  const result = spawnSync(commandHint, ['--install-extension', REVIEW_EXTENSION_MARKET_ID, '--force'], {
+    shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+    encoding: 'utf8',
+  });
+
+  if (result?.error?.code === 'ENOENT') {
+    return { installed: false, command: commandHint, reason: 'ENOENT' };
+  }
+
+  if (!result.error && result.status === 0) {
+    return { installed: true, command: commandHint };
+  }
+
+  return {
+    installed: false,
+    command: commandHint,
+    reason: 'install-failed',
+    stderr: String(result?.stderr || ''),
+    stdout: String(result?.stdout || ''),
+  };
 }
 
 async function buildSnapshotChangeList(projectRoot, snapshotRoot, placeholdersRoot) {
@@ -430,9 +471,11 @@ async function createSnapshotReviewSession(projectRoot, stepName, executeStep) {
 
 module.exports = {
   REVIEW_ROOT_DIR,
+  REVIEW_EXTENSION_MARKET_ID,
   createStepReviewSession,
   createSnapshotReviewSession,
   openReviewDiff,
   getReviewExtensionStatus,
   focusReviewPanel,
+  installReviewExtension,
 };
