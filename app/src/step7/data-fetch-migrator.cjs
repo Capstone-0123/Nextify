@@ -24,6 +24,51 @@ function hasClientDataFetchingPattern(content) {
   return hasEffect && hasFetchLike;
 }
 
+function isUnderHooksDir(relPath) {
+  const n = relPath.replace(/\\/g, '/');
+  return /\/hooks\//.test(n);
+}
+
+/**
+ * 데이터 훅을 import 하는 src/** 파일 + app page 를 넓혀 Gemini 화이트리스트에 포함합니다.
+ * (예: app/browse/page.tsx 는 훅을 직접 안 쓰고 pages/Browse 가 useMovies 를 쓰는 경우)
+ */
+async function expandDataFetchRelatedFiles(projectRoot, hookAbsPaths) {
+  const bases = hookAbsPaths.map((h) => path.basename(h, path.extname(h)));
+  const extra = new Set();
+  const srcRoot = path.join(projectRoot, 'src');
+  if (!fs.existsSync(srcRoot)) return [];
+
+  async function walk(dir) {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (['node_modules', '.next', '.git', 'dist', 'build'].includes(e.name)) continue;
+        await walk(full);
+      } else if (/\.(tsx|jsx)$/.test(e.name)) {
+        let pc = '';
+        try {
+          pc = await fs.readFile(full, 'utf-8');
+        } catch {
+          continue;
+        }
+        for (const base of bases) {
+          const safeBase = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const importRe = new RegExp(`from\\s+['"][^'"]*${safeBase}['"]`);
+          if (importRe.test(pc)) {
+            extra.add(toRel(projectRoot, full));
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  await walk(srcRoot);
+  return [...extra];
+}
+
 async function collectSourceFiles(dir) {
   const out = [];
   if (!fs.existsSync(dir)) return out;
@@ -60,8 +105,10 @@ async function optimizeDataFetchingPlacement(projectRoot) {
       continue;
     }
 
-    if (!hasUseClientDirective(content)) continue;
+    const rel = toRel(projectRoot, absFilePath);
     if (!hasClientDataFetchingPattern(content)) continue;
+    const allowHookWithoutDirective = isUnderHooksDir(rel);
+    if (!hasUseClientDirective(content) && !allowHookWithoutDirective) continue;
     candidateAbsFiles.push(absFilePath);
   }
 
@@ -69,17 +116,22 @@ async function optimizeDataFetchingPlacement(projectRoot) {
     return;
   }
 
+  const relatedFiles = await expandDataFetchRelatedFiles(projectRoot, candidateAbsFiles);
+
   const candidateRelPaths = Array.from(
     new Set(
-      candidateAbsFiles.map((p) => toRel(projectRoot, p)).concat(
-        [
-          'src/app/layout.tsx',
-          'src/app/page.tsx',
-          'src/app/loading.tsx',
-          'src/app/error.tsx',
-        ].filter((rel) => fs.existsSync(path.join(projectRoot, rel)))
-      )
-    )
+      candidateAbsFiles
+        .map((p) => toRel(projectRoot, p))
+        .concat(
+          [
+            'src/app/layout.tsx',
+            'src/app/page.tsx',
+            'src/app/loading.tsx',
+            'src/app/error.tsx',
+          ].filter((rel) => fs.existsSync(path.join(projectRoot, rel))),
+        )
+        .concat(relatedFiles),
+    ),
   );
 
   await stopAndOfferGeminiApply({

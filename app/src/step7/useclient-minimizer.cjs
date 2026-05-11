@@ -13,29 +13,83 @@ function hasUseClientDirective(content) {
   return /^\s*['"]use client['"]\s*;?/m.test(head);
 }
 
+/**
+ * 마이그레이션 테스트용 모듈 스코프 noop (브라우저 API를 "읽기만" 하고 결과를 버리는 표현) 제거.
+ * 예: typeof window !== 'undefined' && (window.innerWidth < 768)
+ */
+function stripModuleScopeNoopBrowserExpressions(content) {
+  let out = content;
+  out = out.replace(
+    /^\s*typeof\s+window\s*!==\s*['"]undefined['"]\s*&&\s*\([^()]*\)\s*;?\s*$/gm,
+    '',
+  );
+  out = out.replace(
+    /^\s*typeof\s+window\s*!=\s*['"]undefined['"]\s*&&\s*\([^()]*\)\s*;?\s*$/gm,
+    '',
+  );
+  out = out.replace(/^\s*void\s+\(\s*window[^)]*\)\s*;?\s*$/gm, '');
+  return out;
+}
+
+/**
+ * axios/api 클라이언트에 붙는 디버그용 document 리스너 등 — 서버에서도 안전하게 제거 가능.
+ */
+function stripCommonApiSideEffects(content) {
+  let out = content;
+  out = out.replace(
+    /if\s*\(\s*isBrowser\s*\)\s*\{\s*document\.addEventListener\s*\(\s*['"]DOMContentLoaded['"]\s*,\s*\([^)]*\)\s*=>\s*\{[\s\S]*?\}\s*\)\s*;?\s*\}\s*/gm,
+    '',
+  );
+  out = out.replace(
+    /if\s*\(\s*typeof\s+window\s*!==\s*['"]undefined['"]\s*\)\s*\{\s*document\.addEventListener\s*\(\s*['"]DOMContentLoaded['"]\s*,[\s\S]*?\}\s*\}\s*/gm,
+    '',
+  );
+  return out;
+}
+
+function removeUseClientDirectiveLine(content) {
+  return content.replace(/^\s*['"]use client['"]\s*;?\s*\r?\n?/m, '');
+}
+
 function requiresClientBoundary(content, relPath = '') {
   const normalizedRel = relPath.replace(/\\/g, '/');
 
-  // App Router entry files are server-first by design.
+  const sanitized = stripModuleScopeNoopBrowserExpressions(stripCommonApiSideEffects(content));
+
+  // App Router page/layout: 서버 기본이지만 hook·이벤트·브라우저 API 가 있으면 클라이언트 필요
   if (/^src\/app\/.*\/(page|layout)\.(t|j)sx?$/.test(normalizedRel)) {
+    if (/\buse(State|Effect|LayoutEffect|InsertionEffect|Reducer|Ref|Memo|Callback|ImperativeHandle|SyncExternalStore|Transition|DeferredValue|Id)\s*\(/.test(sanitized)) {
+      return true;
+    }
+    if (/\buseRouter\s*\(/.test(sanitized) || /\buseSearchParams\s*\(/.test(sanitized) || /\busePathname\s*\(/.test(sanitized) || /\buseSelectedLayoutSegment(s)?\s*\(/.test(sanitized)) {
+      return true;
+    }
+    if (/\bwindow\b|\bdocument\b|\blocalStorage\b|\bsessionStorage\b|\bnavigator\b/.test(sanitized)) {
+      return true;
+    }
+    if (/\son[A-Z][A-Za-z0-9_]*\s*=/.test(sanitized)) {
+      return true;
+    }
     return false;
   }
 
+  const sanitizedLegacy = sanitized;
+
   // React client hooks and Next client hooks.
-  if (/\buse(State|Effect|LayoutEffect|InsertionEffect|Reducer|Ref|Memo|Callback|ImperativeHandle|SyncExternalStore|Transition|DeferredValue|Id)\s*\(/.test(content)) {
+  if (/\buse(State|Effect|LayoutEffect|InsertionEffect|Reducer|Ref|Memo|Callback|ImperativeHandle|SyncExternalStore|Transition|DeferredValue|Id)\s*\(/.test(sanitizedLegacy)) {
     return true;
   }
-  if (/\buseRouter\s*\(/.test(content) || /\buseSearchParams\s*\(/.test(content) || /\busePathname\s*\(/.test(content) || /\buseSelectedLayoutSegment(s)?\s*\(/.test(content)) {
+  if (/\buseRouter\s*\(/.test(sanitizedLegacy) || /\buseSearchParams\s*\(/.test(sanitizedLegacy) || /\busePathname\s*\(/.test(sanitizedLegacy) || /\buseSelectedLayoutSegment(s)?\s*\(/.test(sanitizedLegacy)) {
     return true;
   }
 
   // Browser-only APIs.
-  if (/\bwindow\b|\bdocument\b|\blocalStorage\b|\bsessionStorage\b|\bnavigator\b|\bmatchMedia\b|\bIntersectionObserver\b|\bResizeObserver\b|\bMutationObserver\b/.test(content)) {
+  if (/\bwindow\b|\bdocument\b|\blocalStorage\b|\bsessionStorage\b|\bnavigator\b|\bmatchMedia\b|\bIntersectionObserver\b|\bResizeObserver\b|\bMutationObserver\b/.test(sanitizedLegacy)) {
     return true;
   }
 
   // Event handlers in JSX usually mean interactive client component.
-  if (/\son[A-Z][A-Za-z0-9_]*\s*=/.test(content)) {
+  if (/\son[A-Z][A-Za-z0-9_]*\s*=/.test(sanitizedLegacy)) {
     return true;
   }
 
@@ -70,6 +124,30 @@ async function minimizeUseClientForBundle(projectRoot) {
   if (!fs.existsSync(srcDir)) return;
 
   const sourceFiles = await collectSourceFiles(srcDir);
+
+  // 결정론적 1차: API 부수 효과·noop 제거 후, 클라이언트 경계가 불필요하면 'use client' 제거
+  for (const absFilePath of sourceFiles) {
+    let content = '';
+    try {
+      content = await fs.readFile(absFilePath, 'utf-8');
+    } catch {
+      continue;
+    }
+    if (!hasUseClientDirective(content)) continue;
+    const relPath = toRel(projectRoot, absFilePath);
+    let stripped = stripCommonApiSideEffects(content);
+    stripped = stripModuleScopeNoopBrowserExpressions(stripped);
+    if (stripped !== content) {
+      await fs.writeFile(absFilePath, stripped, 'utf-8');
+      content = stripped;
+    }
+    if (requiresClientBoundary(content, relPath)) continue;
+    const without = removeUseClientDirectiveLine(content);
+    if (without === content) continue;
+    if (requiresClientBoundary(without, relPath)) continue;
+    await fs.writeFile(absFilePath, without, 'utf-8');
+  }
+
   const useClientFiles = [];
 
   for (const absFilePath of sourceFiles) {
