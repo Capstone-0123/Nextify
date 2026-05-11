@@ -372,6 +372,23 @@ async function runBuild(projectRoot, kind) {
   await runCommand(cmd, [...run('build')], { cwd: projectRoot });
 }
 
+/**
+ * 자식 프로세스의 stdout/stderr 파이프를 능동적으로 비웁니다.
+ * stdio: 'pipe' 인 채로 아무도 읽지 않으면 OS 파이프 버퍼(Windows에서 수 KB)가 차서
+ * 자식이 다음 write에서 멈춰버릴 수 있습니다 (서버가 'Ready' 후에도 응답 못하는 증상으로 보임).
+ */
+function drainChildStdio(child) {
+  if (!child) return;
+  if (child.stdout && typeof child.stdout.resume === 'function') {
+    child.stdout.on('data', () => {});
+    child.stdout.resume();
+  }
+  if (child.stderr && typeof child.stderr.resume === 'function') {
+    child.stderr.on('data', () => {});
+    child.stderr.resume();
+  }
+}
+
 async function startServer(projectRoot, kind, port) {
   await ensureDependenciesInstalled(projectRoot);
   const pm = detectPackageManager(projectRoot);
@@ -386,23 +403,45 @@ async function startServer(projectRoot, kind, port) {
         pm === 'yarn'
           ? [...run('preview'), '--port', String(port), '--strictPort']
           : [...run('preview'), '--', '--port', String(port), '--strictPort'];
-      return startCommand(cmd, args, { cwd: projectRoot, stdio: 'pipe' });
+      const child = startCommand(cmd, args, { cwd: projectRoot, stdio: 'pipe' });
+      drainChildStdio(child);
+      return child;
     }
     // fallback: try npx vite preview
-    return startCommand('npx', ['vite', 'preview', '--port', String(port), '--strictPort'], {
-      cwd: projectRoot,
-      stdio: 'pipe',
-    });
+    const child = startCommand(
+      'npx',
+      ['vite', 'preview', '--port', String(port), '--strictPort'],
+      { cwd: projectRoot, stdio: 'pipe' }
+    );
+    drainChildStdio(child);
+    return child;
   }
 
-  // next
+  // next start: -p 플래그를 패키지 매니저로 넘기지 않고 PORT 환경 변수로 전달합니다.
+  // 이유:
+  //  - yarn berry(2+)는 `-p` 를 자기 자신의 `--project` 옵션으로 가로채서
+  //    `yarn run start -- -p 3000` 호출 시 "Invalid project directory ...\\-p" 에러로 실패합니다.
+  //    (Windows + cmd.exe 환경에서 재현. PowerShell에서 손으로 입력하면 동작해 헷갈리기 쉽습니다.)
+  //  - npm 은 `--` 를, yarn 은 `--` 가 필요 없는 등 패키지 매니저별 인자 전달 방식이 달라
+  //    플래그 충돌을 피하려면 환경 변수가 가장 안전합니다.
+  // Next.js 는 PORT 환경 변수를 기본 지원합니다 (next start 문서 참고).
+  const nextEnv = { ...process.env, PORT: String(port) };
   if (scripts.start) {
-    return startCommand(cmd, [...run('start'), '--', '-p', String(port)], {
+    const child = startCommand(cmd, [...run('start')], {
       cwd: projectRoot,
       stdio: 'pipe',
+      env: nextEnv,
     });
+    drainChildStdio(child);
+    return child;
   }
-  return startCommand('npx', ['next', 'start', '-p', String(port)], { cwd: projectRoot, stdio: 'pipe' });
+  const child = startCommand('npx', ['next', 'start'], {
+    cwd: projectRoot,
+    stdio: 'pipe',
+    env: nextEnv,
+  });
+  drainChildStdio(child);
+  return child;
 }
 
 async function runLighthouseOnce(url) {
@@ -821,6 +860,75 @@ async function readNextifyMeta(projectRoot) {
   }
 }
 
+/**
+ * pre-step7 스냅샷의 next.config.mjs 에 "측정 전용 빌드 완화" 옵션을 주입합니다.
+ *
+ * 이유:
+ * - step7 의 마지막 단계는 "TypeScript 타입 검사 + AI 자동 수정" 입니다.
+ *   이 보정은 메인 폴더(step1~7)에만 적용되고, pre-step7 스냅샷에는 잔존 타입
+ *   에러가 남습니다 (예: 사용 안 되는 React Router 코드의 children prop 누락).
+ * - 그 결과 step1~6 baseline 측정 시 `next build` 가 type check 단계에서 실패하여
+ *   Lighthouse 측정 자체가 불가능해집니다.
+ * - 측정 목적상 type/eslint 정합성은 무관하므로 (런타임 perf 만 보면 됨) 빌드
+ *   시점의 type/eslint 검사만 우회합니다. 멱등 — 이미 적용돼 있으면 skip.
+ */
+async function injectMeasurementBuildOverrides(snapshotRoot) {
+  const configPath = path.join(snapshotRoot, 'next.config.mjs');
+  if (!(await fs.pathExists(configPath))) {
+    const fresh = `// [Nextify] pre-step7 측정 전용 빌드 완화 옵션\n` +
+      `/* __nextifyMeasurementOverridesApplied */\n` +
+      `const nextConfig = {\n` +
+      `  typescript: { ignoreBuildErrors: true },\n` +
+      `};\n` +
+      `export default nextConfig;\n`;
+    await fs.writeFile(configPath, fresh, 'utf-8');
+    return;
+  }
+
+  let content = await fs.readFile(configPath, 'utf-8');
+  if (content.includes('__nextifyMeasurementOverridesApplied')) {
+    return;
+  }
+
+  const marker = '/* __nextifyMeasurementOverridesApplied */';
+  // 1순위: `export default <name>;` 패턴을 찾아서 wrapper spread 로 변환.
+  //   기존 nextConfig 의 모든 옵션(rewrites, headers 등)을 보존하면서
+  //   typescript 무시 옵션만 덮어씁니다. (Next 16 부터 next.config 의 eslint 옵션은
+  //   "Unrecognized key(s) in object: 'eslint'" 경고로 거부되므로 사용하지 않음)
+  const exportNamed = content.match(/export\s+default\s+(\w+)\s*;?\s*$/m);
+  if (exportNamed) {
+    const varName = exportNamed[1];
+    const replacement =
+      `${marker}\n` +
+      `export default {\n` +
+      `  ...${varName},\n` +
+      `  typescript: { ignoreBuildErrors: true },\n` +
+      `};\n`;
+    content = content.replace(exportNamed[0], replacement);
+    await fs.writeFile(configPath, content, 'utf-8');
+    return;
+  }
+
+  // 2순위: `export default { ... }` 인라인 객체 — 객체 시작 직후에 옵션 삽입.
+  const exportInline = content.match(/export\s+default\s*\{/);
+  if (exportInline) {
+    const insertAt = exportInline.index + exportInline[0].length;
+    const inject =
+      `\n  ${marker}\n` +
+      `  typescript: { ignoreBuildErrors: true },\n`;
+    content = content.slice(0, insertAt) + inject + content.slice(insertAt);
+    await fs.writeFile(configPath, content, 'utf-8');
+    return;
+  }
+
+  console.warn(
+    chalk.yellow(
+      `   ⚠️  pre-step7 스냅샷의 next.config.mjs 에 측정 완화 옵션을 자동 주입하지 못했습니다. ` +
+        `step1~6 baseline 빌드가 type 에러로 실패할 수 있습니다.`,
+    ),
+  );
+}
+
 async function createPreStep7Snapshot(projectRoot) {
   // IMPORTANT: 스냅샷을 프로젝트 "밖"에 둬야 fs-extra가 "자기 하위로 복사"를 막지 않습니다.
   const resolvedProjectRoot = path.resolve(projectRoot);
@@ -829,10 +937,12 @@ async function createPreStep7Snapshot(projectRoot) {
 
   const snapshotRoot = path.join(parentDir, `${projectName}__nextify_snapshots`, 'pre-step7');
   if (await fs.pathExists(snapshotRoot)) {
+    await injectMeasurementBuildOverrides(snapshotRoot);
     return snapshotRoot;
   }
   await fs.ensureDir(path.dirname(snapshotRoot));
   await cloneProject(projectRoot, snapshotRoot);
+  await injectMeasurementBuildOverrides(snapshotRoot);
   await ensureNextifyMeta(projectRoot, {
     preStep7SnapshotRoot: snapshotRoot,
   });

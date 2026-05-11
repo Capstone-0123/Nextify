@@ -59,6 +59,46 @@ function extractFirstJsonObjectText(text) {
 }
 
 /**
+ * 모델 응답 한 항목을 디스크 적용용 형식 `{ path, content }` 로 정규화합니다.
+ *
+ * 두 형식을 모두 지원합니다 (모델이 둘 중 하나를 선택):
+ *  - "content"     : 표준 JSON 문자열로 이스케이프된 전체 소스. 작고 빠름. 1순위.
+ *  - "contentB64"  : UTF-8 바이트의 single-line RFC 4648 Base64. 33% 크지만
+ *                    제어 문자/이스케이프 실수가 구조적으로 불가능. 위험 파일용.
+ *
+ * 우선순위: 둘 다 들어오면 `content` 가 우선합니다. (모델이 정상적으로 이스케이프
+ * 했다는 신호이므로 더 작은 표현을 신뢰)
+ *
+ * @param {Record<string, unknown>} entry
+ * @returns {{ path: string, content: string }}
+ */
+function normalizePatchEntry(entry) {
+  if (!entry || typeof entry.path !== 'string') {
+    throw new Error('각 files 항목에는 path 문자열이 필요합니다.');
+  }
+  if (typeof entry.content === 'string') {
+    return { path: entry.path, content: entry.content };
+  }
+  if (typeof entry.contentB64 === 'string') {
+    const trimmed = entry.contentB64.replace(/\s+/g, '');
+    if (trimmed.length === 0) {
+      return { path: entry.path, content: '' };
+    }
+    let buf;
+    try {
+      buf = Buffer.from(trimmed, 'base64');
+    } catch (e) {
+      throw new Error(`contentB64 디코딩 실패 (${entry.path}): ${e?.message || e}`);
+    }
+    return { path: entry.path, content: buf.toString('utf8') };
+  }
+  throw new Error(
+    `각 files 항목에는 path와 함께 "content"(escaped JSON 문자열) 또는 ` +
+      `"contentB64"(UTF-8 Base64) 중 하나가 필요합니다. path=${entry.path}`,
+  );
+}
+
+/**
  * @param {string} raw
  * @returns {{ path: string, content: string }[]}
  */
@@ -66,14 +106,9 @@ function parseApplyJson(raw) {
   const t = extractFirstJsonObjectText(raw);
   const data = JSON.parse(t);
   if (!data || !Array.isArray(data.files)) {
-    throw new Error('JSON 형식 오류: { "files": [ { "path", "content" } ] } 가 필요합니다.');
+    throw new Error('JSON 형식 오류: { "files": [ { "path", "content"|"contentB64" } ] } 가 필요합니다.');
   }
-  for (const f of data.files) {
-    if (!f || typeof f.path !== 'string' || typeof f.content !== 'string') {
-      throw new Error('각 files 항목은 path·content 문자열이어야 합니다.');
-    }
-  }
-  return data.files;
+  return data.files.map((f) => normalizePatchEntry(f));
 }
 
 /**
@@ -110,13 +145,22 @@ function buildApplyPrompt(question, context, fileEntries) {
   return `You are applying file edits for React → Next.js migration.
 ${getNextifyScopeRules()}
 Output MUST be a single JSON object only. No markdown fences, no explanation before or after.
-Use UTF-8. Escape newlines in JSON strings properly.
+
+File body encoding — TWO formats are accepted; pick whichever you can produce reliably:
+- PREFERRED (smaller, faster) — "content": "<full file source>"
+  Standard JSON string. You MUST properly escape EVERY newline as \\n, every tab as \\t, every double-quote as \\", every backslash as \\\\, and every other control character. NEVER place a raw newline inside this string.
+- FALLBACK (safer for tricky files) — "contentB64": "<base64(UTF-8 full file)>"
+  Single-line RFC 4648 Base64 of the full file bytes. Use this when the file contains characters you cannot reliably escape (mixed quoting, template literals, embedded JSON, etc.).
+For each file entry include EXACTLY ONE of "content" or "contentB64" (never both, never neither).
 
 If the user instruction is unrelated to Nextify or React(Vite) → Next.js migration, return:
 {"files":[],"refusal":"Nextify 관련 질문이 아닌 경우 답변하지 않습니다."}
 
-Schema:
-{"files":[{"path":"<must match allowed path exactly>","content":"<complete new file source>"}]}
+Schema (use either form, per-file):
+{"files":[
+  {"path":"<must match allowed path exactly>","content":"<properly-escaped full source>"},
+  {"path":"<must match allowed path exactly>","contentB64":"<single-line base64 of UTF-8 bytes>"}
+]}
 
 Allowed paths (the "path" field must be exactly one of these strings): ${allowed}
 
@@ -143,17 +187,25 @@ function matchAllowedPath(aiPath, allowedRelPaths) {
 }
 
 /**
+ * Gemini 응답을 디스크에 적용합니다.
+ * - 화이트리스트(allowedRelPaths)에 없는 path는 throw 하지 않고 skip + warn 합니다.
+ *   (Gemini가 가끔 instruction을 넘어선 추론으로 무관 파일을 응답에 포함시켜도
+ *    호출자 step의 다른 정상 응답은 그대로 적용되도록.)
+ * - 보안 검증(isPathInsideProject) 실패는 그대로 throw 합니다 (실제 위협).
+ *
  * @param {string} projectRoot
  * @param {{ path: string, content: string }[]} filesFromAi
  * @param {string[]} allowedRelPaths
- * @returns {Promise<string[]>}
+ * @returns {Promise<string[]>} 실제로 디스크에 쓰인 상대 경로 목록
  */
 async function applyAiFilesToDisk(projectRoot, filesFromAi, allowedRelPaths) {
   const written = [];
+  const skipped = [];
   for (const f of filesFromAi) {
     const rel = matchAllowedPath(f.path, allowedRelPaths);
     if (!rel) {
-      throw new Error(`허용 목록에 없는 path: ${f.path}`);
+      skipped.push(String(f.path));
+      continue;
     }
     const abs = path.join(projectRoot, rel);
     if (!isPathInsideProject(projectRoot, abs)) {
@@ -162,6 +214,175 @@ async function applyAiFilesToDisk(projectRoot, filesFromAi, allowedRelPaths) {
     await fs.ensureDir(path.dirname(abs));
     await fs.writeFile(abs, f.content, 'utf8');
     written.push(rel);
+  }
+  if (skipped.length > 0) {
+    console.warn(
+      `\n⚠️  Gemini 응답에 화이트리스트 외 ${skipped.length}개 path가 포함되어 있어 건너뜁니다 (정상 path는 그대로 적용됨):`,
+    );
+    for (const s of skipped) console.warn(`   - ${s}`);
+  }
+  return written;
+}
+
+// Gemini 2.5 Pro/Flash 의 응답 토큰 상한. 1.5 계열 모델은 내부적으로 8k 로 cap 되지만
+// 옵션을 지정해도 안전하게 무시됩니다 (상위 호환).
+const MAX_OUTPUT_TOKENS = 65536;
+
+/**
+ * 단일 배치(파일 묶음)를 Gemini 에 한 번 보내고 결과 patches 를 받아옵니다.
+ * 응답이 truncated 이거나 파싱 실패면 `code: 'BATCH_NEEDS_SPLIT'` 에러를 던져
+ * 호출자가 배치를 절반으로 나눠 재시도하게 합니다.
+ *
+ * @param {{
+ *   projectRoot: string,
+ *   question: string,
+ *   context: Record<string, string>,
+ *   batch: { path: string, content: string }[],
+ * }} args
+ * @returns {Promise<{ path: string, content: string }[]>}
+ */
+async function requestPatchesForBatch({ question, context, batch }) {
+  const prompt = buildApplyPrompt(question, context, batch);
+  const jsonModelOptions = {
+    generationConfig: {
+      responseMimeType: 'application/json',
+      temperature: 0.2,
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
+    },
+  };
+
+  const callOnce = async (p) => {
+    try {
+      return await generateText(p, { modelOptions: jsonModelOptions, returnMeta: true });
+    } catch (_) {
+      const fallback = await generateText(p, { returnMeta: true });
+      return fallback;
+    }
+  };
+
+  const isTruncated = (meta) => {
+    const r = (meta && meta.finishReason) || '';
+    return r === 'MAX_TOKENS' || r === 'LENGTH';
+  };
+
+  const tryParseOrThrow = (text, meta) => {
+    try {
+      return parseApplyJson(text);
+    } catch (parseErr) {
+      if (isTruncated(meta)) {
+        const e = new Error(
+          `모델 응답이 토큰 한도에서 잘렸습니다 (finishReason=${meta.finishReason}, batch=${batch.length}).`,
+        );
+        e.code = 'BATCH_NEEDS_SPLIT';
+        throw e;
+      }
+      // truncated 아닌데 파싱 실패: 호출자가 retryPrompt 로 한 번 더 시도.
+      const e = new Error(parseErr.message || '응답 JSON 파싱 실패');
+      e.code = 'PARSE_FAILED';
+      throw e;
+    }
+  };
+
+  let res = await callOnce(prompt);
+  let patches;
+  try {
+    patches = tryParseOrThrow(res.text, res);
+  } catch (e) {
+    if (e.code === 'BATCH_NEEDS_SPLIT') throw e;
+    // PARSE_FAILED → 스키마 재강조 후 1회 재시도.
+    // 1차에서 "content" 의 이스케이프 실수가 의심되므로 재시도에서는 안전한
+    // contentB64 사용을 우선 권장합니다 (모델이 원하면 content 도 여전히 허용).
+    const retryPrompt = `${prompt}
+
+CRITICAL OUTPUT REQUIREMENT (RETRY — previous response failed JSON parsing):
+- Return ONLY a single JSON object.
+- For each file entry, prefer "contentB64" (single-line base64 of UTF-8 bytes) to avoid escaping mistakes.
+- If you choose "content" instead, you MUST escape every \\n, \\t, \\", \\\\, and other control characters per JSON spec.
+- Use exactly one of "content" or "contentB64" per file (never both).
+- Do not include markdown, prose, explanations, or extra keys.
+Allowed schema (per-file, choose one):
+{"path":"<allowed path>","content":"<properly-escaped full source>"}
+{"path":"<allowed path>","contentB64":"<single-line base64>"}`;
+    res = await callOnce(retryPrompt);
+    try {
+      patches = tryParseOrThrow(res.text, res);
+    } catch (e2) {
+      if (e2.code === 'BATCH_NEEDS_SPLIT') throw e2;
+      // 두 번째 파싱도 실패 — 분할이 가능하면 분할로, 단일 파일이면 진짜 에러.
+      if (batch.length > 1) {
+        const wrap = new Error(`재시도에서도 파싱 실패. 배치 분할 진행: ${e2.message}`);
+        wrap.code = 'BATCH_NEEDS_SPLIT';
+        throw wrap;
+      }
+      throw e2;
+    }
+  }
+
+  // refusal 단일 객체 처리 (refusal 은 잘림과 무관)
+  if (patches.length === 0) {
+    const stripped = extractFirstJsonObjectText(res.text);
+    try {
+      const data = JSON.parse(stripped);
+      if (data && typeof data.refusal === 'string') {
+        throw new Error(data.refusal);
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message && error.message !== 'Unexpected end of JSON input') {
+        throw error;
+      }
+    }
+  }
+  return patches;
+}
+
+/**
+ * 큰 파일 묶음을 한 번에 보내면 응답이 모델 출력 토큰 한도에서 잘려 JSON 파싱이
+ * 실패합니다("Expected ',' or ']' after array element …"). 잘린 응답을 그대로
+ * 적용하면 부분 적용/오염이 발생하므로, 응답 잘림이나 파싱 실패가 감지되면
+ * 입력 배치를 절반으로 나눠 재시도합니다.
+ *
+ * @param {{
+ *   projectRoot: string,
+ *   fileEntries: { path: string, content: string }[],
+ *   question: string,
+ *   context: Record<string, string>,
+ *   allowedRelPaths: string[],
+ * }} args
+ * @returns {Promise<string[]>}
+ */
+async function applyWithAutoBatching({
+  projectRoot,
+  fileEntries,
+  question,
+  context,
+  allowedRelPaths,
+}) {
+  const written = [];
+  // queue 는 LIFO 순서로 가공되도록 unshift 로 분할 결과를 다시 넣습니다.
+  const queue = [fileEntries];
+  while (queue.length > 0) {
+    const batch = queue.shift();
+    try {
+      const patches = await requestPatchesForBatch({ question, context, batch });
+      if (patches.length > 0) {
+        const w = await applyAiFilesToDisk(projectRoot, patches, allowedRelPaths);
+        written.push(...w);
+      }
+    } catch (e) {
+      if (e && e.code === 'BATCH_NEEDS_SPLIT' && batch.length > 1) {
+        const mid = Math.ceil(batch.length / 2);
+        const left = batch.slice(0, mid);
+        const right = batch.slice(mid);
+        // eslint-disable-next-line no-console
+        console.warn(
+          `   ⚠️  Gemini 출력이 토큰 한도에서 잘렸습니다(${batch.length}개). ` +
+            `입력 배치를 ${left.length}/${right.length}로 분할해 재시도합니다.`,
+        );
+        queue.unshift(left, right);
+        continue;
+      }
+      throw e;
+    }
   }
   return written;
 }
@@ -179,61 +400,13 @@ async function runAskApply(opts) {
   }
 
   const fileEntries = await readProjectFiles(projectRoot, relPaths);
-  const prompt = buildApplyPrompt(question, context, fileEntries);
-
-  const jsonModelOptions = {
-    generationConfig: {
-      responseMimeType: 'application/json',
-      temperature: 0.2,
-    },
-  };
-
-  let raw;
-  try {
-    raw = await generateText(prompt, { modelOptions: jsonModelOptions });
-  } catch {
-    raw = await generateText(prompt);
-  }
-
-  let patches = [];
-  try {
-    patches = parseApplyJson(raw);
-  } catch {
-    // 1차 파싱 실패 시, 스키마를 재강조해 한 번 더 요청
-    const retryPrompt = `${prompt}
-
-CRITICAL OUTPUT REQUIREMENT (RETRY):
-- Return ONLY a single JSON object.
-- The JSON MUST follow exactly this schema:
-{"files":[{"path":"<allowed path>","content":"<full file content>"}]}
-- Do not include markdown, prose, explanations, or extra keys.`;
-
-    try {
-      raw = await generateText(retryPrompt, { modelOptions: jsonModelOptions });
-    } catch {
-      raw = await generateText(retryPrompt);
-    }
-    patches = parseApplyJson(raw);
-  }
-
-  if (patches.length === 0) {
-    const stripped = extractFirstJsonObjectText(raw);
-    try {
-      const data = JSON.parse(stripped);
-      if (data && typeof data.refusal === 'string') {
-        throw new Error(data.refusal);
-      }
-    } catch (error) {
-      if (error instanceof Error && error.message) {
-        throw error;
-      }
-    }
-  }
-  if (patches.length === 0) {
-    return [];
-  }
-
-  const written = await applyAiFilesToDisk(projectRoot, patches, relPaths);
+  const written = await applyWithAutoBatching({
+    projectRoot,
+    fileEntries,
+    question,
+    context,
+    allowedRelPaths: relPaths,
+  });
 
   // ──────────────────────────────────────────────────────────────────
   // 결정론적 후처리 (Gemini 호출 없음, 토큰 비용 0).
@@ -263,4 +436,5 @@ module.exports = {
   runAskApply,
   parseApplyJson,
   buildApplyPrompt,
+  normalizePatchEntry,
 };

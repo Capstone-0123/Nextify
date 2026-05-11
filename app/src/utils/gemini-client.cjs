@@ -80,21 +80,20 @@ async function generateText(prompt, options = {}) {
     // 모델 목록 조회 실패 시 기본 모델 사용
   }
   
-  // 사용 가능한 모델이 있으면 그것을 우선 사용, 없으면 기본 모델 목록 사용
-  // 2026년 3월 기준 최신 버전부터 우선순위로 나열
+  // 기본 모델 목록 — v1beta endpoint 에서 살아있는 모델만 박아둡니다.
+  //
+  // 주의:
+  //   - GoogleGenerativeAI SDK 는 기본적으로 v1beta 로 generateContent 를 호출합니다.
+  //   - 그래서 v1 에는 있어도 v1beta 에는 없는 모델(예: gemini-1.5-pro)은 404로 떨어집니다.
+  //   - 존재하지 않는 미래 버전(gemini-3.*, 4.*)을 박아두면 첫 N개가 모두 404로 시간을
+  //     낭비하고, 마지막 모델의 404가 lastError 로 남아 진짜 실패 원인이 가려집니다.
+  //   - listAvailableModels() 가 동적으로 가져온 모델은 availableModelNames 로 우선 시도합니다.
   const defaultModels = [
     options.model,
-    'gemini-4.0-flash',
-    'gemini-4.0-pro',
-    'gemini-3.5-flash',
-    'gemini-3.5-pro',
-    'gemini-3.0-flash',
-    'gemini-3.0-pro',
     'gemini-2.5-flash',
     'gemini-2.5-pro',
     'gemini-2.0-flash',
     'gemini-1.5-flash',
-    'gemini-1.5-pro',
   ].filter(Boolean);
   
   // 사용 가능한 모델 목록과 기본 모델 목록을 합치고 중복 제거
@@ -102,7 +101,9 @@ async function generateText(prompt, options = {}) {
     ? [...new Set([options.model, ...availableModelNames, ...defaultModels])].filter(Boolean)
     : defaultModels;
   
-  let lastError = null;
+  // 각 모델별 실제 에러를 누적합니다. lastError 만 노출하면 마지막 시도(노이즈)의 404 같은
+  // 부차적 에러만 보여서 quota/rate-limit/auth 같은 진짜 원인이 가려집니다.
+  const perModelErrors = [];
   
   for (const modelName of modelsToTry) {
     try {
@@ -113,18 +114,44 @@ async function generateText(prompt, options = {}) {
       
       const result = await model.generateContent(prompt);
       const response = await result.response;
-      return response.text();
+      const text = response.text();
+      if (options.returnMeta) {
+        // finishReason 은 응답이 잘렸는지(=MAX_TOKENS) 식별하기 위해 호출자에게 노출합니다.
+        // 잘린 응답을 그대로 JSON.parse 하면 잘못된 위치에서 throw 되어 진짜 원인이 가려집니다.
+        let finishReason = null;
+        try {
+          finishReason = response.candidates?.[0]?.finishReason || null;
+        } catch (_) {
+          finishReason = null;
+        }
+        return { text, finishReason, model: modelName };
+      }
+      return text;
     } catch (error) {
-      lastError = error;
+      perModelErrors.push({ model: modelName, message: error?.message || String(error) });
       // 다음 모델 시도
       continue;
     }
   }
   
-  // 모든 모델 실패 시 에러 메시지 개선
-  const errorMsg = availableModelNames.length > 0
-    ? `모든 모델 시도 실패. 시도한 모델: ${modelsToTry.slice(0, 5).join(', ')}${modelsToTry.length > 5 ? '...' : ''}. 마지막 에러: ${lastError?.message || '알 수 없는 오류'}`
-    : `모든 모델 시도 실패. 마지막 에러: ${lastError?.message || '알 수 없는 오류'}`;
+  // 모든 모델 실패 — 진짜 원인을 그룹핑해서 노출.
+  // 같은 메시지로 묶인 에러가 많다면 quota/auth/네트워크 같은 공통 원인일 가능성이 높습니다.
+  const grouped = new Map();
+  for (const e of perModelErrors) {
+    const key = (e.message || '').slice(0, 200);
+    const arr = grouped.get(key) || [];
+    arr.push(e.model);
+    grouped.set(key, arr);
+  }
+  const groupedLines = [...grouped.entries()]
+    .sort((a, b) => b[1].length - a[1].length)
+    .slice(0, 4)
+    .map(([msg, models]) => `  - [${models.length}개 모델] ${models.slice(0, 3).join(', ')}${models.length > 3 ? ' …' : ''}\n    → ${msg}`);
+  
+  const errorMsg =
+    `모든 모델 시도 실패 (${modelsToTry.length}개).\n` +
+    `시도한 모델: ${modelsToTry.slice(0, 6).join(', ')}${modelsToTry.length > 6 ? ' …' : ''}\n` +
+    `에러 그룹:\n${groupedLines.join('\n')}`;
   
   throw new Error(`Gemini API 오류: ${errorMsg}`);
 }
@@ -176,21 +203,13 @@ async function generateTextStream(prompt, onChunk, options = {}) {
     // 모델 목록 조회 실패 시 기본 모델 사용
   }
   
-  // 사용 가능한 모델이 있으면 그것을 우선 사용, 없으면 기본 모델 목록 사용
-  // 2026년 3월 기준 최신 버전부터 우선순위로 나열
+  // generateText() 와 동일 정책: v1beta SDK 가 실제 호출 가능한 모델만 박아둡니다.
   const defaultModels = [
     options.model,
-    'gemini-4.0-flash',
-    'gemini-4.0-pro',
-    'gemini-3.5-flash',
-    'gemini-3.5-pro',
-    'gemini-3.0-flash',
-    'gemini-3.0-pro',
     'gemini-2.5-flash',
     'gemini-2.5-pro',
     'gemini-2.0-flash',
     'gemini-1.5-flash',
-    'gemini-1.5-pro',
   ].filter(Boolean);
   
   // 사용 가능한 모델 목록과 기본 모델 목록을 합치고 중복 제거
@@ -198,7 +217,7 @@ async function generateTextStream(prompt, onChunk, options = {}) {
     ? [...new Set([options.model, ...availableModelNames, ...defaultModels])].filter(Boolean)
     : defaultModels;
   
-  let lastError = null;
+  const perModelErrors = [];
   
   for (const modelName of modelsToTry) {
     try {
@@ -219,16 +238,30 @@ async function generateTextStream(prompt, onChunk, options = {}) {
       }
       return; // 성공 시 종료
     } catch (error) {
-      lastError = error;
+      perModelErrors.push({ model: modelName, message: error?.message || String(error) });
       // 다음 모델 시도
       continue;
     }
   }
   
-  // 모든 모델 실패 시 에러 메시지 개선
-  const errorMsg = availableModelNames.length > 0
-    ? `모든 모델 시도 실패. 시도한 모델: ${modelsToTry.slice(0, 5).join(', ')}${modelsToTry.length > 5 ? '...' : ''}. 마지막 에러: ${lastError?.message || '알 수 없는 오류'}`
-    : `모든 모델 시도 실패. 마지막 에러: ${lastError?.message || '알 수 없는 오류'}`;
+  // 모든 모델 실패 — 에러를 그룹핑해 진짜 원인을 노출 (마지막 모델의 404 같은 노이즈가
+  // lastError 자리를 차지하지 않도록 함).
+  const grouped = new Map();
+  for (const e of perModelErrors) {
+    const key = (e.message || '').slice(0, 200);
+    const arr = grouped.get(key) || [];
+    arr.push(e.model);
+    grouped.set(key, arr);
+  }
+  const groupedLines = [...grouped.entries()]
+    .sort((a, b) => b[1].length - a[1].length)
+    .slice(0, 4)
+    .map(([msg, models]) => `  - [${models.length}개 모델] ${models.slice(0, 3).join(', ')}${models.length > 3 ? ' …' : ''}\n    → ${msg}`);
+  
+  const errorMsg =
+    `모든 모델 시도 실패 (${modelsToTry.length}개).\n` +
+    `시도한 모델: ${modelsToTry.slice(0, 6).join(', ')}${modelsToTry.length > 6 ? ' …' : ''}\n` +
+    `에러 그룹:\n${groupedLines.join('\n')}`;
   
   throw new Error(`Gemini API 오류: ${errorMsg}`);
 }

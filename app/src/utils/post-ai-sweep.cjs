@@ -125,6 +125,39 @@ function isBrowserGuardForVariable(ifStatement, varName) {
 }
 
 /**
+ * 식별자가 SourceFile 안에서 "값으로 읽히는" 곳이 있는지 판정합니다.
+ * 자기 선언과 (선택적으로) 자기 할당 좌변 1곳은 사용으로 치지 않습니다.
+ *
+ * @param {import('ts-morph').SourceFile} sourceFile
+ * @param {import('ts-morph').VariableDeclaration} varDeclarationNode
+ * @param {string} varName
+ */
+function isIdentifierReadAnywhere(sourceFile, varDeclarationNode, varName) {
+  const refs = sourceFile
+    .getDescendantsOfKind(SyntaxKind.Identifier)
+    .filter((id) => id.getText() === varName);
+
+  for (const id of refs) {
+    const decl = id.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
+    if (decl && decl === varDeclarationNode) continue;
+
+    // 자기 자신에 대한 = 할당의 좌변은 "쓰기" 이므로 사용으로 치지 않음.
+    const binary = id.getFirstAncestorByKind(SyntaxKind.BinaryExpression);
+    if (binary) {
+      const op = binary.getOperatorToken();
+      if (
+        op.getKind() === SyntaxKind.EqualsToken &&
+        binary.getLeft().getText() === varName
+      ) {
+        continue;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
  * 파일 내에서 식별자가 "값으로 읽히는지" 판정.
  * - 자기 자신의 선언자
  * - 가드 if 블록 내부의 자기 할당 좌변
@@ -284,6 +317,301 @@ async function sweepSingleFile(projectRoot, relPath) {
     varStmt.remove();
     removedTargets.push(`${relPath}:${varName}`);
     modified = true;
+  }
+
+  // 1-B') 모듈-스코프 dead expression statement: 깨진 SSR-guard 시도 패턴
+  //   `void typeof X !== 'undefined' ? <browser-access> : <fallback>;`
+  //
+  //   연산자 우선순위 때문에 `(void typeof X) !== 'undefined'` 로 해석되고,
+  //   `void typeof X` 는 언제나 `undefined`, `undefined !== 'undefined'` 는 항상 `true` 라
+  //   then 절(브라우저 API 접근)이 항상 실행됩니다. 결과:
+  //     - SSR/build 시 `ReferenceError: window is not defined` 로 빌드 차단
+  //     - module-scope 라 page data collection 단계에서 즉시 폭발
+  //   이건 Gemini 가 SSR-guard 를 추가하려다 실패한 dead 패턴이므로 통째로 제거.
+  {
+    const topLevelExprStmts = sourceFile
+      .getStatements()
+      .filter((s) => s.getKind() === SyntaxKind.ExpressionStatement);
+    for (let i = topLevelExprStmts.length - 1; i >= 0; i--) {
+      const stmt = topLevelExprStmts[i];
+      const expr = stmt.getExpression();
+      if (!expr) continue;
+
+      // 두 가지 형태 지원:
+      //   (a) statement 자체가 ConditionalExpression — `void typeof X !== 'u' ? a : b;`
+      //   (b) statement 자체가 BinaryExpression(`void typeof X !== 'u'`)  ← 일부 AI 출력
+      let condition = null;
+      if (expr.getKind() === SyntaxKind.ConditionalExpression) {
+        condition = expr.getCondition?.();
+      } else if (expr.getKind() === SyntaxKind.BinaryExpression) {
+        condition = expr;
+      }
+      if (!condition || condition.getKind() !== SyntaxKind.BinaryExpression) continue;
+
+      const opToken = condition.getOperatorToken?.();
+      const opKind = opToken ? opToken.getKind() : null;
+      if (
+        opKind !== SyntaxKind.ExclamationEqualsEqualsToken &&
+        opKind !== SyntaxKind.EqualsEqualsEqualsToken &&
+        opKind !== SyntaxKind.ExclamationEqualsToken &&
+        opKind !== SyntaxKind.EqualsEqualsToken
+      ) continue;
+
+      const left = condition.getLeft?.();
+      const right = condition.getRight?.();
+      if (!left || !right) continue;
+
+      const isVoidTypeof = (node) => {
+        if (!node || node.getKind() !== SyntaxKind.VoidExpression) return false;
+        const inner = node.getExpression?.();
+        if (!inner || inner.getKind() !== SyntaxKind.TypeOfExpression) return false;
+        const innerExpr = inner.getExpression?.();
+        if (!innerExpr || innerExpr.getKind() !== SyntaxKind.Identifier) return false;
+        return BROWSER_GLOBAL_NAMES.has(innerExpr.getText());
+      };
+      const isUndefinedString = (node) => {
+        if (!node) return false;
+        if (node.getKind() === SyntaxKind.StringLiteral) {
+          return node.getLiteralText?.() === 'undefined';
+        }
+        return false;
+      };
+
+      const matches =
+        (isVoidTypeof(left) && isUndefinedString(right)) ||
+        (isVoidTypeof(right) && isUndefinedString(left));
+      if (!matches) continue;
+
+      try {
+        stmt.remove();
+        removedTargets.push(`${relPath}:dead-broken-ssr-guard`);
+        modified = true;
+      } catch {
+        // 무시
+      }
+    }
+  }
+
+  // 1-B) 모듈-스코프 dead expression statement: `void <expr> ? <a> : <b>;`
+  //   - `void <anything>` 는 항상 `undefined`(falsy) → 항상 `:` 분기 → 결과 미사용
+  //   - TypeScript 가 TS2873 "This kind of expression is always falsy." 로 빌드 실패시킴
+  //   - server 측 prerender 단계에서 평가되어 useState null 같은 간접 에러도 야기
+  //   - step5 의 Gemini 가 자주 만드는 패턴이므로 결정론적으로 제거
+  {
+    const topLevelExprStmts = sourceFile
+      .getStatements()
+      .filter((s) => s.getKind() === SyntaxKind.ExpressionStatement);
+    // 뒤에서부터 제거해야 인덱스가 흐트러지지 않음
+    for (let i = topLevelExprStmts.length - 1; i >= 0; i--) {
+      const stmt = topLevelExprStmts[i];
+      const expr = stmt.getExpression();
+      if (!expr || expr.getKind() !== SyntaxKind.ConditionalExpression) continue;
+      const condition = expr.getCondition?.();
+      if (!condition) continue;
+      // 조건 자체가 `void <anything>` 인 경우만 제거 (항상 falsy 보장)
+      if (condition.getKind() !== SyntaxKind.VoidExpression) continue;
+      try {
+        stmt.remove();
+        removedTargets.push(`${relPath}:dead-void-conditional`);
+        modified = true;
+      } catch {
+        // 안전망 자체가 마이그레이션을 막지 않도록 무시
+      }
+    }
+  }
+
+  // 1-C) 모듈-스코프 미사용 const/let `const _<name> = <expr>;`
+  //   - step5 Gemini 가 dead variable 을 `_` 접두로 의도 표시하지만,
+  //     tsc 의 "noUnusedLocals" 가 켜져 있으면 TS6133 으로 빌드를 실패시킴
+  //   - 어디서도 안 읽히면 결정론적으로 제거 (이름이 _ 로 시작하는 것만 — 의도가 명확한 표지)
+  {
+    const topLevelVarStmts2 = sourceFile
+      .getStatements()
+      .filter((s) => s.getKind() === SyntaxKind.VariableStatement);
+    for (let i = topLevelVarStmts2.length - 1; i >= 0; i--) {
+      const varStmt = topLevelVarStmts2[i];
+      const declarations = varStmt.getDeclarationList().getDeclarations();
+      if (declarations.length !== 1) continue;
+      const decl = declarations[0];
+      const varName = decl.getName();
+      if (!varName || !/^_/.test(varName)) continue;
+      // export 된 식별자는 보존
+      if (varStmt.getModifiers?.().some((m) => m.getKind() === SyntaxKind.ExportKeyword)) continue;
+      if (isIdentifierReadAnywhere(sourceFile, decl, varName)) continue;
+      try {
+        varStmt.remove();
+        removedTargets.push(`${relPath}:unused-underscore-var:${varName}`);
+        modified = true;
+      } catch {
+        // 무시
+      }
+    }
+  }
+
+  // 1-E) 결정론적 unused import 제거 (TS6133 박멸).
+  //   - default-only:  `import X from 'foo'` 가 어디서도 사용 안 되면 전체 declaration 제거.
+  //   - named-only:    `import { X, Y } from 'foo'` 에서 사용 안 되는 named 만 제거.
+  //                    모두 사용 안 되면 declaration 제거.
+  //   - namespace:     `import * as ns from 'foo'` 가 사용 안 되면 declaration 제거.
+  //   - mixed (`import X, { Y } from 'foo'`) 와 type-only (`import type { X }`) 는 보수적으로 보존.
+  //   - side-effect import (`import 'foo'`) 는 절대 손대지 않음.
+  {
+    const importDecls = sourceFile.getImportDeclarations();
+    for (let i = importDecls.length - 1; i >= 0; i--) {
+      const imp = importDecls[i];
+      if (imp.isTypeOnly && imp.isTypeOnly()) continue; // type-only 는 보수적으로 보존
+
+      const def = imp.getDefaultImport();
+      const named = imp.getNamedImports();
+      const ns = imp.getNamespaceImport();
+
+      // side-effect import: import 'foo' — 보존
+      if (!def && named.length === 0 && !ns) continue;
+
+      // mixed (default + named) 는 ts-morph remove 처리가 까다로워서 보수적으로 보존
+      if (def && (named.length > 0 || ns)) continue;
+
+      const isIdentReadElsewhere = (name) => {
+        const refs = sourceFile.getDescendantsOfKind(SyntaxKind.Identifier);
+        for (const id of refs) {
+          if (id.getText() !== name) continue;
+          // import 선언 안에 있는 동일 이름은 사용으로 치지 않음
+          const insideImport = id.getFirstAncestorByKind(SyntaxKind.ImportDeclaration);
+          if (insideImport && insideImport === imp) continue;
+          return true;
+        }
+        return false;
+      };
+
+      // default-only
+      if (def && named.length === 0 && !ns) {
+        const name = def.getText();
+        if (!isIdentReadElsewhere(name)) {
+          try {
+            imp.remove();
+            removedTargets.push(`${relPath}:unused-import:${name}`);
+            modified = true;
+          } catch {
+            // 무시
+          }
+        }
+        continue;
+      }
+
+      // namespace-only
+      if (ns && !def && named.length === 0) {
+        const name = ns.getName();
+        if (!isIdentReadElsewhere(name)) {
+          try {
+            imp.remove();
+            removedTargets.push(`${relPath}:unused-import:* as ${name}`);
+            modified = true;
+          } catch {
+            // 무시
+          }
+        }
+        continue;
+      }
+
+      // named-only
+      if (named.length > 0 && !def && !ns) {
+        const unusedNamed = named.filter((n) => {
+          const aliasNode = n.getAliasNode?.();
+          const localName = aliasNode ? aliasNode.getText() : n.getName();
+          return !isIdentReadElsewhere(localName);
+        });
+        if (unusedNamed.length === 0) continue;
+        if (unusedNamed.length === named.length) {
+          try {
+            imp.remove();
+            for (const n of unusedNamed) {
+              removedTargets.push(`${relPath}:unused-import:${n.getName()}`);
+            }
+            modified = true;
+          } catch {
+            // 무시
+          }
+        } else {
+          for (const n of unusedNamed) {
+            try {
+              n.remove();
+              removedTargets.push(`${relPath}:unused-named-import:${n.getName()}`);
+              modified = true;
+            } catch {
+              // 무시
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 1-F) JSX attribute 이름 정규화: `fetchpriority` → `fetchPriority` (React TS2322 박멸)
+  //   - HTML 명세상 lowercase `fetchpriority` 가 표준이지만 React는 camelCase prop 만 인식.
+  //   - 타입 정의가 없는 prop 으로 취급되어 `Type '... fetchpriority: string ...' is not
+  //     assignable to type 'DetailedHTMLProps<LinkHTMLAttributes<...>>'` 빌드 에러 유발.
+  //   - 결정론적 변경: JSX attribute 이름 노드만 교체. 문자열·주석 안에는 손대지 않음.
+  {
+    const jsxAttrs = sourceFile.getDescendantsOfKind(SyntaxKind.JsxAttribute);
+    for (const attr of jsxAttrs) {
+      const nameNode = attr.getNameNode?.();
+      if (!nameNode) continue;
+      if (nameNode.getText() === 'fetchpriority') {
+        try {
+          nameNode.replaceWithText('fetchPriority');
+          removedTargets.push(`${relPath}:jsx-prop-rename:fetchpriority->fetchPriority`);
+          modified = true;
+        } catch {
+          // 무시
+        }
+      }
+    }
+  }
+
+  // 1-D) 위 정리 결과로 `const isWindowDefined = typeof <browser> !== 'undefined';` 같은
+  //   "browser presence flag" 가 어디서도 안 읽히게 됐다면 함께 제거.
+  //   - 식별자만 보고 판단하지 않고, 초기화식이 `typeof <BROWSER_GLOBAL> !== 'undefined'`
+  //     인 모듈-스코프 const/let 만 대상으로 함 (안전한 좁은 패턴)
+  {
+    const topLevelVarStmts3 = sourceFile
+      .getStatements()
+      .filter((s) => s.getKind() === SyntaxKind.VariableStatement);
+    for (let i = topLevelVarStmts3.length - 1; i >= 0; i--) {
+      const varStmt = topLevelVarStmts3[i];
+      const declarations = varStmt.getDeclarationList().getDeclarations();
+      if (declarations.length !== 1) continue;
+      const decl = declarations[0];
+      const varName = decl.getName();
+      if (!varName) continue;
+      const init = decl.getInitializer?.();
+      if (!init || init.getKind() !== SyntaxKind.BinaryExpression) continue;
+
+      const op = init.getOperatorToken();
+      const isNotEquals =
+        op.getKind() === SyntaxKind.ExclamationEqualsEqualsToken ||
+        op.getKind() === SyntaxKind.ExclamationEqualsToken;
+      if (!isNotEquals) continue;
+
+      const left = init.getLeft();
+      const right = init.getRight();
+      if (left.getKind() !== SyntaxKind.TypeOfExpression) continue;
+      const typeofTarget = left.getExpression?.()?.getText?.() || '';
+      if (!BROWSER_GLOBAL_NAMES.has(typeofTarget)) continue;
+      const rightText = right.getText().replace(/^['"]|['"]$/g, '');
+      if (rightText !== 'undefined') continue;
+
+      // export 된 flag 는 보존
+      if (varStmt.getModifiers?.().some((m) => m.getKind() === SyntaxKind.ExportKeyword)) continue;
+      if (isIdentifierReadAnywhere(sourceFile, decl, varName)) continue;
+
+      try {
+        varStmt.remove();
+        removedTargets.push(`${relPath}:unused-browser-flag:${varName}`);
+        modified = true;
+      } catch {
+        // 무시
+      }
+    }
   }
 
   // 2) AI 자기-설명 메타 주석 제거

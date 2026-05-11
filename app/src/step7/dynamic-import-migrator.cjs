@@ -4,6 +4,81 @@
 const fs = require('fs-extra');
 const path = require('path');
 const { sweepAfterAiApply } = require('../utils/post-ai-sweep.cjs');
+const { loadNextifyProjectConfig } = require('../utils/nextify-project-config.cjs');
+
+/**
+ * `import(".../Hero")` 등에서 모듈 파일 베이스네임 추출 (확장자 제거).
+ */
+function basenameFromImportSpecifier(spec) {
+  const normalized = String(spec).trim().replace(/^["']|["']$/g, '');
+  const seg = normalized.split(/[/\\]/).pop() || '';
+  return seg.replace(/\.(tsx|jsx|ts|js)$/i, '');
+}
+
+/**
+ * `.nextify` 의 lcpImageFilenameBaseNames 와 일치하면 LCP 상단 후보 컴포넌트로 보고
+ * next/dynamic 분리 대상에서 제외합니다 (조건부 렌더링 Case a 등).
+ */
+function importSpecTargetsLcpCritical(importPath, lcpBaseNames) {
+  const base = basenameFromImportSpecifier(importPath);
+  return lcpBaseNames.some((b) => b.toLowerCase() === base.toLowerCase());
+}
+
+/**
+ * 이전 실행 등으로 남은 `const Hero = dynamic(() => import("...Hero"))` 를
+ * `import Hero from "..."` 로 되돌립니다 (LCP 지연 방지).
+ */
+async function revertDynamicImportsForLcpComponents(projectRoot) {
+  const cfg = loadNextifyProjectConfig(projectRoot);
+  const srcDir = path.join(projectRoot, 'src');
+  if (!fs.existsSync(srcDir)) return;
+
+  async function walk(dir) {
+    const files = [];
+    const items = await fs.readdir(dir, { withFileTypes: true });
+    for (const item of items) {
+      const full = path.join(dir, item.name);
+      if (item.isDirectory()) {
+        if (!['node_modules', '.next', '.git'].includes(item.name)) {
+          files.push(...(await walk(full)));
+        }
+      } else if (/\.(tsx|jsx)$/.test(item.name)) {
+        files.push(full);
+      }
+    }
+    return files;
+  }
+
+  const re =
+    /\bconst\s+(\w+)\s*=\s*dynamic\s*\(\s*\(\s*\)\s*=>\s*import\s*\(\s*(["'])([^"']+)\2\s*\)\s*(?:,\s*\{[^}]*\})?\s*\)\s*;?\s*\r?\n?/g;
+
+  const files = await walk(srcDir);
+  for (const filePath of files) {
+    let content = await fs.readFile(filePath, 'utf-8');
+    const original = content;
+    let changed = false;
+
+    content = content.replace(re, (full, id, q, spec) => {
+      if (!importSpecTargetsLcpCritical(spec, cfg.lcpImageFilenameBaseNames)) {
+        return full;
+      }
+      if (new RegExp(`(^|\\n)\\s*import\\s+${id}\\s+from\\s+["']`, 'm').test(content)) {
+        return full;
+      }
+      changed = true;
+      return `import ${id} from ${q}${spec}${q};\n`;
+    });
+
+    if (changed && content !== original) {
+      if (!/\bdynamic\s*\(/.test(content)) {
+        content = content.replace(/^import\s+dynamic\s+from\s+["']next\/dynamic["'];?\s*\r?\n?/m, '');
+        content = content.replace(/\nimport\s+dynamic\s+from\s+["']next\/dynamic["'];?\s*\r?\n?/gi, '\n');
+      }
+      content = content.replace(/^\s*;\s*\n/m, '').replace(/\n{3,}/g, '\n\n');
+      await fs.writeFile(filePath, content, 'utf-8');
+    }
+  }
+}
 
 //=========================================================
 // 공용 유틸
@@ -54,6 +129,99 @@ function canInjectDynamicWithSsrFalse(targetFilePath, targetContent) {
   return false;
 }
 
+function insertDynamicDeclAfterImports(content, declBlock) {
+  const importLineRe = /^import[^\n]*?from\s+["'][^"']+["']\s*;?\s*\n/gm;
+  let lastEnd = 0;
+  let m;
+  while ((m = importLineRe.exec(content)) !== null) {
+    lastEnd = m.index + m[0].length;
+  }
+  if (lastEnd > 0) {
+    return content.slice(0, lastEnd) + declBlock + content.slice(lastEnd);
+  }
+  return declBlock + content;
+}
+
+/**
+ * package.json 에 설치된 무거운 패키지의 default import 를 dynamic(..., { ssr: false }) 로 분리합니다.
+ */
+async function migrateHeavyDefaultPackageImports(projectRoot) {
+  const cfg = loadNextifyProjectConfig(projectRoot);
+  const pkgJsonPath = path.join(projectRoot, 'package.json');
+  if (!fs.existsSync(pkgJsonPath)) return;
+
+  let deps = {};
+  try {
+    const j = await fs.readJson(pkgJsonPath);
+    deps = { ...(j.dependencies || {}), ...(j.devDependencies || {}) };
+  } catch {
+    return;
+  }
+
+  const active = cfg.heavyDefaultImportPackages.filter((p) =>
+    Object.prototype.hasOwnProperty.call(deps, p),
+  );
+  if (active.length === 0) return;
+
+  const srcDir = path.join(projectRoot, 'src');
+  if (!fs.existsSync(srcDir)) return;
+
+  async function findTsxJsx(dir) {
+    const files = [];
+    const items = await fs.readdir(dir, { withFileTypes: true });
+    for (const item of items) {
+      const fullPath = path.join(dir, item.name);
+      if (item.isDirectory()) {
+        if (!['node_modules', '.next', '.git'].includes(item.name)) {
+          files.push(...(await findTsxJsx(fullPath)));
+        }
+      } else if (/\.(tsx|jsx)$/.test(item.name)) {
+        files.push(fullPath);
+      }
+    }
+    return files;
+  }
+
+  const allFiles = await findTsxJsx(srcDir);
+  for (const filePath of allFiles) {
+    let content = await fs.readFile(filePath, 'utf-8');
+    const original = content;
+    let changed = false;
+
+    for (const pkg of active) {
+      const escaped = pkg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const importRe = new RegExp(
+        `(^|\\n)(import\\s+(\\w+)\\s+from\\s+["']${escaped}["']\\s*;?\\s*\\r?\\n?)`,
+        'm',
+      );
+      const mm = content.match(importRe);
+      if (!mm) continue;
+      const ident = mm[3];
+      if (new RegExp(`\\bconst\\s+${ident}\\s*=\\s*dynamic\\s*\\(`).test(content)) {
+        continue;
+      }
+
+      const withoutImport = content.replace(importRe, mm[1] || '\n');
+      if (!canInjectDynamicWithSsrFalse(filePath, withoutImport)) {
+        continue;
+      }
+
+      const hasDynImp = /import\s+dynamic\s+from\s+["']next\/dynamic["']/.test(withoutImport);
+      const importDyn = hasDynImp ? '' : `import dynamic from "next/dynamic";\n`;
+      const decl = `${importDyn}const ${ident} = dynamic(() => import("${pkg}"), { ssr: false });\n`;
+      content = insertDynamicDeclAfterImports(withoutImport, decl);
+      changed = true;
+    }
+
+    if (changed && content !== original) {
+      content = content
+        .replace(/^\s*;\s*\n/m, '')
+        .replace(/\n{3,}/g, '\n\n');
+      await fs.writeFile(filePath, content, 'utf-8');
+    }
+  }
+}
+
 //=========================================================
 // Dynamic Import 적용 메인 함수
 //=========================================================
@@ -64,6 +232,11 @@ async function optimizeDynamicImport(projectRoot) {
   if (!fs.existsSync(srcDir)) {
     return;
   }
+
+  // LCP 상단 후보(Hero 등)는 dynamic 청크 분리 시 지연이 커질 수 있어 먼저 정적 import 로 되돌림
+  await revertDynamicImportsForLcpComponents(projectRoot);
+
+  await migrateHeavyDefaultPackageImports(projectRoot);
 
   // Case a: 조건부 렌더링 컴포넌트
   await migrateConditionalRenderingComponents(projectRoot);
@@ -131,6 +304,7 @@ async function collectTsxRelPaths(projectRoot, srcDir) {
 //=========================================================
 async function migrateConditionalRenderingComponents(projectRoot) {
   const srcDir = path.join(projectRoot, 'src');
+  const cfg = loadNextifyProjectConfig(projectRoot);
 
   // 1. src/ 하위 .ts, .tsx 파일 찾기
   async function findTsFiles(dir) {
@@ -182,7 +356,7 @@ async function migrateConditionalRenderingComponents(projectRoot) {
     }
 
     // 3. 파일 최상단에서 정적 import 확인
-    const importsToConvert = [];
+    let importsToConvert = [];
     for (const componentIdentifier of componentIdentifiers) {
       // import ComponentIdentifier from "ComponentImportPath" 패턴 찾기
       const importPattern = new RegExp(`import\\s+${componentIdentifier}\\s+from\\s+["']([^"']+)["']`, 'g');
@@ -195,6 +369,10 @@ async function migrateConditionalRenderingComponents(projectRoot) {
         });
       }
     }
+
+    importsToConvert = importsToConvert.filter(
+      (imp) => !importSpecTargetsLcpCritical(imp.importPath, cfg.lcpImageFilenameBaseNames),
+    );
 
     if (importsToConvert.length === 0) {
       return; // 변환할 import가 없으면 종료

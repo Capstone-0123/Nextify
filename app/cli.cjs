@@ -97,7 +97,7 @@ const { runAskApply } = require('./src/utils/ai-file-apply.cjs');
 const { runAiReviewSessionStream } = require('./src/utils/ai-review-session.cjs');
 const { ensureGeminiCliReady } = require('./src/utils/gemini-cli-setup.cjs');
 const { printRelPathsBlock } = require('./src/utils/path-list-print.cjs');
-const { generatePerformanceReport } = require('./src/step7/performance-report.cjs');
+const { generatePerformanceReport, createPreStep7Snapshot } = require('./src/step7/performance-report.cjs');
 const fs = require('fs-extra');
 const pkg = require('./package.json');
 
@@ -931,6 +931,22 @@ async function runDefaultOrchestrator() {
     for (const [stepName, stepRunner] of stepEntries) {
       const partNum = stepName.replace('step', '');
       console.log(chalk.yellow(`\n==================== Part ${partNum} (${stepName}) ====================`));
+      // step7 시작 직전(즉 step1~6 결과 시점)에서 성능 비교용 스냅샷을 생성해 둡니다.
+      // 이렇게 하지 않으면 generatePerformanceReport 시점에 만들어져 step7 결과를 복사하게 되어
+      // step1~6 vs step1~7 비교가 사실상 동일 코드 비교가 되어 버립니다.
+      if (stepName === 'step7') {
+        try {
+          console.log(chalk.gray('   [perf] step7 적용 전 스냅샷을 생성합니다 (step1~6 결과 보존).'));
+          await createPreStep7Snapshot(projectRoot);
+        } catch (snapshotErr) {
+          console.log(
+            chalk.yellow(
+              `   ⚠️  step7 사전 스냅샷 생성 실패: ${snapshotErr?.message || snapshotErr}\n` +
+                '   - 성능 레포트의 step1~6 비교 결과가 step1~7과 동일해질 수 있습니다.',
+            ),
+          );
+        }
+      }
       await stepRunner(projectRoot);
     }
   });
@@ -957,9 +973,18 @@ async function runDefaultOrchestrator() {
   // 1) 성능 레포트 생성
   console.log(chalk.yellow('\n📊 성능 레포트 생성을 시작합니다.'));
   const reportPath = path.join(targetPath, 'nextify-performance-report.md');
+  // step7 진입 직전에 미리 만들어 둔 스냅샷 경로를 명시적으로 전달합니다.
+  // (그렇지 않으면 generatePerformanceReport 가 이 시점에 다시 createPreStep7Snapshot 을 호출하는데,
+  //  이미 step7 가 끝난 상태이므로 snapshot 이 step7 결과의 복사본이 되어 비교가 무의미해집니다.)
+  const preStep7SnapshotRoot = path.join(
+    path.dirname(targetPath),
+    `${path.basename(targetPath)}__nextify_snapshots`,
+    'pre-step7',
+  );
   const reportResult = await runPerformanceReportSafely({
     projectRoot: targetPath,
     outputMarkdownPath: reportPath,
+    preStep7Root: preStep7SnapshotRoot,
   });
   if (!reportResult.success) {
     console.log(chalk.yellow(`⚠️  성능 레포트 생성에 실패했습니다: ${reportResult.error.message}`));
