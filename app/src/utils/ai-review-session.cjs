@@ -3,6 +3,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { generateTextStream, getNextifyScopeRules } = require('./gemini-client.cjs');
+const { buildGeminiCliSpawnEnv, getGeminiCliReviewAutoArgs } = require('./gemini-cli-spawn-env.cjs');
 const ora = require('ora');
 const { spawn } = require('child_process');
 
@@ -127,6 +128,33 @@ function uniqPreserveOrder(arr) {
 function isUsageLimitReached(text) {
   return /Usage limit reached/i.test(String(text || ''));
 }
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseNonNegInt(value, fallback) {
+  const n = parseInt(String(value ?? '').trim(), 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+/** Gemini CLI "Content generator not initialized" 등 초기화 레이스 완화용 재시도. */
+function getGeminiInitRetryConfig() {
+  return {
+    maxAttempts: Math.max(1, parseNonNegInt(process.env.NEXTIFY_GEMINI_CLI_INIT_RETRY_MAX, 3)),
+    baseDelayMs: parseNonNegInt(process.env.NEXTIFY_GEMINI_CLI_INIT_RETRY_DELAY_MS, 2000),
+  };
+}
+
+function getInteractivePrestartDelayMs() {
+  return parseNonNegInt(process.env.NEXTIFY_GEMINI_CLI_INTERACTIVE_PRESTART_DELAY_MS, 0);
+}
+
+function isContentGeneratorInitError(text) {
+  return /content generator not initialized/i.test(String(text || ''));
+}
+
+const INTERACTIVE_QUICK_FAIL_MS = parseNonNegInt(process.env.NEXTIFY_GEMINI_CLI_INTERACTIVE_QUICK_FAIL_MS, 15000);
 
 async function buildAiReviewPromptFromSession(session) {
   const step = session.step || 'unknown';
@@ -296,13 +324,17 @@ async function runAiReviewSessionCliStream(opts) {
   const waitMessage =
     normalizedMode === 'stream' ? 'Sending prompt to Gemini CLI & waiting...' : 'Launching Gemini CLI interactive session...';
 
-  const attemptWithModel = (modelName) =>
+  const childEnv = buildGeminiCliSpawnEnv(workingDirectory);
+
+  const runSingleGeminiCliAttempt = (modelName) =>
     new Promise((resolve, reject) => {
       let done = false;
       let child;
       let abortHandler;
       let firstChunkSeen = false;
       let usageLimitHit = false;
+      let combinedStreamOutput = '';
+      let stderrBuf = '';
       const stage2Spinner = ora(waitMessage).start();
 
       const finish = (result) => {
@@ -335,16 +367,19 @@ async function runAiReviewSessionCliStream(opts) {
       const spawnWithCandidates = (candidates) => {
         for (const candidate of candidates) {
           try {
-            const effectiveArgsBase = ['--model', modelName, ...(args || [])];
+            const effectiveArgsBase = [...getGeminiCliReviewAutoArgs(), '--model', modelName, ...(args || [])];
             const effectiveArgs =
               normalizedMode === 'interactive-seeded' && interactiveSeedPrompt
                 ? [...effectiveArgsBase, '--prompt-interactive', toSingleLinePromptArg(interactiveSeedPrompt)]
                 : effectiveArgsBase;
 
-            // interactive에서는 TTY가 필요하므로 stdin/stdout/stderr를 전부 inherit로 유지합니다.
-            // (stdout/stderr pipe는 TTY 감지를 깨서 gemini가 "No input provided via stdin"으로 종료할 수 있습니다.)
-            // usage limit fallback은 exit code(현재 gemini-cli가 usage limit에서 code=42 반환)를 기준으로 처리합니다.
-            const stdio = normalizedMode === 'stream' ? ['pipe', 'pipe', 'pipe'] : 'inherit';
+            // stream: 전부 pipe. interactive-seeded만 stderr pipe(초기화 오류 재시도 판별); 그 외 non-stream은 전부 inherit.
+            const stdio =
+              normalizedMode === 'stream'
+                ? ['pipe', 'pipe', 'pipe']
+                : normalizedMode === 'interactive-seeded'
+                  ? ['inherit', 'inherit', 'pipe']
+                  : 'inherit';
             const isWin = process.platform === 'win32';
             if (isWin) {
               // Windows + shell:true 조합에서 긴 인자/특수문자 파싱이 깨질 수 있어
@@ -354,6 +389,7 @@ async function runAiReviewSessionCliStream(opts) {
                 cwd: workingDirectory,
                 windowsHide: true,
                 shell: false,
+                env: childEnv,
               });
             } else {
               child = spawn(candidate, effectiveArgs, {
@@ -361,6 +397,7 @@ async function runAiReviewSessionCliStream(opts) {
                 cwd: workingDirectory,
                 windowsHide: true,
                 shell: false,
+                env: childEnv,
               });
             }
             return candidate;
@@ -381,6 +418,8 @@ async function runAiReviewSessionCliStream(opts) {
         return fail(guidance);
       }
 
+      const spawnTime = Date.now();
+
       // Gemini CLI 프로세스 spawn 자체는 성공한 상태입니다.
       // stdout/stderr 청크(첫 output)가 늦게 올 수 있어, 그 때까지 스피너가 계속 도는 문제를 방지합니다.
       firstChunkSeen = true;
@@ -398,6 +437,9 @@ async function runAiReviewSessionCliStream(opts) {
       });
 
       const emitChunk = (text) => {
+        if (normalizedMode === 'stream') {
+          combinedStreamOutput += text;
+        }
         if (!firstChunkSeen) {
           firstChunkSeen = true;
           stage2Spinner.stop();
@@ -411,8 +453,25 @@ async function runAiReviewSessionCliStream(opts) {
         }
       };
 
-      child.stdout?.on('data', (buf) => emitChunk(String(buf)));
-      child.stderr?.on('data', (buf) => emitChunk(String(buf)));
+      if (normalizedMode === 'stream') {
+        child.stdout?.on('data', (buf) => emitChunk(String(buf)));
+        child.stderr?.on('data', (buf) => emitChunk(String(buf)));
+      } else if (normalizedMode === 'interactive-seeded' && child.stderr) {
+        child.stderr.on('data', (buf) => {
+          const s = String(buf);
+          stderrBuf += s;
+          if (enableUsageLimitFallback && !usageLimitHit && isUsageLimitReached(s)) {
+            usageLimitHit = true;
+            abortChild();
+            return finish({ completed: false, usageLimit: true, skipped: false, modelTried: modelName });
+          }
+          try {
+            process.stderr.write(buf);
+          } catch (_) {
+            // ignore
+          }
+        });
+      }
 
       child.on('close', (code, closeSignal) => {
         if (signal?.aborted) {
@@ -431,6 +490,13 @@ async function runAiReviewSessionCliStream(opts) {
         const err = new Error(msg);
         err.code = code;
         err.signal = closeSignal;
+        const quickInteractiveFail =
+          normalizedMode === 'interactive-seeded' && Date.now() - spawnTime <= INTERACTIVE_QUICK_FAIL_MS;
+        if (normalizedMode === 'stream' && isContentGeneratorInitError(combinedStreamOutput)) {
+          err.nextifyGeminiInitRetryable = true;
+        } else if (quickInteractiveFail && isContentGeneratorInitError(stderrBuf)) {
+          err.nextifyGeminiInitRetryable = true;
+        }
         return fail(err);
       });
 
@@ -451,6 +517,36 @@ async function runAiReviewSessionCliStream(opts) {
         child.stdin.end();
       }
     });
+
+  async function attemptWithModel(modelName) {
+    const { maxAttempts, baseDelayMs } = getGeminiInitRetryConfig();
+    const preMs = normalizedMode === 'interactive-seeded' ? getInteractivePrestartDelayMs() : 0;
+    let lastErr;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      if (signal?.aborted) {
+        return { completed: false, aborted: true, skipped: false, modelTried: modelName };
+      }
+      if (attempt > 0) {
+        await sleep(baseDelayMs * attempt);
+        // eslint-disable-next-line no-console
+        console.log(
+          `\nNextify: Gemini CLI 초기화 오류 로그가 감지되어 재시도합니다 (${attempt + 1}/${maxAttempts}).\n`,
+        );
+      } else if (preMs > 0) {
+        await sleep(preMs);
+      }
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        return await runSingleGeminiCliAttempt(modelName);
+      } catch (err) {
+        lastErr = err;
+        if (!err?.nextifyGeminiInitRetryable || attempt === maxAttempts - 1) {
+          throw err;
+        }
+      }
+    }
+    throw lastErr || new Error('Gemini CLI review failed after retries.');
+  }
 
   let last;
   for (const modelName of modelsToTry) {
