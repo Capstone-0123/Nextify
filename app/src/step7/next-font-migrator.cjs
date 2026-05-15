@@ -14,6 +14,7 @@ function collectFontAiCandidates(projectRoot, primaryRel) {
   const extras = [
     'src/app/layout.tsx',
     'src/app/globals.css',
+    'src/app/global.css',
     'src/index.html',
     'src/App.css',
     'index.html',
@@ -31,8 +32,12 @@ async function applyNextFont(projectRoot) {
   // Case d 체크: Gemini 자동 수정이 필요한지 확인
   await checkManualProcessingCases(projectRoot);
 
-  // Case a: index.html에서 Google Fonts <link>를 사용하는 경우
+  // Case a0: step2가 index.html head를 layout.tsx JSX로 복사한 뒤에는 링크가 layout에만 있음
+  await migrateGoogleFontsFromLayoutTsx(projectRoot);
+
+  // Case a: index.html / src/index.html에서 Google Fonts <link>를 사용하는 경우
   await migrateGoogleFontsFromIndexHtml(projectRoot);
+  await migrateGoogleFontsFromRootIndexHtml(projectRoot);
 
   // Case b: CSS @import로 Google Fonts를 사용하는 경우
   await migrateGoogleFontsFromCssImport(projectRoot);
@@ -52,6 +57,7 @@ async function checkManualProcessingCases(projectRoot) {
   const cssFiles = [
     path.join(srcDir, 'index.css'),
     path.join(srcDir, 'app', 'globals.css'),
+    path.join(srcDir, 'app', 'global.css'),
     path.join(srcDir, 'App.css'),
   ].filter(filePath => fs.existsSync(filePath));
 
@@ -155,20 +161,145 @@ async function checkManualProcessingCases(projectRoot) {
   }
 }
 
+/**
+ * Google Fonts css2 URL에서 family 목록을 파싱합니다 (family= 파라미터 반복 형식).
+ * @returns {Array<{ fontFamilyIdentifier: string, weightList: number[], displayOption: string }>|null}
+ */
+function parseGoogleFontsCss2Href(href) {
+  try {
+    const u = new URL(href, 'https://fonts.googleapis.com');
+    if (!/fonts\.googleapis\.com$/i.test(u.hostname)) return null;
+    const rawFamilies = u.searchParams.getAll('family');
+    if (!rawFamilies.length) return null;
+    const displayOption = u.searchParams.get('display') || 'swap';
+    const out = [];
+    for (const raw of rawFamilies) {
+      let namePart = raw;
+      let wghtPart = null;
+      const colonIdx = raw.indexOf(':');
+      if (colonIdx !== -1) {
+        namePart = raw.slice(0, colonIdx);
+        const axis = raw.slice(colonIdx + 1);
+        const wghtMatch = axis.match(/^wght@(.+)$/i);
+        if (wghtMatch) wghtPart = wghtMatch[1];
+      }
+      const weightList = wghtPart
+        ? wghtPart
+            .split(/[;]/)
+            .map((w) => parseInt(String(w).trim(), 10))
+            .filter((n) => !Number.isNaN(n))
+        : [];
+      const fontFamilyIdentifier = namePart
+        .replace(/\+/g, ' ')
+        .split(' ')
+        .filter(Boolean)
+        .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+        .join('');
+      if (!fontFamilyIdentifier) continue;
+      out.push({
+        fontFamilyIdentifier,
+        weightList: weightList.length ? weightList : [400],
+        displayOption,
+      });
+    }
+    return out.length ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+function stripGoogleFontLinkTags(htmlOrJsx) {
+  return htmlOrJsx.replace(/<link[^>]*(?:fonts\.googleapis\.com|fonts\.gstatic\.com)[^>]*\/?>/gi, '');
+}
+
+//=========================================================
+// Case a0: src/app/layout.tsx 안의 Google Fonts <link> (step2가 index.html head를 JSX로 복사한 경우)
+//=========================================================
+async function migrateGoogleFontsFromLayoutTsx(projectRoot) {
+  const layoutPath = path.join(projectRoot, 'src', 'app', 'layout.tsx');
+  if (!fs.existsSync(layoutPath)) return;
+
+  let layoutContent = await fs.readFile(layoutPath, 'utf-8');
+  const original = layoutContent;
+
+  const googleFontsLinkPattern = /<link\s+[^>]*(?:fonts\.googleapis\.com|fonts\.gstatic\.com)[^>]*\/?>/gi;
+  const googleFontsLinks = layoutContent.match(googleFontsLinkPattern);
+  if (!googleFontsLinks || googleFontsLinks.length === 0) {
+    return;
+  }
+
+  let css2Href = null;
+  for (const linkTag of googleFontsLinks) {
+    const css2Match = linkTag.match(/href=["']([^"']*fonts\.googleapis\.com\/css2[^"']*)["']/i);
+    if (css2Match) {
+      css2Href = css2Match[1];
+      break;
+    }
+  }
+
+  if (!css2Href) {
+    layoutContent = stripGoogleFontLinkTags(layoutContent);
+    layoutContent = layoutContent.replace(/\n\s*\n\s*\n/g, '\n\n');
+    if (layoutContent !== original) {
+      await fs.writeFile(layoutPath, layoutContent, 'utf-8');
+    }
+    return;
+  }
+
+  const parsedFamilies = parseGoogleFontsCss2Href(css2Href);
+  if (!parsedFamilies) {
+    const rel = relFromRoot(projectRoot, layoutPath);
+    await stopAndOfferGeminiApply({
+      projectRoot,
+      discoveryLine: 'layout.tsx의 Google Fonts css2 링크를 자동 파싱하지 못했습니다.',
+      discoverySources: [rel],
+      instructionForAi: `${rel}의 Google Fonts <link>를 next/font/google로 옮기고, preconnect/stylesheet 링크는 제거하세요.`,
+      candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
+    });
+    return;
+  }
+
+  for (const fam of parsedFamilies) {
+    // eslint-disable-next-line no-await-in-loop
+    await addFontToLayout(projectRoot, {
+      type: 'google',
+      fontFamilyIdentifier: fam.fontFamilyIdentifier,
+      weightList: fam.weightList,
+      displayOption: fam.displayOption,
+    });
+  }
+
+  layoutContent = await fs.readFile(layoutPath, 'utf-8');
+  layoutContent = stripGoogleFontLinkTags(layoutContent);
+  layoutContent = layoutContent.replace(/\n\s*\n\s*\n/g, '\n\n');
+  await fs.writeFile(layoutPath, layoutContent, 'utf-8');
+}
+
 //=========================================================
 // Case a: index.html에서 Google Fonts <link>를 사용하는 경우
 //=========================================================
 async function migrateGoogleFontsFromIndexHtml(projectRoot) {
   const indexHtmlPath = path.join(projectRoot, 'src', 'index.html');
-  
-  // src/index.html 파일이 존재하지 않으면 종료
   if (!fs.existsSync(indexHtmlPath)) {
     return;
   }
+  await migrateGoogleFontsFromHtmlFile(projectRoot, indexHtmlPath);
+}
 
+//=========================================================
+// Case a': 프로젝트 루트 index.html (Vite 기본)
+//=========================================================
+async function migrateGoogleFontsFromRootIndexHtml(projectRoot) {
+  const indexHtmlPath = path.join(projectRoot, 'index.html');
+  if (!fs.existsSync(indexHtmlPath)) {
+    return;
+  }
+  await migrateGoogleFontsFromHtmlFile(projectRoot, indexHtmlPath);
+}
+
+async function migrateGoogleFontsFromHtmlFile(projectRoot, indexHtmlPath) {
   const htmlContent = await fs.readFile(indexHtmlPath, 'utf-8');
 
-  // 2. fonts.googleapis.com 또는 fonts.gstatic.com이 포함된 <link> 태그 확인
   const googleFontsLinkPattern = /<link\s+[^>]*(?:fonts\.googleapis\.com|fonts\.gstatic\.com)[^>]*>/gi;
   const googleFontsLinks = htmlContent.match(googleFontsLinkPattern);
 
@@ -176,74 +307,48 @@ async function migrateGoogleFontsFromIndexHtml(projectRoot) {
     return;
   }
 
-  // 3. href 값에서 FontFamilyIdentifier, WeightList, DisplayOption 추출
-  let fontFamilyIdentifier = null;
-  let weightList = null;
-  let displayOption = 'swap';
-
+  let css2Href = null;
   for (const linkTag of googleFontsLinks) {
-    // css2 링크에서 정보 추출
-    const css2Match = linkTag.match(/href=["']([^"']*fonts\.googleapis\.com\/css2[^"']*)["']/);
+    const css2Match = linkTag.match(/href=["']([^"']*fonts\.googleapis\.com\/css2[^"']*)["']/i);
     if (css2Match) {
-      const href = css2Match[1];
-      
-      // 3.1. FontFamilyIdentifier: family= 파라미터 값
-      const familyMatch = href.match(/family=([^:&]+)/);
-      if (familyMatch) {
-        fontFamilyIdentifier = familyMatch[1].replace(/\+/g, ' ');
-        // PascalCase로 변환 (예: "Roboto" -> "Roboto", "Open Sans" -> "Open_Sans" -> "OpenSans")
-        fontFamilyIdentifier = fontFamilyIdentifier
-          .split(' ')
-          .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-          .join('');
-      }
-
-      // 3.2. WeightList: wght@ 파라미터 값
-      const weightMatch = href.match(/wght@([^&]+)/);
-      if (weightMatch) {
-        weightList = weightMatch[1].split(';').map(w => parseInt(w.trim())).filter(w => !isNaN(w));
-      }
-
-      // 3.3. DisplayOption: display= 파라미터 값
-      const displayMatch = href.match(/display=([^&]+)/);
-      if (displayMatch) {
-        displayOption = displayMatch[1];
-      }
+      css2Href = css2Match[1];
+      break;
     }
   }
 
-  // 여러 개의 family 파라미터가 동시에 존재하는 경우 Gemini 제안
-  const familyMatches = htmlContent.match(/family=([^:&]+)/g);
-  if (familyMatches && familyMatches.length > 1) {
+  if (!css2Href) {
+    let newHtmlContent = stripGoogleFontLinkTags(htmlContent);
+    newHtmlContent = newHtmlContent.replace(/\n\s*\n\s*\n/g, '\n\n');
+    if (newHtmlContent !== htmlContent) {
+      await fs.writeFile(indexHtmlPath, newHtmlContent, 'utf-8');
+    }
+    return;
+  }
+
+  const parsedFamilies = parseGoogleFontsCss2Href(css2Href);
+  if (!parsedFamilies) {
     const rel = relFromRoot(projectRoot, indexHtmlPath);
     await stopAndOfferGeminiApply({
       projectRoot,
-      discoveryLine: 'Google Fonts URL에 family 파라미터가 여러 개인 링크가 발견되었습니다.',
+      discoveryLine: 'Google Fonts css2 링크를 자동 파싱하지 못했습니다.',
       discoverySources: [rel],
-      instructionForAi: `${rel}의 Google Fonts를 여러 next/font/google 임포트로 나누고 layout에 반영한 뒤 링크를 제거하세요.`,
+      instructionForAi: `${rel}의 Google Fonts를 next/font/google로 옮기고 layout에 반영한 뒤 링크를 제거하세요.`,
       candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
     });
     return;
   }
 
-  if (!fontFamilyIdentifier) {
-    return; // 폰트 정보를 추출할 수 없으면 종료
+  for (const fam of parsedFamilies) {
+    // eslint-disable-next-line no-await-in-loop
+    await addFontToLayout(projectRoot, {
+      type: 'google',
+      fontFamilyIdentifier: fam.fontFamilyIdentifier,
+      weightList: fam.weightList,
+      displayOption: fam.displayOption,
+    });
   }
 
-  // 4-6. src/app/layout.tsx에 import, 폰트 객체 추가, className 추가
-  await addFontToLayout(projectRoot, {
-    type: 'google',
-    fontFamilyIdentifier,
-    weightList,
-    displayOption,
-  });
-
-  // 7. src/index.html의 Google Fonts 관련 <link> 태그 삭제
-  let newHtmlContent = htmlContent;
-  for (const linkTag of googleFontsLinks) {
-    newHtmlContent = newHtmlContent.replace(linkTag, '');
-  }
-  // 빈 줄 정리
+  let newHtmlContent = stripGoogleFontLinkTags(htmlContent);
   newHtmlContent = newHtmlContent.replace(/\n\s*\n\s*\n/g, '\n\n');
 
   if (newHtmlContent !== htmlContent) {
@@ -262,6 +367,7 @@ async function migrateGoogleFontsFromCssImport(projectRoot) {
   const cssFiles = [
     path.join(srcDir, 'index.css'),
     path.join(appDir, 'globals.css'),
+    path.join(appDir, 'global.css'),
     path.join(srcDir, 'App.css'),
   ].filter(filePath => fs.existsSync(filePath));
 
@@ -277,13 +383,20 @@ async function migrateGoogleFontsFromCssImport(projectRoot) {
       continue;
     }
 
-    // 여러 개의 family 파라미터가 동시에 존재하는 경우 Gemini 제안
-    const familyMatches = cssContent.match(/family=([^:&]+)/g);
-    if (familyMatches && familyMatches.length > 1) {
+    let parsedFamilies = null;
+    for (const importMatch of importMatches) {
+      const urlMatch = importMatch.match(/url\(["']([^"']+)["']\)/);
+      if (!urlMatch) continue;
+      const href = urlMatch[1];
+      parsedFamilies = parseGoogleFontsCss2Href(href);
+      if (parsedFamilies) break;
+    }
+
+    if (!parsedFamilies) {
       const rel = relFromRoot(projectRoot, cssFilePath);
       await stopAndOfferGeminiApply({
         projectRoot,
-        discoveryLine: 'CSS @import Google Fonts에 family 파라미터가 여러 개인 구문이 발견되었습니다.',
+        discoveryLine: 'CSS @import Google Fonts를 자동 파싱하지 못했습니다.',
         discoverySources: [rel],
         instructionForAi: `${rel}의 @import Google Fonts를 next/font/google로 옮기고 CSS를 정리하세요.`,
         candidateRelPaths: collectFontAiCandidates(projectRoot, rel),
@@ -291,51 +404,15 @@ async function migrateGoogleFontsFromCssImport(projectRoot) {
       return;
     }
 
-    // 3. import URL에서 FontFamilyIdentifier, WeightList, DisplayOption 추출
-    let fontFamilyIdentifier = null;
-    let weightList = null;
-    let displayOption = 'swap';
-
-    for (const importMatch of importMatches) {
-      const urlMatch = importMatch.match(/url\(["']([^"']+)["']\)/);
-      if (urlMatch) {
-        const href = urlMatch[1];
-
-        // 3.1. FontFamilyIdentifier: family= 파라미터 값
-        const familyMatch = href.match(/family=([^:&]+)/);
-        if (familyMatch) {
-          fontFamilyIdentifier = familyMatch[1].replace(/\+/g, ' ');
-          fontFamilyIdentifier = fontFamilyIdentifier
-            .split(' ')
-            .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-            .join('');
-        }
-
-        // 3.2. WeightList: wght@ 파라미터 값
-        const weightMatch = href.match(/wght@([^&]+)/);
-        if (weightMatch) {
-          weightList = weightMatch[1].split(';').map(w => parseInt(w.trim())).filter(w => !isNaN(w));
-        }
-
-        // 3.3. DisplayOption: display= 파라미터 값
-        const displayMatch = href.match(/display=([^&]+)/);
-        if (displayMatch) {
-          displayOption = displayMatch[1];
-        }
-      }
+    for (const fam of parsedFamilies) {
+      // eslint-disable-next-line no-await-in-loop
+      await addFontToLayout(projectRoot, {
+        type: 'google',
+        fontFamilyIdentifier: fam.fontFamilyIdentifier,
+        weightList: fam.weightList,
+        displayOption: fam.displayOption,
+      });
     }
-
-    if (!fontFamilyIdentifier) {
-      continue; // 폰트 정보를 추출할 수 없으면 다음 파일로
-    }
-
-    // 4-6. src/app/layout.tsx에 import, 폰트 객체 추가, className 추가
-    await addFontToLayout(projectRoot, {
-      type: 'google',
-      fontFamilyIdentifier,
-      weightList,
-      displayOption,
-    });
 
     // 7. CSS 파일의 Google Fonts @import 구문 삭제
     for (const importMatch of importMatches) {
@@ -394,6 +471,7 @@ async function migrateLocalFontsFromFontFace(projectRoot) {
   const cssFiles = [
     path.join(srcDir, 'index.css'),
     path.join(srcDir, 'app', 'globals.css'),
+    path.join(srcDir, 'app', 'global.css'),
     path.join(srcDir, 'App.css'),
   ].filter(filePath => fs.existsSync(filePath));
 
@@ -481,6 +559,32 @@ async function migrateLocalFontsFromFontFace(projectRoot) {
   }
 }
 
+/**
+ * 첫 번째 non-import 코드 직전까지를 import 블록으로 보고, 그 끝 인덱스를 반환합니다.
+ */
+function findInsertIndexAfterImportBlock(content) {
+  const lines = content.split(/\r?\n/);
+  let lastImportEnd = -1;
+  let offset = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (/^import\s/.test(trimmed)) {
+      lastImportEnd = offset + line.length;
+      if (i < lines.length - 1) lastImportEnd += 1; // newline
+    } else if (lastImportEnd >= 0) {
+      if (trimmed === '' || trimmed.startsWith('//')) {
+        lastImportEnd = offset + line.length;
+        if (i < lines.length - 1) lastImportEnd += 1;
+      } else {
+        break;
+      }
+    }
+    offset += line.length + 1;
+  }
+  return lastImportEnd >= 0 ? lastImportEnd : 0;
+}
+
 //=========================================================
 // layout.tsx에 폰트 추가 헬퍼 함수
 //=========================================================
@@ -518,35 +622,47 @@ async function addFontToLayout(projectRoot, fontConfig) {
     // 폰트 객체 생성 (이미 존재하는지 확인)
     const fontObjectPattern = new RegExp(`const\\s+${fontObjectIdentifier}\\s*=`, 'g');
     if (!fontObjectPattern.test(layoutContent)) {
-      // import 문 다음에 추가
-      const lastImportMatch = layoutContent.match(/^import\s+[^;]+;?\s*\n/m);
-      if (lastImportMatch) {
-        const insertIndex = lastImportMatch.index + lastImportMatch[0].length;
-        layoutContent = layoutContent.slice(0, insertIndex) +
-          `\nconst ${fontObjectIdentifier} = ${fontFamilyIdentifier}({\n` +
-          `  subsets: ["latin"],\n` +
-          `  weight: [${weightList.join(', ')}],\n` +
-          `  display: "${displayOption}",\n` +
-          `});\n` +
-          layoutContent.slice(insertIndex);
-      }
+      // next/font/google 의 weight 옵션은 OneOrManyStrings 타입입니다.
+      // 숫자 배열 ([300, 400]) 을 그대로 출력하면 Turbopack 빌드가
+      //   "data did not match any variant of untagged enum OneOrManyStrings"
+      // 로 실패하므로, 각 weight 를 문자열 리터럴로 감쌉니다.
+      const weightLiteral = weightList.length === 1
+        ? `"${weightList[0]}"`
+        : `[${weightList.map((w) => `"${w}"`).join(', ')}]`;
+
+      const insertIndex = findInsertIndexAfterImportBlock(layoutContent);
+      layoutContent = layoutContent.slice(0, insertIndex) +
+        (insertIndex > 0 && layoutContent.slice(insertIndex - 1, insertIndex) !== '\n' ? '\n' : '') +
+        `const ${fontObjectIdentifier} = ${fontFamilyIdentifier}({\n` +
+        `  subsets: ["latin"],\n` +
+        `  weight: ${weightLiteral},\n` +
+        `  display: "${displayOption}",\n` +
+        `});\n` +
+        layoutContent.slice(insertIndex);
     }
 
-    // <html> 태그에 className 추가
+    // <html> 태그에 className 추가 (멱등)
+    //
+    // 기존 검사 `htmlAttrs.includes('className={<id>.className}')` 는 부분 문자열
+    // 매칭이라 같은 폰트가 다른 위치 (link / @import / index.html) 에서 여러 번
+    // 검출되면 className 이 누적 추가되어 다음과 같은 결과가 나옵니다:
+    //   className={interFont.className + " " + robotoFont.className + " " + interFont.className + " " + robotoFont.className}
+    // 따라서 멱등성은 `${id}.className` 식별자가 className 값 표현식 안에
+    // 이미 등장하는지로 판단합니다.
     const htmlTagPattern = /<html([^>]*)>/;
     const htmlMatch = layoutContent.match(htmlTagPattern);
     if (htmlMatch) {
       const htmlAttrs = htmlMatch[1];
-      if (!htmlAttrs.includes(`className={${fontObjectIdentifier}.className}`)) {
-        // className이 이미 있는지 확인
-        const classNameMatch = htmlAttrs.match(/className\s*=\s*\{([^}]+)\}/);
+      const fontClassRef = `${fontObjectIdentifier}.className`;
+      const classNameMatch = htmlAttrs.match(/className\s*=\s*\{([^}]+)\}/);
+      const existingClassNameExpr = classNameMatch ? classNameMatch[1] : '';
+
+      if (!existingClassNameExpr.includes(fontClassRef)) {
         if (classNameMatch) {
-          // 기존 className에 추가
-          const newClassName = `className={${classNameMatch[1]} + " " + ${fontObjectIdentifier}.className}`;
-          layoutContent = layoutContent.replace(htmlTagPattern, `<html ${newClassName}>`);
+          const newClassName = `className={${existingClassNameExpr} + " " + ${fontClassRef}}`;
+          layoutContent = layoutContent.replace(htmlTagPattern, `<html ${htmlAttrs.replace(classNameMatch[0], newClassName)}>`);
         } else {
-          // 새로운 className 추가
-          layoutContent = layoutContent.replace(htmlTagPattern, `<html className={${fontObjectIdentifier}.className}${htmlAttrs}>`);
+          layoutContent = layoutContent.replace(htmlTagPattern, `<html className={${fontClassRef}}${htmlAttrs}>`);
         }
       }
     }
@@ -577,21 +693,18 @@ async function addFontToLayout(projectRoot, fontConfig) {
     // 폰트 객체 생성 (이미 존재하는지 확인)
     const fontObjectPattern = /const\s+localFont\s*=\s*localFont\(/;
     if (!fontObjectPattern.test(layoutContent)) {
-      // import 문 다음에 추가
-      const lastImportMatch = layoutContent.match(/^import\s+[^;]+;?\s*\n/m);
-      if (lastImportMatch) {
-        const insertIndex = lastImportMatch.index + lastImportMatch[0].length;
-        layoutContent = layoutContent.slice(0, insertIndex) +
-          `\nconst ${fontObjectIdentifier} = localFont({\n` +
-          `  src: [{\n` +
-          `    path: "${fontFilePath}",\n` +
-          `    weight: "${fontWeight}",\n` +
-          `    style: "${fontStyle}",\n` +
-          `  }],\n` +
-          `  display: "swap",\n` +
-          `});\n` +
-          layoutContent.slice(insertIndex);
-      }
+      const insertIndex = findInsertIndexAfterImportBlock(layoutContent);
+      layoutContent = layoutContent.slice(0, insertIndex) +
+        (insertIndex > 0 && layoutContent.slice(insertIndex - 1, insertIndex) !== '\n' ? '\n' : '') +
+        `const ${fontObjectIdentifier} = localFont({\n` +
+        `  src: [{\n` +
+        `    path: "${fontFilePath}",\n` +
+        `    weight: "${fontWeight}",\n` +
+        `    style: "${fontStyle}",\n` +
+        `  }],\n` +
+        `  display: "swap",\n` +
+        `});\n` +
+        layoutContent.slice(insertIndex);
     }
 
     // <html> 태그에 className 추가

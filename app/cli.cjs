@@ -1,6 +1,28 @@
 #!/usr/bin/env node
-// .env.local 파일 로드 (가장 먼저 실행)
-require('dotenv').config({ path: require('path').join(__dirname, '.env.local') });
+const path = require('path');
+const dotenv = require('dotenv');
+
+(function loadProjectEnvFiles() {
+  const fs = require('fs');
+  const root = process.cwd();
+  const merged = {};
+  for (const name of ['.env', '.env.local']) {
+    const abs = path.join(root, name);
+    if (!fs.existsSync(abs)) continue;
+    try {
+      Object.assign(merged, dotenv.parse(fs.readFileSync(abs, 'utf8')));
+    } catch {
+      // 손상된 파일 등은 건너뜀
+    }
+  }
+  for (const [k, v] of Object.entries(merged)) {
+    if (process.env[k] === undefined) {
+      process.env[k] = v;
+    }
+  }
+})();
+// 전역 패키지 옆 .env.local: 위·셸에서 아직 없는 변수만 채움
+dotenv.config({ path: path.join(__dirname, '.env.local') });
 
 // =========================================================
 // Node.js 버전 사전 체크 (가장 먼저, 다른 require보다 앞)
@@ -62,7 +84,6 @@ require('dotenv').config({ path: require('path').join(__dirname, '.env.local') }
 const { Command } = require('commander');
 const chalk = require('chalk');
 const inquirer = require('inquirer');
-const path = require('path');
 
 // 모듈 경로 변경 (step 폴더의 index.cjs )
 const { runStep1 } = require('./src/step1/index.cjs');
@@ -82,73 +103,23 @@ const {
   detectAppType,
   getInstallCommand,
 } = require('./src/utils/project-info.cjs');
+const { spawnSync } = require('child_process');
 const { cloneProject } = require('./src/utils/copy.cjs');
 const {
   REVIEW_ROOT_DIR,
   createStepReviewSession,
   createSnapshotReviewSession,
   openReviewDiff,
-  getReviewExtensionStatus,
-  focusReviewPanel,
-  installReviewExtension,
-  REVIEW_EXTENSION_MARKET_ID,
+  getEditorCommands,
 } = require('./src/utils/review-session.cjs');
 const { generateText, createMigrationPrompt, generateTextStream } = require('./src/utils/gemini-client.cjs');
 const { runAskApply } = require('./src/utils/ai-file-apply.cjs');
 const { runAiReviewSessionStream } = require('./src/utils/ai-review-session.cjs');
 const { ensureGeminiCliReady } = require('./src/utils/gemini-cli-setup.cjs');
 const { printRelPathsBlock } = require('./src/utils/path-list-print.cjs');
-const { generatePerformanceReport } = require('./src/step7/performance-report.cjs');
+const { generatePerformanceReport, createPreStep7Snapshot } = require('./src/step7/performance-report.cjs');
 const fs = require('fs-extra');
 const pkg = require('./package.json');
-
-async function ensureReviewExtensionReady() {
-  const status = getReviewExtensionStatus();
-  if (status.editorAvailable && status.installed) {
-    return { installed: true, status };
-  }
-
-  if (!status.editorAvailable) {
-    console.log(chalk.yellow('VS Code/Cursor 명령(`code` 또는 `cursor`)을 찾지 못했습니다.'));
-    console.log(chalk.white('   - 에디터를 설치한 뒤 아래에서 확장을 설치하세요:'));
-    console.log(chalk.white(`     https://marketplace.visualstudio.com/items?itemName=${REVIEW_EXTENSION_MARKET_ID}`));
-    return { installed: false, status };
-  }
-
-  const assumeYes = process.env.NEXTIFY_ASSUME_YES === '1';
-  let doInstall = assumeYes;
-  if (!assumeYes) {
-    const answer = await inquirer.prompt([
-      {
-        type: 'confirm',
-        name: 'doInstall',
-        default: true,
-        message: 'Nextify Review 확장이 설치되어 있지 않습니다. 지금 설치할까요?',
-      },
-    ]);
-    doInstall = answer.doInstall;
-  }
-
-  if (!doInstall) {
-    console.log(chalk.white(`   - 수동: code --install-extension ${REVIEW_EXTENSION_MARKET_ID}`));
-    console.log(chalk.white(`   - 또는: https://marketplace.visualstudio.com/items?itemName=${REVIEW_EXTENSION_MARKET_ID}`));
-    return { installed: false, status };
-  }
-
-  const result = installReviewExtension(status.command);
-  if (!result.installed) {
-    console.log(chalk.yellow('자동 설치에 실패했습니다. 수동 설치 후 다시 시도하세요.'));
-    console.log(chalk.white(`   - 수동: ${status.command} --install-extension ${REVIEW_EXTENSION_MARKET_ID}`));
-    return { installed: false, status };
-  }
-
-  const newStatus = getReviewExtensionStatus();
-  if (newStatus.installed && newStatus.command) {
-    return { installed: true, status: newStatus };
-  }
-  // 설치 직후 `--list-extensions` 가 아직 갱신되지 않은 경우에도 포커스 시도용
-  return { installed: true, status: { editorAvailable: true, installed: true, command: status.command } };
-}
 
 const program = new Command();
 
@@ -301,10 +272,6 @@ program
 
         console.log(chalk.green(`\n✔ Step 1 preview 생성 완료 (${reviewSession.manifest.changes.length}개 변경)`));
         console.log(chalk.white(`리뷰 대상 변경 파일: ${reviewSession.manifest.changes.length}개`));
-        const extReady = await ensureReviewExtensionReady();
-        if (extReady.installed && extReady.status?.command) {
-          focusReviewPanel(extReady.status);
-        }
         const openResult = openFirstReviewableDiff(reviewSession.manifest);
 
         if (openResult.opened) {
@@ -765,6 +732,43 @@ function openFirstReviewableDiff(manifest) {
   return { opened: false, command: null, change: null };
 }
 
+/**
+ * 현재 IDE 창 워크스페이스에 폴더를 추가해 Nextify Review 확장이 `.ai-migration` 아래의 session.json 을 찾을 수 있게 합니다.
+ * NEXTIFY_SKIP_WORKSPACE_ADD=1 이면 건너뜁니다.
+ * @returns {{ ok: boolean, command?: string, skipped?: boolean }}
+ */
+function tryAddFolderToCurrentWorkspace(folderAbsPath) {
+  if (/^(1|true|yes)$/i.test(String(process.env.NEXTIFY_SKIP_WORKSPACE_ADD || ''))) {
+    return { ok: false, skipped: true };
+  }
+
+  const abs = path.resolve(folderAbsPath);
+  for (const binary of getEditorCommands()) {
+    const result = spawnSync(binary, ['--reuse-window', '--add', abs], {
+      shell: false,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    if (!result.error && result.status === 0) {
+      return { ok: true, command: binary };
+    }
+  }
+  return { ok: false };
+}
+
+function printWorkspaceAddFallbackGuide(folderAbsPath) {
+  const abs = path.resolve(folderAbsPath);
+  const parentDir = path.dirname(abs);
+  console.log(chalk.yellow('\n⚠️  IDE에 결과 폴더를 자동으로 추가하지 못했습니다. (VS Code/Cursor CLI 가 PATH에 없거나 실행에 실패함)'));
+  console.log(chalk.white('   Nextify Review 패널 트리가 비면 다음 중 하나를 하세요:'));
+  console.log(chalk.white(`   1) 파일 → 작업 영역에 폴더 추가 → ${abs}`));
+  console.log(
+    chalk.white(
+      `   2) 부모 폴더를 한 번에 워크스페이스로 연 다음(예: ${parentDir}), 터미널에서 프로젝트 하위 폴더로 이동해 migrate-next 실행 — 터미널 세션은 그대로 유지됩니다.`,
+    ),
+  );
+}
+
 async function cleanupStaleStepArtifacts(projectRoot) {
   const reviewRoot = path.join(projectRoot, REVIEW_ROOT_DIR);
   if (!(await fs.pathExists(reviewRoot))) return;
@@ -937,6 +941,17 @@ async function runDefaultOrchestrator() {
     await cloneProject(cwd, targetPath);
     process.chdir(targetPath);
     console.log(chalk.blue(`\n📂 작업 경로가 변경되었습니다: ${targetPath}`));
+
+    const wsAdd = tryAddFolderToCurrentWorkspace(targetPath);
+    if (wsAdd.ok) {
+      console.log(
+        chalk.gray(
+          `   - 현재 창 워크스페이스에 복사본 폴더를 추가했습니다 (${wsAdd.command}). Nextify Review 패널에서 변경 목록을 인식합니다.`,
+        ),
+      );
+    } else if (!wsAdd.skipped) {
+      printWorkspaceAddFallbackGuide(targetPath);
+    }
   }
 
   // 이전 실행에서 남아있는 step 아티팩트를 정리합니다.
@@ -957,6 +972,22 @@ async function runDefaultOrchestrator() {
     for (const [stepName, stepRunner] of stepEntries) {
       const partNum = stepName.replace('step', '');
       console.log(chalk.yellow(`\n==================== Part ${partNum} (${stepName}) ====================`));
+      // step7 시작 직전(즉 step1~6 결과 시점)에서 성능 비교용 스냅샷을 생성해 둡니다.
+      // 이렇게 하지 않으면 generatePerformanceReport 시점에 만들어져 step7 결과를 복사하게 되어
+      // step1~6 vs step1~7 비교가 사실상 동일 코드 비교가 되어 버립니다.
+      if (stepName === 'step7') {
+        try {
+          console.log(chalk.gray('   [perf] step7 적용 전 스냅샷을 생성합니다 (step1~6 결과 보존).'));
+          await createPreStep7Snapshot(projectRoot);
+        } catch (snapshotErr) {
+          console.log(
+            chalk.yellow(
+              `   ⚠️  step7 사전 스냅샷 생성 실패: ${snapshotErr?.message || snapshotErr}\n` +
+                '   - 성능 레포트의 step1~6 비교 결과가 step1~7과 동일해질 수 있습니다.',
+            ),
+          );
+        }
+      }
       await stepRunner(projectRoot);
     }
   });
@@ -983,9 +1014,18 @@ async function runDefaultOrchestrator() {
   // 1) 성능 레포트 생성
   console.log(chalk.yellow('\n📊 성능 레포트 생성을 시작합니다.'));
   const reportPath = path.join(targetPath, 'nextify-performance-report.md');
+  // step7 진입 직전에 미리 만들어 둔 스냅샷 경로를 명시적으로 전달합니다.
+  // (그렇지 않으면 generatePerformanceReport 가 이 시점에 다시 createPreStep7Snapshot 을 호출하는데,
+  //  이미 step7 가 끝난 상태이므로 snapshot 이 step7 결과의 복사본이 되어 비교가 무의미해집니다.)
+  const preStep7SnapshotRoot = path.join(
+    path.dirname(targetPath),
+    `${path.basename(targetPath)}__nextify_snapshots`,
+    'pre-step7',
+  );
   const reportResult = await runPerformanceReportSafely({
     projectRoot: targetPath,
     outputMarkdownPath: reportPath,
+    preStep7Root: preStep7SnapshotRoot,
   });
   if (!reportResult.success) {
     console.log(chalk.yellow(`⚠️  성능 레포트 생성에 실패했습니다: ${reportResult.error.message}`));
@@ -1013,10 +1053,6 @@ async function runDefaultOrchestrator() {
   }
 
   // 3) 코드 리뷰 진행
-  const extReady = await ensureReviewExtensionReady();
-  if (extReady.installed && extReady.status?.command) {
-    focusReviewPanel(extReady.status);
-  }
   const openResult = openFirstReviewableDiff(manifest);
   if (!openResult.opened) {
     console.log(chalk.yellow('자동으로 diff를 열지 못했습니다. Nextify Review 패널에서 수동으로 열어주세요.'));
@@ -1055,7 +1091,12 @@ async function runDefaultOrchestrator() {
   console.log(chalk.yellow('\n⏳ 최종 Gemini CLI 리뷰를 시작합니다.'));
   console.log(
     chalk.gray(
-      '   (리뷰는 view-only입니다. 세션은 IDE 패널에서 diff 확인 및 before/after 경로 복사로 진행하세요.)',
+      '   (리뷰는 view-only입니다. 진행 중 중단하려면 Ctrl+C를 누르세요.)',
+    ),
+        chalk.gray(
+'(현재 주입된 컨텍스트는 session.json 파일과 프로젝트 디렉터리 구조입니다. 이를 기반으로 리뷰를 진행합니다.)',
+      '(@<경로>로 붙여넣으면 해당 파일 컨텍스트를 바로 참조할 수 있습니다. 전후 파일을 붙여넣어 질문하세요!)',
+      '(Nextify-review 패널에서 diff 확인 및 before/after 경로 복사로 진행하세요.)',
     ),
   );
 

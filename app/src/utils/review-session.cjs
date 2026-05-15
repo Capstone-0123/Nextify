@@ -475,6 +475,7 @@ module.exports = {
   createStepReviewSession,
   createSnapshotReviewSession,
   openReviewDiff,
+  getEditorCommands,
   getReviewExtensionStatus,
   focusReviewPanel,
   installReviewExtension,

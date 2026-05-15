@@ -29,6 +29,7 @@ const {
   runStaticImportScan,
   writeStaticImportReport,
 } = require('./static-import-scan.cjs');
+const { sweepAfterAiApply } = require('../utils/post-ai-sweep.cjs');
 
 const REPORT_FILE_NAME = 'nextify-typecheck-report.txt';
 const TSCONFIG_FILE_NAME = 'tsconfig.json';
@@ -394,6 +395,43 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
 
   if (!hasTsConfig(projectRoot)) {
     return { ran: false, reason: 'no_tsconfig' };
+  }
+
+  // ── 0) 결정론적 src/ 전체 sweep (typecheck 직전 안전망) ─────────────
+  // step5/7 의 여러 Gemini 호출에서 sweep 가 누락된 파일이 있을 수 있고,
+  // 호출 순서로 인해 dead 가 된 후 sweep 가 한 번도 안 도는 경우(예: layout.tsx
+  // 의 import Image 가 다른 단계 적용 후에야 unused 가 되는 케이스)도 있습니다.
+  // typecheck 직전에 결정론적으로 한 번 정리해 ai-fix budget 을 보존합니다.
+  try {
+    const srcDir = path.join(projectRoot, 'src');
+    if (await fs.pathExists(srcDir)) {
+      const allRel = [];
+      const walk = async (dir) => {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        for (const e of entries) {
+          if (['node_modules', '.next', '.git', 'dist', 'build'].includes(e.name)) continue;
+          const full = path.join(dir, e.name);
+          if (e.isDirectory()) {
+            await walk(full);
+          } else if (/\.(t|j)sx?$/.test(e.name)) {
+            allRel.push(path.relative(projectRoot, full).split(path.sep).join('/'));
+          }
+        }
+      };
+      await walk(srcDir);
+      const r = await sweepAfterAiApply(projectRoot, allRel);
+      if (r.removedTargets.length > 0) {
+        console.log(
+          chalk.cyan(
+            `   🧹 typecheck 직전 src/ 결정론 sweep: ${r.removedTargets.length}건 정리 (${r.changedFiles.length}개 파일)`,
+          ),
+        );
+      }
+    }
+  } catch (e) {
+    console.log(
+      chalk.gray(`   ⚠️  typecheck 직전 sweep 중 오류(무시): ${e?.message || e}`),
+    );
   }
 
   // ── 1차 tsc ──────────────────────────────────────────────────────────
