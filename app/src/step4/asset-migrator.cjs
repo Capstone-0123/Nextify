@@ -21,6 +21,55 @@ async function migrateStaticResources(projectRoot) {
 //=========================================================
 //Case a: src/assets 하위 정적 리소스를 public/assets로 이동
 //=========================================================
+
+// public/ 으로 옮기면 안 되는 "코드 모듈" 확장자.
+// public/ 은 정적 파일 서빙 전용이라 import 가 안 되므로 src/assets 에 남겨두어야 한다.
+const CODE_MODULE_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']);
+
+function isCodeModule(filePath) {
+  return CODE_MODULE_EXTS.has(path.extname(filePath).toLowerCase());
+}
+
+/**
+ * 디렉터리 트리를 순회하며 "옮겨도 되는 정적 자산"만 이동한다.
+ * - .ts/.tsx/.js/.jsx 같은 코드 모듈은 이동 대상 제외 (import 깨짐 방지)
+ * - 나머지(이미지/폰트/JSON/SVG 등)는 public/assets 으로 이동
+ */
+async function moveAssetsRecursive(srcDir, destDir) {
+  const skipped = [];
+  await fs.ensureDir(destDir);
+  const items = await fs.readdir(srcDir, { withFileTypes: true });
+
+  for (const item of items) {
+    const sourcePath = path.join(srcDir, item.name);
+    const destPath = path.join(destDir, item.name);
+
+    if (item.isDirectory()) {
+      const nested = await moveAssetsRecursive(sourcePath, destPath);
+      skipped.push(...nested);
+      // 하위가 모두 비었으면 디렉터리도 정리
+      try {
+        const remaining = await fs.readdir(sourcePath);
+        if (remaining.length === 0) {
+          await fs.remove(sourcePath);
+        }
+      } catch {
+        // ignore
+      }
+      continue;
+    }
+
+    if (isCodeModule(sourcePath)) {
+      skipped.push(sourcePath);
+      continue;
+    }
+
+    await fs.move(sourcePath, destPath, { overwrite: true });
+  }
+
+  return skipped;
+}
+
 async function migrateImageAssets(projectRoot) {
   const srcAssetsDir = path.join(projectRoot, 'src', 'assets');
   const publicAssetsDir = path.join(projectRoot, 'public', 'assets');
@@ -30,25 +79,17 @@ async function migrateImageAssets(projectRoot) {
     return; // 존재하지 않으면 본 case 수행하지 않음
   }
 
-  // 2. public/assets 디렉터리 존재 여부 확인 및 생성
-  if (!fs.existsSync(publicAssetsDir)) {
-    await fs.ensureDir(publicAssetsDir);
-  }
+  // 2. 정적 자산만 public/assets 로 이동 (코드 모듈은 src/assets 에 보존)
+  await moveAssetsRecursive(srcAssetsDir, publicAssetsDir);
 
-  // 3. src/assets 디렉터리 하위의 모든 파일과 하위 디렉터리를 public/assets로 이동
-  const items = await fs.readdir(srcAssetsDir, { withFileTypes: true });
-  
-  for (const item of items) {
-    const sourcePath = path.join(srcAssetsDir, item.name);
-    const destPath = path.join(publicAssetsDir, item.name);
-    
-    await fs.move(sourcePath, destPath, { overwrite: true });
-  }
-
-  // 4. 이동 후 src/assets 디렉터리에 더 이상 파일이 남아있지 않다면 삭제
-  const remainingItems = await fs.readdir(srcAssetsDir);
-  if (remainingItems.length === 0) {
-    await fs.remove(srcAssetsDir);
+  // 3. src/assets 가 완전히 비었을 때만 디렉터리 제거 (모듈이 남아 있으면 보존)
+  try {
+    const remaining = await fs.readdir(srcAssetsDir);
+    if (remaining.length === 0) {
+      await fs.remove(srcAssetsDir);
+    }
+  } catch {
+    // ignore
   }
 }
 
@@ -127,15 +168,29 @@ async function migrateAssetReferences(projectRoot) {
 
     // 4. 파일 최상단에 import 문이 존재하는지 확인
     // import AssetIdentifier from "ImportPath" 형태 찾기
-    const importPattern = /import\s+(\w+)\s+from\s+["']([^"']+)["']\s*;?/g;
+    //
+    // ⚠️ 중요: 트레일링은 `[ \t]*;?` 로만 먹는다. `\s*` 로 두면 따옴표 뒤의
+    //  줄바꿈(`\n`)까지 매치 영역에 포함돼, 치환 시 다음 줄 import 가
+    //  같은 줄로 합쳐지는 손상이 발생한다.
+    //  (예: `const X = '...';import Y from '...'` 한 줄로 깨지는 사고를 방지.)
+    const importPattern = /import\s+(\w+)\s+from\s+["']([^"']+)["'][ \t]*;?[ \t]*/g;
     const imports = [];
     let match;
 
     while ((match = importPattern.exec(content)) !== null) {
       const importPath = match[2];
-      // 쿼리 문자열 제거 (?url, ?raw 등)
+      // ?raw / ?url 등 일반 쿼리는 URL 변환 대상이지만,
+      // ?react (Vite 의 vite-plugin-svgr 패턴) 는 SVG 를 *React 컴포넌트* 로
+      // import 하는 의미이므로 URL const 로 바꾸면 안 된다.
+      // (`<MapIcon />` 같은 JSX 사용처가 정의를 잃고 빌드가 깨짐.)
+      // step1 의 svgr 처리 분기가 next.config 에 SVGR webpack rule 을 만들어 두므로
+      // import 는 그대로 두면 된다.
+      const queryPart = importPath.includes('?') ? importPath.split('?')[1] : '';
+      if (/(^|&)react(=|&|$)/.test(queryPart)) {
+        continue;
+      }
       const cleanPath = importPath.split('?')[0];
-      
+
       const publicPath = toPublicAssetPath(cleanPath);
       if (publicPath) {
         imports.push({
@@ -246,6 +301,131 @@ async function migrateAssetReferences(projectRoot) {
   for (const filePath of files) {
     await processAssetReferencesInFile(filePath, projectRoot);
   }
+
+  // CSS/SCSS/Less 의 url(...) 참조도 갱신
+  // (TypeScript 파일과 같이 마이그레이션 후 폰트·이미지가 public/assets/ 로 이동하면서
+  //  CSS 의 상대 경로가 깨지는 케이스를 잡는다)
+  const styleFiles = await findStyleFiles(srcDir);
+  for (const filePath of styleFiles) {
+    await processStyleAssetReferences(filePath, projectRoot);
+  }
+}
+
+//=========================================================
+// CSS/SCSS/Less 의 url() 참조 갱신
+//=========================================================
+
+const STYLE_EXT_RE = /\.(css|scss|sass|less)$/i;
+
+async function findStyleFiles(dir) {
+  const files = [];
+  if (!fs.existsSync(dir)) return files;
+  const items = await fs.readdir(dir, { withFileTypes: true });
+
+  for (const item of items) {
+    const fullPath = path.join(dir, item.name);
+    if (item.isDirectory()) {
+      if (!['node_modules', '.next', '.git', 'dist', 'build'].includes(item.name)) {
+        const sub = await findStyleFiles(fullPath);
+        files.push(...sub);
+      }
+    } else if (STYLE_EXT_RE.test(item.name)) {
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
+
+async function processStyleAssetReferences(filePath, projectRoot) {
+  const original = await fs.readFile(filePath, 'utf-8');
+  const fileDir = path.dirname(filePath);
+  const srcAssetsDir = path.join(projectRoot, 'src', 'assets');
+  const publicAssetsDir = path.join(projectRoot, 'public', 'assets');
+
+  // url('...'), url("..."), url(...) 모두 처리. data:, http://, https://, /assets/ 는 건너뜀.
+  const urlRe = /url\(\s*(['"]?)([^'")]+)\1\s*\)/g;
+  let changed = false;
+
+  const next = original.replace(urlRe, (match, quote, raw) => {
+    const ref = raw.trim();
+    if (!ref) return match;
+    if (/^(data:|https?:|\/\/|\/assets\/)/i.test(ref)) return match;
+
+    const cleanPath = ref.split('?')[0].split('#')[0];
+
+    // @assets/, @/assets/, /src/assets/ 같은 alias 형태
+    let publicRef = null;
+    if (cleanPath.startsWith('@assets/')) {
+      publicRef = cleanPath.replace('@assets/', '/assets/');
+    } else if (cleanPath.startsWith('@/assets/')) {
+      publicRef = cleanPath.replace('@/assets/', '/assets/');
+    } else if (cleanPath.startsWith('/src/assets/')) {
+      publicRef = cleanPath.replace('/src/assets/', '/assets/');
+    } else if (cleanPath.startsWith('./') || cleanPath.startsWith('../') || !cleanPath.startsWith('/')) {
+      // 상대/순수 경로 — 현재 파일 위치 기준으로 해석
+      const resolved = path.resolve(fileDir, cleanPath);
+
+      // 마이그레이션 전(src/assets/...) 기준으로 해석되면 /assets/... 로 매핑
+      if (resolved.startsWith(srcAssetsDir + path.sep)) {
+        const rel = path.relative(srcAssetsDir, resolved);
+        publicRef = `/assets/${rel.replace(/\\/g, '/')}`;
+      } else {
+        // 마이그레이션 후(public/assets/...) 에 같은 파일이 있으면 매핑
+        // 예: src/app/global.css 에서 './assets/fonts/x.ttf' → /assets/fonts/x.ttf
+        const baseName = path.basename(resolved);
+        const tail = cleanPath.replace(/^[./]+/, ''); // 'assets/fonts/x.ttf' 같은 꼬리
+        if (tail && tail.startsWith('assets/')) {
+          const candidate = path.join(projectRoot, 'public', tail);
+          if (fs.existsSync(candidate)) {
+            publicRef = `/${tail.replace(/\\/g, '/')}`;
+          } else {
+            // baseName 만 동일한지 확인 (폰트가 public/assets/fonts/ 어딘가로 이동했을 수도)
+            try {
+              const altCandidate = findFileInDir(publicAssetsDir, baseName);
+              if (altCandidate) {
+                const fromPublic = path.relative(path.join(projectRoot, 'public'), altCandidate);
+                publicRef = `/${fromPublic.replace(/\\/g, '/')}`;
+              }
+            } catch {
+              // ignore
+            }
+          }
+        }
+      }
+    }
+
+    if (!publicRef) return match;
+    changed = true;
+    const q = quote || '';
+    return `url(${q}${publicRef}${q})`;
+  });
+
+  if (changed && next !== original) {
+    await fs.writeFile(filePath, next, 'utf-8');
+  }
+}
+
+function findFileInDir(rootDir, fileName) {
+  if (!fs.existsSync(rootDir)) return null;
+  const stack = [rootDir];
+  while (stack.length) {
+    const dir = stack.pop();
+    let items;
+    try {
+      items = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const item of items) {
+      const fp = path.join(dir, item.name);
+      if (item.isDirectory()) {
+        stack.push(fp);
+      } else if (item.name === fileName) {
+        return fp;
+      }
+    }
+  }
+  return null;
 }
 
 //=========================================================

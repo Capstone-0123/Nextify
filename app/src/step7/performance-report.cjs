@@ -4,11 +4,11 @@ const net = require('net');
 const chalk = require('chalk');
 const os = require('os');
 
-const { detectPackageManager } = require('../utils/project-info.cjs');
-const { runCommand, startCommand } = require('../utils/exec.cjs');
+const { resolvePackageManagerCommand } = require('../utils/project-info.cjs');
+const { runCommand, startCommand, attachOutputCapture } = require('../utils/exec.cjs');
 const { cloneProject } = require('../utils/copy.cjs');
 
-const DEFAULT_LIGHTHOUSE_RUNS = 5;
+const DEFAULT_LIGHTHOUSE_RUNS = 3;
 const DEFAULT_LIGHTHOUSE_WARMUP_RUNS = 1;
 
 // 마이그레이션 도구(app/) 루트. 이 파일은 app/src/step7/performance-report.cjs 이므로 두 단계 위가 app/.
@@ -63,23 +63,16 @@ async function chromeLauncherPackageInstalled() {
  * 실패하면 사용자에게 수동 안내 메시지를 던집니다.
  */
 async function tryAutoInstallMigratorDeps() {
-  const pm = detectPackageManager(MIGRATOR_APP_ROOT) || 'npm';
+  const runtime = resolvePackageManagerCommand(MIGRATOR_APP_ROOT);
+  const pm = runtime.pm || 'npm';
   console.log(
     chalk.yellow(
       `\n⚠️  Lighthouse 측정을 위한 의존성(lighthouse, chrome-launcher)을 찾지 못했습니다.\n` +
-        `   ${MIGRATOR_APP_ROOT} 에서 ${pm} install 을 자동 실행합니다...`
+        `   ${MIGRATOR_APP_ROOT} 에서 ${runtime.displayInstall} 을 자동 실행합니다...`
     )
   );
   try {
-    if (pm === 'yarn') {
-      await runCommand('yarn', ['install'], { cwd: MIGRATOR_APP_ROOT });
-    } else if (pm === 'pnpm') {
-      await runCommand('pnpm', ['install'], { cwd: MIGRATOR_APP_ROOT });
-    } else if (pm === 'bun') {
-      await runCommand('bun', ['install'], { cwd: MIGRATOR_APP_ROOT });
-    } else {
-      await runCommand('npm', ['install'], { cwd: MIGRATOR_APP_ROOT });
-    }
+    await runCommand(runtime.cmd, [...runtime.argsPrefix, 'install'], { cwd: MIGRATOR_APP_ROOT });
     console.log(chalk.green('   ✔ 자동 설치 완료. 다시 시도합니다.\n'));
     return true;
   } catch (installErr) {
@@ -87,7 +80,7 @@ async function tryAutoInstallMigratorDeps() {
       `Lighthouse 의존성 자동 설치에 실패했습니다.\n` +
         `다음 명령을 직접 실행한 뒤 다시 시도하세요.\n` +
         `  cd "${MIGRATOR_APP_ROOT}"\n` +
-        `  ${pm} install\n` +
+        `  ${runtime.displayInstall}\n` +
         `(Windows PowerShell에서는 경로에 공백이 있어도 따옴표로 감싸세요)\n` +
         `자동 설치 오류: ${installErr.message}`
     );
@@ -248,7 +241,17 @@ async function getFreePort(preferred = 4173) {
   throw new Error('사용 가능한 포트를 찾지 못했습니다.');
 }
 
-async function waitForHttpReady(url, timeoutMs = 120_000) {
+async function waitForHttpReady(url, options = {}) {
+  // 기존 시그니처 호환 (두 번째 인자가 number 인 경우 timeoutMs 로 해석).
+  let timeoutMs = 120_000;
+  let child = null;
+  if (typeof options === 'number') {
+    timeoutMs = options;
+  } else if (options && typeof options === 'object') {
+    if (typeof options.timeoutMs === 'number') timeoutMs = options.timeoutMs;
+    if (options.child) child = options.child;
+  }
+
   const start = Date.now();
   // Node 18+ has fetch; Node 16 might not. Use http module fallback.
   const http = require('http');
@@ -271,6 +274,19 @@ async function waitForHttpReady(url, timeoutMs = 120_000) {
   }
 
   while (Date.now() - start < timeoutMs) {
+    // child 가 조기 종료한 경우 즉시 throw — 죽은 서버를 timeoutMs 동안 헛으로 폴링하지 않게 한다.
+    if (child && (child.exitCode != null || child.signalCode)) {
+      const err = new Error(
+        child.signalCode
+          ? `서버 프로세스가 시그널 ${child.signalCode} 로 조기 종료되었습니다 (URL=${url})`
+          : `서버 프로세스가 코드 ${child.exitCode} 로 조기 종료되었습니다 (URL=${url})`,
+      );
+      err.code = 'SERVER_EARLY_EXIT';
+      err.exitCode = child.exitCode;
+      err.signalCode = child.signalCode;
+      throw err;
+    }
+
     try {
       for (const candidateUrl of candidates) {
         // eslint-disable-next-line no-await-in-loop
@@ -294,7 +310,71 @@ async function waitForHttpReady(url, timeoutMs = 120_000) {
     // eslint-disable-next-line no-await-in-loop
     await new Promise((r) => setTimeout(r, 1500));
   }
-  throw new Error(`서버 준비 대기 시간 초과: ${url}`);
+  const err = new Error(`서버 준비 대기 시간 초과: ${url}`);
+  err.code = 'SERVER_TIMEOUT';
+  throw err;
+}
+
+/**
+ * 서버 기동 실패(timeout 또는 조기 종료) 시 사용자에게 보여줄 친절 에러 메시지를 합성.
+ * - 캡처된 child 의 마지막 출력을 함께 첨부 (가장 큰 진단 가치).
+ * - OS 별 수동 점검 명령을 분기.
+ * - 마이그레이션 결과물은 보존된다는 점을 명시.
+ */
+function buildHelpfulServerError(originalErr, info) {
+  const { url, port, projectRoot, recentOutput, label, kind } = info;
+  const code = originalErr?.code;
+  const isTimeout = code === 'SERVER_TIMEOUT' || /시간 초과/.test(originalErr?.message || '');
+  const isEarlyExit =
+    code === 'SERVER_EARLY_EXIT' || /조기 종료/.test(originalErr?.message || '');
+
+  const lines = [];
+  lines.push(`[${label}] ${originalErr?.message || originalErr}`);
+  lines.push('');
+  lines.push('가능한 원인:');
+  if (isEarlyExit) {
+    lines.push('  - 서버 프로세스가 즉시 비정상 종료 (가장 흔한 원인)');
+    lines.push('    · 빌드 산출물 누락/손상 (.next 또는 dist 폴더)');
+    lines.push('    · package.json scripts.start / preview 가 잘못된 명령');
+    lines.push('    · node_modules 손상 / 의존성 미설치');
+  }
+  if (isTimeout) {
+    lines.push('  - 서버는 시작했으나 ready 상태에 도달 못 함');
+    lines.push('    · 저사양 머신에서 첫 응답이 매우 느린 경우 (120s 초과)');
+    lines.push(`    · 서버가 다른 포트로 fallback 떠서 폴링 (${url}) 과 어긋남`);
+    lines.push('    · 백신/방화벽이 localhost binding 을 차단');
+  }
+  lines.push(`  - 포트 ${port} 점유 race (free port 확정 직후 다른 프로세스가 점유)`);
+  lines.push('');
+  lines.push('[서버 마지막 출력]');
+  if (recentOutput && recentOutput.trim().length > 0) {
+    lines.push(recentOutput);
+  } else {
+    lines.push('(없음 — 서버가 stdout/stderr 에 아무것도 출력하지 않았습니다)');
+  }
+  lines.push('');
+  lines.push('수동 점검 가이드:');
+  lines.push(`  cd "${projectRoot}"`);
+  lines.push('  npm install         # node_modules 누락이면');
+  if (kind === 'vite') {
+    lines.push('  npm run build       # dist 산출물 다시');
+    lines.push(`  npx vite preview --port ${port} --strictPort   # 직접 실행해 에러 확인`);
+  } else {
+    lines.push('  npm run build       # .next 산출물 다시');
+    lines.push(`  npx next start -p ${port}    # 직접 실행해 에러 확인`);
+  }
+  if (process.platform === 'win32') {
+    lines.push(`  netstat -ano | findstr :${port}    # 포트 점유 확인`);
+  } else {
+    lines.push(`  lsof -iTCP:${port} -sTCP:LISTEN     # 포트 점유 확인`);
+  }
+  lines.push('');
+  lines.push('마이그레이션 결과물은 그대로 보존됩니다. 위 명령으로 직접 원인을 확인 후 다시 시도하세요.');
+
+  const finalErr = new Error(lines.join('\n'));
+  finalErr.cause = originalErr;
+  finalErr.code = code || 'SERVER_BOOT_FAILED';
+  return finalErr;
 }
 
 async function directorySizeBytes(dirPath) {
@@ -331,11 +411,26 @@ async function readPackageJson(projectRoot) {
   return fs.readJson(pkgPath);
 }
 
-function getPmRunCommand(pm) {
-  if (pm === 'yarn') return { cmd: 'yarn', run: (script) => ['run', script] };
-  if (pm === 'pnpm') return { cmd: 'pnpm', run: (script) => ['run', script] };
-  if (pm === 'bun') return { cmd: 'bun', run: (script) => ['run', script] };
-  return { cmd: 'npm', run: (script) => ['run', script] };
+async function hasCustomWebpackConfig(projectRoot) {
+  const candidates = ['next.config.js', 'next.config.cjs', 'next.config.mjs', 'next.config.ts'];
+  for (const name of candidates) {
+    const p = path.join(projectRoot, name);
+    if (!(await fs.pathExists(p))) continue;
+    try {
+      const raw = await fs.readFile(p, 'utf8');
+      // next config 내 webpack 커스터마이징 흔적만 잡는다.
+      if (/\bwebpack\s*[:(]/.test(raw)) return true;
+    } catch {
+      // ignore
+    }
+  }
+  return false;
+}
+
+function getPmRuntime(projectRoot) {
+  const runtime = resolvePackageManagerCommand(projectRoot);
+  const run = (script) => [...runtime.argsPrefix, 'run', script];
+  return { ...runtime, run };
 }
 
 async function ensureDependenciesInstalled(projectRoot) {
@@ -343,66 +438,102 @@ async function ensureDependenciesInstalled(projectRoot) {
   if (await fs.pathExists(nodeModulesPath)) return;
 
   console.log(chalk.gray(`의존성 설치가 필요합니다: ${projectRoot}`));
-
-  const pm = detectPackageManager(projectRoot);
-  if (pm === 'yarn') {
-    await runCommand('yarn', ['install'], { cwd: projectRoot });
-    return;
-  }
-  if (pm === 'pnpm') {
-    await runCommand('pnpm', ['install'], { cwd: projectRoot });
-    return;
-  }
-  if (pm === 'bun') {
-    await runCommand('bun', ['install'], { cwd: projectRoot });
-    return;
-  }
-  await runCommand('npm', ['install'], { cwd: projectRoot });
+  const runtime = resolvePackageManagerCommand(projectRoot);
+  await runCommand(runtime.cmd, [...runtime.argsPrefix, 'install'], { cwd: projectRoot });
 }
 
 async function runBuild(projectRoot, kind) {
   await ensureDependenciesInstalled(projectRoot);
-  const pm = detectPackageManager(projectRoot);
-  const { cmd, run } = getPmRunCommand(pm);
+  const runtime = getPmRuntime(projectRoot);
 
   if (kind === 'vite') {
-    await runCommand(cmd, [...run('build')], { cwd: projectRoot });
+    await runCommand(runtime.cmd, runtime.run('build'), { cwd: projectRoot });
     return;
   }
-  await runCommand(cmd, [...run('build')], { cwd: projectRoot });
+  // Next 16+ 에서 webpack 커스터마이징이 있으면 Turbopack 기본 빌드가 즉시 실패한다.
+  // 성능 측정용 빌드는 시작부터 webpack 모드로 강제해 불필요한 실패 로그를 줄인다.
+  if (await hasCustomWebpackConfig(projectRoot)) {
+    await runCommand(runtime.cmd, [...runtime.run('build'), '--webpack'], {
+      cwd: projectRoot,
+    });
+    return;
+  }
+  try {
+    await runCommand(runtime.cmd, runtime.run('build'), { cwd: projectRoot });
+  } catch (err) {
+    const msg = String(err?.message || err || '');
+    const turbopackWebpackConflict =
+      /using Turbopack, with a [`'"]webpack[`'"] config and no [`'"]turbopack[`'"] config/i.test(msg) ||
+      /As of Next\.js 16 Turbopack is enabled by default/i.test(msg);
+    if (!turbopackWebpackConflict) throw err;
+
+    console.log(
+      chalk.yellow(
+        '⚠️  Next.js 16 Turbopack/webpack 충돌 감지: 성능 측정을 위해 `next build --webpack`으로 1회 재시도합니다.',
+      ),
+    );
+    await runCommand(runtime.cmd, [...runtime.run('build'), '--webpack'], {
+      cwd: projectRoot,
+    });
+  }
 }
 
 async function startServer(projectRoot, kind, port) {
   await ensureDependenciesInstalled(projectRoot);
-  const pm = detectPackageManager(projectRoot);
-  const { cmd, run } = getPmRunCommand(pm);
+  const runtime = getPmRuntime(projectRoot);
+  const pm = runtime.pm;
 
   const pkg = await readPackageJson(projectRoot);
   const scripts = pkg.scripts || {};
+
+  // 호스트/포트를 env 로 함께 강제: 일부 PM/OS 에서 `-p` 인자가 next 까지 도달하지 않는 케이스가 있어
+  // PORT 환경변수와 -p 인자 두 경로를 같이 줘서 일치를 보장. HOSTNAME=127.0.0.1 로 고정해
+  // Windows IPv6 우선/0.0.0.0 binding 미스매치도 방지한다.
+  const childEnv = {
+    ...process.env,
+    PORT: String(port),
+    HOSTNAME: '127.0.0.1',
+  };
+
+  let child;
 
   if (kind === 'vite') {
     if (scripts.preview) {
       const args =
         pm === 'yarn'
-          ? [...run('preview'), '--port', String(port), '--strictPort']
-          : [...run('preview'), '--', '--port', String(port), '--strictPort'];
-      return startCommand(cmd, args, { cwd: projectRoot, stdio: 'pipe' });
+          ? [...runtime.run('preview'), '--port', String(port), '--strictPort']
+          : [...runtime.run('preview'), '--', '--port', String(port), '--strictPort'];
+      child = startCommand(runtime.cmd, args, { cwd: projectRoot, stdio: 'pipe', env: childEnv });
+    } else {
+      // fallback: try npx vite preview
+      child = startCommand(
+        'npx',
+        ['vite', 'preview', '--port', String(port), '--strictPort'],
+        { cwd: projectRoot, stdio: 'pipe', env: childEnv },
+      );
     }
-    // fallback: try npx vite preview
-    return startCommand('npx', ['vite', 'preview', '--port', String(port), '--strictPort'], {
+  } else if (scripts.start) {
+    // next
+    child = startCommand(runtime.cmd, [...runtime.run('start'), '--', '-p', String(port)], {
       cwd: projectRoot,
       stdio: 'pipe',
+      env: childEnv,
+    });
+  } else {
+    child = startCommand('npx', ['next', 'start', '-p', String(port)], {
+      cwd: projectRoot,
+      stdio: 'pipe',
+      env: childEnv,
     });
   }
 
-  // next
-  if (scripts.start) {
-    return startCommand(cmd, [...run('start'), '--', '-p', String(port)], {
-      cwd: projectRoot,
-      stdio: 'pipe',
-    });
-  }
-  return startCommand('npx', ['next', 'start', '-p', String(port)], { cwd: projectRoot, stdio: 'pipe' });
+  // stdout/stderr 캡처 부착:
+  //   1) 'pipe' 로 띄워두고 호출자가 한 번도 읽지 않으면 OS 파이프 버퍼가 가득 차서 child 가
+  //      writev() 에서 멈출 수 있다 — 우리 케이스의 가장 의심스러운 hang 원인.
+  //   2) 사고(timeout/조기 종료) 시 마지막 출력을 사용자에게 그대로 보여줘 진단을 가능하게 한다.
+  child.__capture = attachOutputCapture(child, { maxLines: 80 });
+
+  return child;
 }
 
 async function runLighthouseOnce(url) {
@@ -631,7 +762,20 @@ async function measureTarget({ label, projectRoot, kind, lighthouseRuns, warmupR
   const server = await startServer(projectRoot, kind, port);
 
   try {
-    await waitForHttpReady(url);
+    try {
+      // child 핸들을 함께 넘겨 조기 종료 시 즉시 빠져나가게 한다 (헛 폴링 회피).
+      await waitForHttpReady(url, { child: server });
+    } catch (waitErr) {
+      const recent = server?.__capture?.getRecent?.(60) || '';
+      throw buildHelpfulServerError(waitErr, {
+        url,
+        port,
+        projectRoot,
+        recentOutput: recent,
+        label,
+        kind,
+      });
+    }
     const lighthouseResult = await runLighthouseSeries(url, {
       runs: lighthouseRuns,
       warmupRuns,

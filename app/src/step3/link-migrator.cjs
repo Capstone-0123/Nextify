@@ -664,11 +664,51 @@ function migrateUseNavigate(sourceFile) {
           call.replaceWithText('router.back()');
           modified = true;
         } else {
-          // ✅ 수정: navigate('/path') → router.push('/path') (명세 c.4)
-          // 전체 호출을 router.push(...)로 교체
-          const argsText = args.map(arg => arg.getText()).join(', ');
-          call.replaceWithText(`router.push(${argsText})`);
+          // ✅ 수정: navigate('/path', options?) → router.push('/path') / router.replace('/path')
+          //
+          // react-router 의 두 번째 인자 옵션 객체에는 next/navigation 의
+          // NavigateOptions 와 호환되지 않는 키들(state, replace, relative,
+          // preventScrollReset, …) 이 들어있는 경우가 많다.
+          // 이를 그대로 옮기면 `Object literal may only specify known
+          // properties, and 'state' does not exist in type 'NavigateOptions'`
+          // 같은 빌드 에러가 발생한다.
+          //
+          // 정책:
+          //  - replace: true   → router.replace(path)
+          //  - 그 외 모든 옵션 → 두 번째 인자 자체를 제거 (state 등은 손실, scroll 만 안전)
+          //  - state 가 들어있던 경우 console.warn 으로 사용자에게 보고
+          const pathArgText = argText;
+          const optsText = args.length >= 2 ? args[1].getText() : '';
+          let useReplace = false;
+          let droppedStateKeys = [];
+          if (optsText) {
+            // 객체 리터럴일 때만 분석. 그 외(spread 변수, 함수 호출 등)는 안전하게 제거.
+            const optsMatch = optsText.match(/^\{([\s\S]*)\}$/);
+            if (optsMatch) {
+              const body = optsMatch[1];
+              if (/(^|,|\s)replace\s*:\s*true\b/.test(body)) {
+                useReplace = true;
+              }
+              const stateMatch = body.match(/(^|,|\s)state\s*:/);
+              if (stateMatch) droppedStateKeys.push('state');
+              if (/(^|,|\s)relative\s*:/.test(body)) droppedStateKeys.push('relative');
+              if (/(^|,|\s)preventScrollReset\s*:/.test(body)) droppedStateKeys.push('preventScrollReset');
+            } else {
+              droppedStateKeys.push('<dynamic options>');
+            }
+          }
+          const target = useReplace ? 'router.replace' : 'router.push';
+          call.replaceWithText(`${target}(${pathArgText})`);
           modified = true;
+          if (droppedStateKeys.length > 0) {
+            // 한 줄짜리 경고는 마이그레이션 로그에 남는다 (process.stderr 가 아닌
+            // console.log 로 보고하면 chalk gray 와 자연스럽게 어울린다).
+            // eslint-disable-next-line no-console
+            console.log(
+              `   ⚠️  router.push 두 번째 인자에서 react-router 전용 옵션 제거: ` +
+              `${sourceFile.getFilePath()}: [${droppedStateKeys.join(', ')}]`,
+            );
+          }
         }
       } else {
         // 인자가 없으면 router.push()로 변경 (기본값)

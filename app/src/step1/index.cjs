@@ -8,6 +8,7 @@ const {
   updateTsConfig,
 } = require('./step1-env.cjs');
 const { ensureWatcherFriendlySettings } = require('../utils/watcher-friendly.cjs');
+const { ensureNextifyExcludes } = require('../utils/ensure-nextify-excludes.cjs');
 const chalk = require('chalk');
 
 /**
@@ -44,6 +45,25 @@ async function runStep1(projectRoot) {
   console.log('TypeScript 컴파일러 설정 정리 시작');
   await updateTsConfig(projectRoot);
   console.log('TypeScript 컴파일러 설정 정리 완료');
+
+  // 5. Nextify 내부 산출물(.ai-migration, __nextify_snapshots) 을
+  //    tsconfig.exclude / .gitignore 에서 제외 — 사용자 빌드가 그 안의
+  //    부분 변환 스냅샷까지 type-check 하면서 깨지는 사고를 차단한다.
+  try {
+    const result = await ensureNextifyExcludes(projectRoot);
+    if (result.tsconfig.updated) {
+      console.log(
+        chalk.gray('   🛡️  tsconfig.json exclude 보강: .ai-migration, __nextify_snapshots'),
+      );
+    }
+    if (result.gitignore.updated && result.gitignore.addedLines.length > 0) {
+      console.log(
+        chalk.gray(`   🛡️  .gitignore 보강: ${result.gitignore.addedLines.join(', ')}`),
+      );
+    }
+  } catch {
+    // 안전망 자체의 실패는 마이그레이션을 막지 않는다.
+  }
 
   console.log(chalk.green.bold('파트 1 완료'));
 }

@@ -40,6 +40,182 @@ async function applyNextImage(projectRoot) {
     return files;
   }
 
+  // ─── 상태머신 기반 <img> 태그 파인더 ────────────────────────────────────
+  // 기존 정규식은 onClick={() => ...} 의 '=>' 에서 '>'를 잘못 인식하거나
+  // 템플릿 리터럴 `...` 안의 `}` 로 중괄호 균형이 깨지는 버그가 있었다.
+  function findImgTagsInContent(content) {
+    const tags = [];
+    let i = 0;
+
+    while (i < content.length) {
+      const start = content.indexOf('<img', i);
+      if (start === -1) break;
+
+      // <img 뒤에 바로 \w 가 오면 다른 태그 이름(예: <imglist) — 건너뜀
+      const afterKeyword = start + 4;
+      if (afterKeyword < content.length && /\w/.test(content[afterKeyword])) {
+        i = afterKeyword;
+        continue;
+      }
+
+      // 상태머신으로 태그 끝 위치 탐색
+      let j = afterKeyword;
+      let depth = 0;      // {} 깊이
+      let inStr = null;   // null | '"' | "'" | '`'
+      let tmplDepth = 0;  // 템플릿 리터럴 내부 ${...} 깊이
+      let found = false;
+
+      while (j < content.length) {
+        const ch = content[j];
+
+        if (inStr !== null) {
+          if (inStr === '`') {
+            if (ch === '\\') { j += 2; continue; }
+            if (ch === '`') { inStr = null; j++; continue; }
+            if (ch === '$' && content[j + 1] === '{') { tmplDepth++; j += 2; continue; }
+          } else {
+            if (ch === '\\') { j += 2; continue; }
+            if (ch === inStr) { inStr = null; j++; continue; }
+          }
+          j++;
+          continue;
+        }
+
+        if (tmplDepth > 0) {
+          if (ch === '{') { tmplDepth++; }
+          else if (ch === '}') { tmplDepth--; }
+          else if (ch === '"' || ch === "'") { inStr = ch; }
+          else if (ch === '`') { inStr = '`'; }
+          j++;
+          continue;
+        }
+
+        // 평문(문자열/표현식 밖)
+        if (ch === '"' || ch === "'") { inStr = ch; j++; continue; }
+        if (ch === '`') { inStr = '`'; j++; continue; }
+        if (ch === '{') { depth++; j++; continue; }
+        if (ch === '}') { depth--; j++; continue; }
+
+        if (depth === 0) {
+          if (ch === '/' && content[j + 1] === '>') {
+            const end = j + 2;
+            tags.push({
+              fullMatch: content.slice(start, end),
+              attributes: content.slice(afterKeyword, j).trim(),
+              index: start,
+            });
+            i = end;
+            found = true;
+            break;
+          }
+          if (ch === '>') {
+            const end = j + 1;
+            tags.push({
+              fullMatch: content.slice(start, end),
+              attributes: content.slice(afterKeyword, j).trim(),
+              index: start,
+            });
+            i = end;
+            found = true;
+            break;
+          }
+        }
+        j++;
+      }
+
+      if (!found) break; // 닫히지 않은 태그면 탐색 중단
+    }
+
+    return tags;
+  }
+
+  // ─── 중괄호/따옴표 인식 JSX 속성 파서 ──────────────────────────────────
+  // 기존 코드의 `[^}]*` 정규식은 onClick={() => ...} 이나 alt={`tmpl ${x}`} 처럼
+  // 중첩 괄호/템플릿 리터럴이 있는 경우 값을 잘라냈다.
+  function parseJsxAttributeList(attrString) {
+    const attrList = [];
+    let rem = attrString.trim();
+
+    while (rem.length > 0) {
+      rem = rem.trimStart();
+      if (!rem.length) break;
+
+      // 속성 키
+      const keyM = /^([\w-]+)/.exec(rem);
+      if (!keyM) { rem = rem.slice(1); continue; }
+      const key = keyM[1];
+      rem = rem.slice(key.length).trimStart();
+
+      if (!rem.length || rem[0] !== '=') {
+        attrList.push({ key, value: true, isBoolean: true });
+        continue;
+      }
+      rem = rem.slice(1).trimStart(); // '=' 소비
+
+      if (!rem.length) { attrList.push({ key, value: true, isBoolean: true }); break; }
+
+      const fc = rem[0];
+
+      if (fc === '"' || fc === "'") {
+        // 따옴표 문자열 값
+        let end = 1;
+        while (end < rem.length) {
+          if (rem[end] === '\\') { end += 2; continue; }
+          if (rem[end] === fc) { end++; break; }
+          end++;
+        }
+        attrList.push({ key, value: rem.slice(1, end - 1), isString: true, quote: fc });
+        rem = rem.slice(end);
+        continue;
+      }
+
+      if (fc === '{') {
+        // 중괄호 균형을 직접 추적
+        let depth = 1;
+        let j = 1;
+        let inS = null;
+        let tmplD = 0;
+
+        while (j < rem.length && depth > 0) {
+          const ch = rem[j];
+          if (inS !== null) {
+            if (inS === '`') {
+              if (ch === '\\') { j += 2; continue; }
+              if (ch === '`') { inS = null; }
+              else if (ch === '$' && rem[j + 1] === '{') { tmplD++; j += 2; continue; }
+            } else {
+              if (ch === '\\') { j += 2; continue; }
+              if (ch === inS) { inS = null; }
+            }
+          } else if (tmplD > 0) {
+            if (ch === '{') tmplD++;
+            else if (ch === '}') tmplD--;
+            else if (ch === '"' || ch === "'") inS = ch;
+            else if (ch === '`') inS = '`';
+          } else {
+            if (ch === '"' || ch === "'") { inS = ch; }
+            else if (ch === '`') { inS = '`'; }
+            else if (ch === '{') depth++;
+            else if (ch === '}') depth--;
+          }
+          j++;
+        }
+
+        attrList.push({ key, value: rem.slice(1, j - 1), isJSX: true });
+        rem = rem.slice(j);
+        continue;
+      }
+
+      // 그 외 — 다음 공백까지를 값으로
+      const spaceIdx = rem.search(/\s/);
+      const val = spaceIdx === -1 ? rem : rem.slice(0, spaceIdx);
+      attrList.push({ key, value: val, isJSX: true });
+      rem = spaceIdx === -1 ? '' : rem.slice(spaceIdx);
+    }
+
+    return attrList;
+  }
+
   // 파일 내 <img> 태그를 <Image> 태그로 변환
   async function processFile(filePath) {
     let content = await fs.readFile(filePath, 'utf-8');
@@ -48,76 +224,22 @@ async function applyNextImage(projectRoot) {
     // 이미지 URL 수집 (next.config.mjs 업데이트용)
     const fileImageUrls = [];
 
-    // 2. JSX 내부에서 <img ... /> 또는 <img ... > 태그 찾기
-    // 여러 줄에 걸친 태그도 처리할 수 있도록 개선
-    // 단, 다른 태그의 속성 안에 포함되지 않도록 주의
-    const imgTagPattern = /<img\s+([\s\S]*?)(?:\s*\/>|>)/g;
-    const imgTags = [];
-    let match;
+    // 상태머신 기반 <img> 태그 탐색 (=> 나 템플릿 리터럴에 취약했던 regex 대체)
+    const imgTags = findImgTagsInContent(content);
 
-    while ((match = imgTagPattern.exec(content)) !== null) {
-      const fullMatch = match[0];
-      const attributes = match[1];
-      const tagIndex = match.index;
-      
-      // 태그 앞뒤 문맥 확인 (다른 태그의 속성 안에 잘못 포함되지 않았는지)
-      const beforeTag = content.slice(Math.max(0, tagIndex - 50), tagIndex);
-      const afterTag = content.slice(tagIndex + fullMatch.length, tagIndex + fullMatch.length + 10);
-      
-      // 다른 태그의 속성 안에 포함된 경우 건너뛰기
-      // 예: <div className="...<img..."> 같은 경우
-      let isInsideAttribute = false;
-      
-      // 앞쪽에서 열린 따옴표나 중괄호가 닫히지 않았는지 확인
-      const beforeContext = beforeTag;
-      const openQuotes = (beforeContext.match(/["']/g) || []).length;
-      const closeQuotes = (beforeContext.match(/["']/g) || []).length;
-      
-      // className="..." 안에 있는지 확인
-      const classNameMatch = beforeContext.match(/className\s*=\s*["']([^"']*)$/);
-      if (classNameMatch) {
-        // className 속성 값이 아직 닫히지 않았으면 건너뛰기
-        isInsideAttribute = true;
-      }
-      
-      // style={{...}} 안에 있는지 확인
-      const styleMatch = beforeContext.match(/style\s*=\s*\{\s*\{/);
-      if (styleMatch) {
-        // 중괄호가 제대로 닫혔는지 확인
-        const openBraces = (beforeContext.match(/\{/g) || []).length;
-        const closeBraces = (beforeContext.match(/\}/g) || []).length;
-        if (openBraces > closeBraces) {
-          isInsideAttribute = true;
-        }
-      }
-      
-      if (isInsideAttribute) {
-        continue;
-      }
-      
-      // 태그가 제대로 닫혀있는지 확인
-      if (!fullMatch.endsWith('/>') && !fullMatch.endsWith('>')) {
-        continue;
-      }
-      
-      imgTags.push({
-        fullMatch: fullMatch,
-        attributes: attributes.trim(),
-        index: tagIndex,
-      });
-      
-      // src 속성에서 URL 추출 (이미지 호스트네임 수집용)
-      const srcMatch = attributes.match(/src\s*=\s*(["'])([^"']*)\1|src\s*=\s*\{([^}]+)\}/);
-      if (srcMatch) {
-        const url = srcMatch[2] || srcMatch[3];
-        if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
-          fileImageUrls.push(url.trim());
+    // src 속성에서 URL 수집
+    for (const tag of imgTags) {
+      const srcM = /src\s*=\s*(["'])([^"']*)\1/.exec(tag.attributes)
+        || /src\s*=\{([^}]*)\}/.exec(tag.attributes);
+      if (srcM) {
+        const url = (srcM[2] || srcM[1] || '').trim();
+        if (url.startsWith('http://') || url.startsWith('https://')) {
+          fileImageUrls.push(url);
         }
       }
     }
 
     // 파일 전체에서 이미지 URL 추출 (함수 호출 등 포함)
-    // 예: getImageUrl(), "https://...", 'https://...' 등
     const urlPattern = /(?:https?:\/\/[^\s"'`\)]+)/g;
     let urlMatch;
     while ((urlMatch = urlPattern.exec(content)) !== null) {
@@ -136,24 +258,23 @@ async function applyNextImage(projectRoot) {
     const nextImageImportPattern = /import\s+Image\s+from\s+["']next\/image["'];?\s*\n?/;
     const hasNextImageImport = nextImageImportPattern.test(content);
 
-    // 4. 존재하지 않으면 파일 최상단에 import Image from "next/image"; 추가
+    // 4. 존재하지 않으면 import 삽입 — "use client"/"use server" 를 파일 첫 줄로 보존
     const importLine = 'import Image from "next/image";\n';
     if (!hasNextImageImport) {
-      const firstImportMatch = content.match(/^import\s+/m);
-      if (firstImportMatch) {
-        const insertIndex = firstImportMatch.index;
-        content =
-          content.slice(0, insertIndex) + importLine + content.slice(insertIndex);
-        const delta = importLine.length;
-        for (const tag of imgTags) {
-          if (tag.index >= insertIndex) tag.index += delta;
-        }
+      // "use client" / "use server" 디렉티브가 파일 맨 앞에 있으면 그 뒤에 삽입
+      const directiveRe = /^(['"]use (?:client|server)['"]\s*;?\s*\r?\n)/;
+      const directiveMatch = directiveRe.exec(content);
+      let insertIndex;
+      if (directiveMatch) {
+        insertIndex = directiveMatch[0].length;
       } else {
-        content = importLine + content;
-        const delta = importLine.length;
-        for (const tag of imgTags) {
-          tag.index += delta;
-        }
+        const firstImportMatch = content.match(/^import\s+/m);
+        insertIndex = firstImportMatch ? firstImportMatch.index : 0;
+      }
+      content = content.slice(0, insertIndex) + importLine + content.slice(insertIndex);
+      const delta = importLine.length;
+      for (const tag of imgTags) {
+        if (tag.index >= insertIndex) tag.index += delta;
       }
     }
 
@@ -179,54 +300,10 @@ async function applyNextImage(projectRoot) {
 
   // <img> 태그를 <Image> 태그로 변환
   function convertImgToImage(attributes) {
-    // 속성 파싱 - JSX 속성 형태를 고려
-    // key="value", key='value', key={value}, key={...}, key 등 다양한 형태 지원
+    // 중괄호/따옴표 인식 파서로 속성 파싱
+    const attrList = parseJsxAttributeList(attributes);
     const attrMap = {};
-    const attrList = [];
-    
-    // 속성 문자열을 파싱 (더 정교한 파싱)
-    let remaining = attributes.trim();
-    
-    while (remaining.length > 0) {
-      // 공백 제거
-      remaining = remaining.trim();
-      if (remaining.length === 0) break;
-      
-      // key="value" 또는 key='value' 형태
-      const stringValueMatch = remaining.match(/^(\w+)\s*=\s*(["'])([^"']*)\2/);
-      if (stringValueMatch) {
-        const key = stringValueMatch[1];
-        const value = stringValueMatch[3];
-        attrMap[key] = value;
-        attrList.push({ key, value, isString: true });
-        remaining = remaining.slice(stringValueMatch[0].length);
-        continue;
-      }
-      
-      // key={value} 형태 (중괄호 내부 처리)
-      const jsxValueMatch = remaining.match(/^(\w+)\s*=\s*\{([^}]*)\}/);
-      if (jsxValueMatch) {
-        const key = jsxValueMatch[1];
-        const value = jsxValueMatch[2].trim();
-        attrMap[key] = value;
-        attrList.push({ key, value, isJSX: true });
-        remaining = remaining.slice(jsxValueMatch[0].length);
-        continue;
-      }
-      
-      // key만 있는 형태 (boolean 속성)
-      const booleanMatch = remaining.match(/^(\w+)(?:\s|$)/);
-      if (booleanMatch) {
-        const key = booleanMatch[1];
-        attrMap[key] = true;
-        attrList.push({ key, value: true, isBoolean: true });
-        remaining = remaining.slice(booleanMatch[0].length);
-        continue;
-      }
-      
-      // 파싱 실패 시 한 문자씩 건너뛰기 (무한 루프 방지)
-      remaining = remaining.slice(1);
-    }
+    for (const a of attrList) attrMap[a.key] = a.value;
 
     // 6. src, alt 속성은 그대로 유지
     // 8. className, style, priority 등 기존 속성은 유지
