@@ -122,11 +122,7 @@ async function ensureWatcherFriendlySettings(projectRoot) {
 
   try {
     await fs.writeJson(settingsPath, settings, { spaces: 2 });
-    console.log(
-      chalk.gray(
-        `   📝 ${path.relative(projectRoot, settingsPath).split(path.sep).join('/')}에 워처 제외 설정을 보강했습니다 (.ai-migration/, node_modules/ 등).`
-      )
-    );
+    // 내부 처리 과정으로 사용자에게 노출하지 않음
     return { written: true };
   } catch (writeErr) {
     console.log(

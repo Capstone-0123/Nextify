@@ -257,7 +257,7 @@ program
       if (mode === 'copy') {
         await cloneProject(cwd, targetPath);
         process.chdir(targetPath);
-        console.log(chalk.blue(`\n📂 작업 경로가 변경되었습니다: ${targetPath}`));
+        console.log(chalk.white(`  · 작업 경로: ${targetPath}`));
       }
 
       if (mode === 'review') {
@@ -473,8 +473,6 @@ program
       ];
 
       for (const [stepName, stepRunner] of stepEntries) {
-        const partNum = stepName.replace('step', '');
-        console.log(chalk.yellow(`\n==================== Part ${partNum} (${stepName}) ====================`));
         await stepRunner(projectRoot);
       }
 
@@ -733,14 +731,8 @@ function tryAddFolderToCurrentWorkspace(folderAbsPath) {
 function printWorkspaceAddFallbackGuide(folderAbsPath) {
   const abs = path.resolve(folderAbsPath);
   const parentDir = path.dirname(abs);
-  console.log(chalk.yellow('\n⚠️  IDE에 결과 폴더를 자동으로 추가하지 못했습니다. (VS Code/Cursor CLI 가 PATH에 없거나 실행에 실패함)'));
-  console.log(chalk.white('   Nextify Review 패널 트리가 비면 다음 중 하나를 하세요:'));
-  console.log(chalk.white(`   1) 파일 → 작업 영역에 폴더 추가 → ${abs}`));
-  console.log(
-    chalk.white(
-      `   2) 부모 폴더를 한 번에 워크스페이스로 연 다음(예: ${parentDir}), 터미널에서 프로젝트 하위 폴더로 이동해 migrate-next 실행 — 터미널 세션은 그대로 유지됩니다.`,
-    ),
-  );
+  console.log(chalk.white('  · 결과 폴더를 Cursor에 수동으로 추가하세요:'));
+  console.log(chalk.white(`    파일 → 작업 영역에 폴더 추가 → ${abs}`));
 }
 
 async function cleanupStaleStepArtifacts(projectRoot) {
@@ -914,7 +906,7 @@ async function runDefaultOrchestrator() {
 
     await cloneProject(cwd, targetPath);
     process.chdir(targetPath);
-    console.log(chalk.blue(`\n📂 작업 경로가 변경되었습니다: ${targetPath}`));
+    console.log(chalk.white(`  · 작업 경로: ${targetPath}`));
 
     const wsAdd = tryAddFolderToCurrentWorkspace(targetPath);
     if (wsAdd.ok) {
@@ -944,25 +936,27 @@ async function runDefaultOrchestrator() {
 
   const finalReviewSession = await createSnapshotReviewSession(targetPath, 'step7', async (projectRoot) => {
     for (const [stepName, stepRunner] of stepEntries) {
-      const partNum = stepName.replace('step', '');
-      console.log(chalk.yellow(`\n==================== Part ${partNum} (${stepName}) ====================`));
-      // step7 시작 직전(즉 step1~6 결과 시점)에서 성능 비교용 스냅샷을 생성해 둡니다.
+      // step7 시작 직전(즉 step1~6 결과 시점)에서 성능 비교용 백업을 생성해 둡니다.
       // 이렇게 하지 않으면 generatePerformanceReport 시점에 만들어져 step7 결과를 복사하게 되어
       // step1~6 vs step1~7 비교가 사실상 동일 코드 비교가 되어 버립니다.
       if (stepName === 'step7') {
         try {
-          console.log(chalk.gray('   [perf] step7 적용 전 스냅샷을 생성합니다 (step1~6 결과 보존).'));
           await createPreStep7Snapshot(projectRoot);
         } catch (snapshotErr) {
           console.log(
             chalk.yellow(
-              `   ⚠️  step7 사전 스냅샷 생성 실패: ${snapshotErr?.message || snapshotErr}\n` +
+              `   ⚠️  step7 사전 백업 생성 실패: ${snapshotErr?.message || snapshotErr}\n` +
                 '   - 성능 레포트의 step1~6 비교 결과가 step1~7과 동일해질 수 있습니다.',
             ),
           );
         }
       }
-      await stepRunner(projectRoot);
+      if (stepName === 'step6') {
+        const expectedReportPath = path.join(projectRoot, 'nextify-performance-report.md');
+        await stepRunner(projectRoot, { reportPath: expectedReportPath });
+      } else {
+        await stepRunner(projectRoot);
+      }
     }
   });
 
@@ -978,12 +972,6 @@ async function runDefaultOrchestrator() {
   }
 
   const typeSummary = summarizeChangeTypes(manifest.changes);
-  console.log(chalk.green(`\n✔ step1~step7 완료: 최종 리뷰 대상 ${manifest.changes.length}개 변경`));
-  console.log(
-    chalk.white(
-      `변경사항 type: create ${typeSummary.create}, modify ${typeSummary.modify}, delete ${typeSummary.delete}`,
-    ),
-  );
 
   // 1) 성능 레포트 생성
   console.log(chalk.yellow('\n📊 성능 레포트 생성을 시작합니다.'));
@@ -1007,11 +995,18 @@ async function runDefaultOrchestrator() {
   }
 
   // 2) 코드 리뷰 여부 확인
+  console.log(chalk.gray('──────────────────────────────────────────────────'));
+  console.log(chalk.white('코드 리뷰 안내'));
+  console.log(chalk.white('· Nextify Review 패널에서 파일을 클릭하면 변경 전후 코드를 비교할 수 있습니다.'));
+  console.log(chalk.white('· 변경 전·후 파일 경로를 모두 Gemini에 붙여 넣으면 해당 파일에 대해 질문할 수 있습니다.'));
+  console.log(chalk.white('· Gemini는 코드 수정을 제안만 합니다. 실제 수정은 직접 파일을 열어서 하세요.'));
+  console.log(chalk.white('· 종료하려면 Ctrl+C를 누르세요.'));
+  console.log(chalk.gray('──────────────────────────────────────────────────'));
   const { useReview } = await inquirer.prompt([
     {
       type: 'confirm',
       name: 'useReview',
-      message: 'diff 및 AI를 통한 코드 리뷰를 진행하시겠습니까?',
+      message: '변경된 파일을 확인하고 Gemini로 코드 리뷰하시겠습니까?',
       default: true,
     },
   ]);
@@ -1032,7 +1027,6 @@ async function runDefaultOrchestrator() {
     console.log(chalk.yellow('자동으로 diff를 열지 못했습니다. Nextify Review 패널에서 수동으로 열어주세요.'));
   }
 
-  console.log(chalk.yellow('\n🔎 Gemini CLI 설치 상태를 확인합니다.'));
   try {
     const setup = await ensureGeminiCliReady({
       pm,
@@ -1040,9 +1034,7 @@ async function runDefaultOrchestrator() {
       onInfo: (msg) => console.log(chalk.gray(`   - ${msg}`)),
     });
     if (setup.installedNow) {
-      console.log(chalk.green('✅ Gemini CLI 자동 설치 및 검증 완료.'));
-    } else {
-      console.log(chalk.gray('   - Gemini CLI가 이미 설치되어 있습니다.'));
+      console.log(chalk.green('✅ Gemini CLI 설치 완료'));
     }
   } catch (err) {
     const fallbackInstall =
@@ -1057,22 +1049,12 @@ async function runDefaultOrchestrator() {
     } else if (err?.message) {
       console.error(chalk.red(`   - 원인: ${err.message}`));
     }
-    console.log(chalk.yellow('   - 수동 설치 후 다시 실행하세요:'));
+    console.log(chalk.yellow('   - 아래 명령어로 직접 설치한 뒤 Nextify를 다시 실행하세요:'));
     console.log(chalk.white(`     ${fallbackInstall}`));
     throw err;
   }
 
-  console.log(chalk.yellow('\n⏳ 최종 Gemini CLI 리뷰를 시작합니다.'));
-  console.log(
-    chalk.gray(
-      '   (리뷰는 view-only입니다. 진행 중 중단하려면 Ctrl+C를 누르세요.)',
-    ),
-        chalk.gray(
-'(현재 주입된 컨텍스트는 session.json 파일과 프로젝트 디렉터리 구조입니다. 이를 기반으로 리뷰를 진행합니다.)',
-      '(@<경로>로 붙여넣으면 해당 파일 컨텍스트를 바로 참조할 수 있습니다. 전후 파일을 붙여넣어 질문하세요!)',
-      '(Nextify-review 패널에서 diff 확인 및 before/after 경로 복사로 진행하세요.)',
-    ),
-  );
+  console.log(chalk.yellow('\nGemini 코드 리뷰를 시작합니다…'));
 
   const aiAbort = new AbortController();
   const onSigint = () => {

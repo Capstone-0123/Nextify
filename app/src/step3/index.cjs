@@ -10,29 +10,26 @@ const chalk = require('chalk');
  * Step 3 메인 실행 함수
  */
 async function runStep3(projectRoot) {
-  console.log(chalk.blue.bold('파트 3 시작'));
+  console.log(chalk.gray('────────────────────────────────────────────────────────────'));
+  console.log(chalk.blue.bold('[3단계] 라우팅 구조 변환을 시작합니다…'));
 
-  // 1. Route 마이그레이션 (page.tsx, layout.tsx 생성)
-  console.log('Route 마이그레이션 시작');
+  console.log('  → React Router의 Route 구조를 분석해 Next.js 폴더·파일 구조로 변환하는 중…');
   await migrateRoutes(projectRoot);
-  console.log('Route 마이그레이션 완료');
+  console.log('  ✔ Route 구조 변환 완료\n');
 
-  // 2. Link 마이그레이션
-  console.log('Link 마이그레이션 시작');
+  console.log('  → React Router의 link·hook을 Next.js 방식으로 교체하는 중…');
   await migrateLinks(projectRoot);
-  console.log('Link 마이그레이션 완료');
+  console.log('  ✔ link·hook 교체 완료\n');
 
-  // 3. Outlet 마이그레이션
-  console.log('Outlet 마이그레이션 시작');
+  console.log('  → React Router의 Outlet을 Next.js children 구조로 변환하는 중…');
   await migrateOutlets(projectRoot);
-  console.log('Outlet 마이그레이션 완료');
+  console.log('  ✔ Outlet 변환 완료\n');
 
-  // 4. 메타데이터 마이그레이션 실행
-  console.log('메타데이터 변환 시작');
+  console.log('  → Helmet·Head 태그를 Next.js Metadata API로 변환하는 중…');
   await migrateMetadata(projectRoot);
-  console.log('메타데이터 변환 완료');
+  console.log('  ✔ Metadata 변환 완료');
 
-  console.log(chalk.green.bold('파트 3 완료'));
+  console.log(chalk.green.bold('[3단계] 완료 — 라우팅 구조 변환이 끝났습니다.'));
 }
 
 module.exports = { runStep3 };

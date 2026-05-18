@@ -26,7 +26,7 @@ function printEnvFilesManualGuide(contextTitle, nextPublicNames) {
 }
 
 function printBasePathConflictManualGuide(existingBasePath, viteBaseRaw, normalizedViteBase) {
-  console.log(chalk.yellow.bold('\n⚠️  basePath 충돌 — 작업 중단'));
+  console.log(chalk.yellow.bold('\n⚠️ basePath 충돌 — 작업 중단'));
   console.log(chalk.yellow(`  next.config.mjs  basePath: "${existingBasePath}"`));
   console.log(chalk.yellow(`  vite.config.ts   base:      "${viteBaseRaw}"`));
   console.log(chalk.cyan('\n📋 사용자 직접처리를 위한 가이드:'));
@@ -245,7 +245,7 @@ async function migrateViteConfig(cwd) {
       await fs.remove(viteConfigPath);
     }
   } else {
-    console.log(chalk.yellow('\n⚠️  vite.config.ts 파일이 유지되었습니다. 수동으로 확인 후 삭제해주세요.\n'));
+    console.log(chalk.yellow('\n⚠️ vite.config.ts 파일이 유지되었습니다. 수동으로 확인 후 삭제해주세요.\n'));
   }
 }
 
@@ -685,7 +685,7 @@ export default nextConfig;
         if (hadConflictRound) {
           console.log(
             chalk.yellow(
-              '\n⚠️  basePath 충돌이 아직 해결되지 않았습니다. next.config.mjs 의 basePath 와 vite.config 의 base 를 동일하게 맞춘 뒤 다시 시도하세요.'
+              '\n⚠️ basePath 충돌이 아직 해결되지 않았습니다. next.config.mjs 의 basePath 와 vite.config 의 base 를 동일하게 맞춘 뒤 다시 시도하세요.'
             )
           );
         }
@@ -1285,7 +1285,6 @@ async function migrateProcessEnvInDefine(cwd, defineContent) {
   // 5.1. 프로젝트 전체 .ts, .tsx에서 process.env.<ENV_NAME> 검색
   const srcDir = path.join(cwd, 'src');
   if (!fs.existsSync(srcDir)) {
-    printEnvFilesManualGuide('define의 process.env.* 하드코딩 치환', envGuideNames);
     return;
   }
 
@@ -1323,8 +1322,6 @@ async function migrateProcessEnvInDefine(cwd, defineContent) {
     }
   }
 
-  printEnvFilesManualGuide('define의 process.env.* 하드코딩 치환', envGuideNames);
-  await askContinueAfterManualGuide();
 }
 
 // Case e: 복잡한 표현식 처리
@@ -1468,8 +1465,6 @@ async function migrateImportMetaEnvInDefine(cwd, defineContent) {
   // 3. 프로젝트 전체 .ts, .tsx에서 import.meta.env.<VITE_NAME> 검색
   const srcDir = path.join(cwd, 'src');
   if (!fs.existsSync(srcDir)) {
-    printEnvFilesManualGuide('define의 import.meta.env.* 직접 치환', envGuideNamesMeta);
-    await askContinueAfterManualGuide();
     return;
   }
 
@@ -1507,8 +1502,6 @@ async function migrateImportMetaEnvInDefine(cwd, defineContent) {
     }
   }
 
-  printEnvFilesManualGuide('define의 import.meta.env.* 직접 치환', envGuideNamesMeta);
-  await askContinueAfterManualGuide();
 }
 
 // =================================================================================================
@@ -1696,7 +1689,7 @@ async function migrateTsConfigApp(cwd) {
       if (hadConflictRound) {
         console.log(
           chalk.yellow(
-            '\n⚠️  baseUrl/paths 충돌이 아직 해결되지 않았습니다. tsconfig.json 과 tsconfig.app.json (및 필요 시 vite alias)을 아래 가이드대로 맞춘 뒤 다시 시도하세요.'
+            '\n⚠️ baseUrl/paths 충돌이 아직 해결되지 않았습니다. tsconfig.json 과 tsconfig.app.json (및 필요 시 vite alias)을 아래 가이드대로 맞춘 뒤 다시 시도하세요.'
           )
         );
       }
@@ -1892,7 +1885,7 @@ async function deleteTsConfigApp(cwd) {
 
 // TypeScript baseUrl/paths 충돌 — 작업 중단 후 수동 가이드 (AI 없음)
 function printTsConfigConflictGuide(conflictType, conflictDetails) {
-  console.log(chalk.yellow.bold('\n⚠️  TypeScript baseUrl/paths 충돌 — 작업 중단'));
+  console.log(chalk.yellow.bold('\n⚠️ TypeScript baseUrl/paths 충돌 — 작업 중단'));
 
   if (conflictType === 'baseUrl') {
     console.log(chalk.yellow(`  tsconfig.json baseUrl: "${conflictDetails.existing}"`));

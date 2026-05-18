@@ -7,15 +7,13 @@ const chalk = require('chalk');
 /**
  * Step 6 메인 실행 함수
  */
-async function runStep6(projectRoot) {
-  console.log(chalk.blue.bold('파트 6 시작'));
+async function runStep6(projectRoot, options = {}) {
+  console.log(chalk.gray('────────────────────────────────────────────────────────────'));
+  console.log(chalk.blue.bold('[6단계] 환경 변수 및 의존성 설정 안내'));
 
   try {
-    console.log('환경 변수 설정 및 의존성 가이드 시작');
-    await runEnvAndDependencyGuide(projectRoot);
-    console.log('환경 변수 설정 및 의존성 가이드 완료');
-
-    console.log(chalk.green.bold('파트 6 완료'));
+    await runEnvAndDependencyGuide(projectRoot, { reportPath: options.reportPath });
+    console.log(chalk.green.bold('[6단계] 완료 — 위 안내에 따라 설정을 완료하세요.'));
   } catch (error) {
     console.error(chalk.red.bold('파트 6 오류 발생:'), error);
     throw error;
