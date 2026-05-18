@@ -68,23 +68,26 @@ async function stopAndOfferGeminiApply(opts) {
     }
   }
 
-  console.log(chalk.yellow(`\n${discoveryLine}`));
+  console.log(chalk.yellow(`    🔍 ${discoveryLine}`));
   if (Array.isArray(discoverySources) && discoverySources.length > 0) {
     const uniq = [...new Set(discoverySources.map((s) => String(s).trim()).filter(Boolean))];
     if (uniq.length > 0) {
-      printRelPathsBlock(chalk.gray, '  발견 위치', uniq);
+      printRelPathsBlock(chalk.gray, '발견 위치', uniq, '    ');
     }
   }
 
   if (existing.length === 0) {
-    console.error(chalk.red('\n❌ AI에 넘길 대상 파일이 없습니다. 경로를 확인하세요.\n'));
+    console.error(chalk.red('\n❌ Gemini에 전달할 파일을 찾지 못했습니다.'));
+    console.error(chalk.gray('   마이그레이션 대상 경로가 올바른지 확인하세요.\n'));
     process.exit(1);
   }
 
-  console.log(chalk.cyan('→ Gemini로 관련 파일을 수정합니다.\n'));
+  console.log(chalk.cyan('    → Gemini로 관련 파일을 수정합니다.\n'));
 
   if (!process.env.GEMINI_API_KEY) {
-    console.error(chalk.red('\n❌ GEMINI_API_KEY가 없습니다. AI 자동 수정을 사용할 수 없습니다.\n'));
+    console.error(chalk.red('\n❌ GEMINI_API_KEY가 설정되지 않았습니다.'));
+    console.error(chalk.gray('   .env 또는 환경변수에 GEMINI_API_KEY를 추가한 뒤 다시 실행하세요.'));
+    console.error(chalk.gray('   발급: https://aistudio.google.com/app/apikey\n'));
     process.exit(1);
   }
 
@@ -99,15 +102,16 @@ async function stopAndOfferGeminiApply(opts) {
     });
     spinner.stop();
     if (written.length > 0) {
-      printRelPathsBlock(chalk.green, '\n✅ Gemini 적용 완료', written);
+      printRelPathsBlock(chalk.green, '✅ Gemini 적용 완료', written, '    ');
     } else {
-      console.log(chalk.gray('\nℹ️  Gemini가 적용할 변경 사항을 제안하지 않았습니다 (변경 없음).'));
+      console.log(chalk.gray('    Gemini가 수정할 내용을 찾지 못했습니다 — 이미 올바른 형태일 수 있습니다.'));
     }
-    console.log(chalk.green('마이그레이션을 계속 진행합니다.\n'));
+    console.log(chalk.green('    마이그레이션을 계속 진행합니다.\n'));
     return { applied: true };
   } catch (e) {
     spinner.stop();
-    console.error(chalk.red(`\n❌ Gemini 적용 실패: ${e.message}\n`));
+    console.error(chalk.red(`\n❌ Gemini 요청이 실패했습니다: ${e.message}`));
+    console.error(chalk.gray('   네트워크 연결 또는 API 키가 유효한지 확인하고 다시 실행하세요.\n'));
     process.exit(1);
   }
 }

@@ -16,86 +16,72 @@ const chalk = require('chalk');
  * - VITE_ → NEXT_PUBLIC_ 접두어 변경 안내
  */
 async function guideEnvMigration(projectRoot) {
-  // .env 파일명·접두어 안내만 제공 (충돌·환경 가이드와 동일하게 AI 자동 수정 없음)
-  console.log(chalk.blue.bold('\n📋 환경 변수 마이그레이션 가이드'));
-  console.log(chalk.gray('─'.repeat(50)));
-
-  // .env 파일 존재 여부 확인
   const envFiles = await findEnvFiles(projectRoot);
   const viteEnvVars = await findViteEnvVariables(projectRoot);
 
-  // 1. 파일명 변경 안내
-  console.log(chalk.yellow.bold('\n1️⃣  파일명 변경'));
+  console.log(chalk.white('환경 변수 설정'));
+
+  // ① 파일명 변경 안내
+  console.log(chalk.white('  ① 환경 변수 파일명 확인'));
   if (envFiles.length > 0) {
-    console.log(chalk.white('   발견된 환경 변수 파일:'));
-    envFiles.forEach(file => {
-      console.log(chalk.cyan(`      - ${path.relative(projectRoot, file)}`));
+    console.log(chalk.gray('    발견된 파일:'));
+    envFiles.forEach((file) => {
+      console.log(chalk.gray(`      - ${path.relative(projectRoot, file)}`));
     });
-    console.log();
-    console.log(chalk.white('   Next.js에서는 로컬 환경 변수 파일로 ') + chalk.green('.env.local') + chalk.white('을 사용합니다.'));
-    console.log(chalk.white('   다음 명령어로 파일명을 변경하세요:\n'));
-    
-    if (envFiles.some(f => path.basename(f) === '.env')) {
-      console.log(chalk.bgBlack.white('   mv .env .env.local'));
-    }
-    if (envFiles.some(f => path.basename(f) === '.env.development')) {
-      console.log(chalk.bgBlack.white('   mv .env.development .env.development.local'));
-    }
-    if (envFiles.some(f => path.basename(f) === '.env.production')) {
-      console.log(chalk.bgBlack.white('   mv .env.production .env.production.local'));
+    console.log(chalk.white('    Next.js는 .env.local을 기본 환경 변수 파일로 사용합니다.'));
+    const renameTargets = envFiles
+      .map((f) => path.basename(f))
+      .filter((name) => name === '.env' || name === '.env.development' || name === '.env.production');
+    if (renameTargets.length > 0) {
+      console.log(chalk.white('    필요하면 아래 명령어로 파일명을 변경하세요:'));
+      renameTargets.forEach((name) => {
+        const target = name === '.env' ? '.env.local' : `${name}.local`;
+        console.log(chalk.gray(`      mv ${name} ${target}`));
+      });
     }
   } else {
-    console.log(chalk.gray('   .env 파일이 발견되지 않았습니다.'));
+    console.log(chalk.gray('    .env 파일이 없습니다. 필요하면 .env.local 파일을 직접 만드세요.'));
   }
 
-  // 2. .gitignore 설정 안내
-  console.log(chalk.yellow.bold('\n2️⃣  보안 설정 (.gitignore)'));
+  // ② .gitignore 보안 설정
+  console.log(chalk.white('  ② .gitignore 보안 설정'));
   const gitignorePath = path.join(projectRoot, '.gitignore');
   const hasGitignore = fs.existsSync(gitignorePath);
-  
+
   if (hasGitignore) {
     const gitignoreContent = await fs.readFile(gitignorePath, 'utf-8');
-    const hasEnvLocal = gitignoreContent.includes('.env.local') || gitignoreContent.includes('.env*.local');
-    
+    const hasEnvLocal =
+      gitignoreContent.includes('.env.local') || gitignoreContent.includes('.env*.local');
     if (hasEnvLocal) {
-      console.log(chalk.green('   ✓ .gitignore에 .env.local이 이미 포함되어 있습니다.'));
+      console.log(chalk.green('    ✔ .gitignore에 .env.local이 이미 포함되어 있습니다.'));
     } else {
-      console.log(chalk.white('   .env.local 파일이 Git에 업로드되지 않도록 .gitignore에 추가하세요:\n'));
-      console.log(chalk.bgBlack.white('   # Local Env Files'));
-      console.log(chalk.bgBlack.white('   .env.local'));
-      console.log(chalk.bgBlack.white('   .env*.local'));
+      console.log(chalk.white('    .env.local이 Git에 올라가지 않도록 .gitignore에 추가하세요:'));
+      console.log(chalk.gray('      .env.local'));
+      console.log(chalk.gray('      .env*.local'));
     }
   } else {
-    console.log(chalk.white('   .gitignore 파일을 생성하고 다음 내용을 추가하세요:\n'));
-    console.log(chalk.bgBlack.white('   # Local Env Files'));
-    console.log(chalk.bgBlack.white('   .env.local'));
-    console.log(chalk.bgBlack.white('   .env*.local'));
+    console.log(chalk.white('    .gitignore 파일을 만들고 아래 내용을 추가하세요:'));
+    console.log(chalk.gray('      .env.local'));
+    console.log(chalk.gray('      .env*.local'));
   }
 
-  // 3. 환경 변수 접두어 변경 안내
-  console.log(chalk.yellow.bold('\n3️⃣  환경 변수 접두어 변경'));
-  console.log(chalk.white('   브라우저에서 접근 가능한 환경 변수의 접두어를 변경해야 합니다:'));
-  console.log(chalk.red('      VITE_') + chalk.white(' → ') + chalk.green('NEXT_PUBLIC_'));
-  console.log();
-
+  // ③ 환경 변수 접두어 변경
+  console.log(chalk.white('  ③ 환경 변수 접두어 변경 (VITE_ → NEXT_PUBLIC_)'));
   if (viteEnvVars.length > 0) {
-    console.log(chalk.white('   발견된 VITE_ 접두어 변수:'));
-    viteEnvVars.forEach(({ file, variables }) => {
-      console.log(chalk.cyan(`\n   📄 ${path.relative(projectRoot, file)}`));
-      variables.forEach(v => {
-        const newName = v.replace('VITE_', 'NEXT_PUBLIC_');
-        console.log(chalk.red(`      ${v}`) + chalk.white(' → ') + chalk.green(newName));
-      });
-    });
-    
-    console.log(chalk.yellow('\n   ⚠️  주의: 코드에서 사용하는 환경 변수 참조도 함께 수정해야 합니다!'));
-    console.log(chalk.white('      예시: ') + chalk.red('import.meta.env.VITE_API_URL'));
-    console.log(chalk.white('         → ') + chalk.green('process.env.NEXT_PUBLIC_API_URL'));
+    console.log(chalk.white('    소스 코드는 이미 자동으로 변환되었습니다.'));
+    const allVars = Array.from(new Set(viteEnvVars.flatMap((r) => r.variables)));
+    if (allVars.length > 0) {
+      const example = allVars[0];
+      const exampleNew = example.replace('VITE_', 'NEXT_PUBLIC_');
+      console.log(
+        chalk.white(`    .env.local에서 변수 이름만 바꿔주세요. ex) ${example} → ${exampleNew}`),
+      );
+    } else {
+      console.log(chalk.white('    .env.local에서 변수 이름의 VITE_ 접두어를 NEXT_PUBLIC_ 로 바꿔주세요.'));
+    }
   } else {
-    console.log(chalk.gray('   VITE_ 접두어 환경 변수가 발견되지 않았습니다.'));
+    console.log(chalk.gray('    VITE_ 접두어 변수가 발견되지 않았습니다.'));
   }
-
-  console.log(chalk.gray('\n' + '─'.repeat(50)));
 }
 
 /**
@@ -125,7 +111,7 @@ async function findViteEnvVariables(projectRoot) {
   for (const filePath of envFiles) {
     const content = await fs.readFile(filePath, 'utf-8');
     const viteVars = [];
-    
+
     const lines = content.split('\n');
     for (const line of lines) {
       const match = line.match(/^(VITE_\w+)\s*=/);
@@ -144,12 +130,14 @@ async function findViteEnvVariables(projectRoot) {
   if (fs.existsSync(srcDir)) {
     const sourceViteVars = await findViteEnvInSource(srcDir);
     if (sourceViteVars.length > 0) {
-      // 중복 제거
-      const envViteVars = results.flatMap(r => r.variables);
-      const uniqueSourceVars = sourceViteVars.filter(v => !envViteVars.includes(v));
-      
+      const envViteVars = results.flatMap((r) => r.variables);
+      const uniqueSourceVars = sourceViteVars.filter((v) => !envViteVars.includes(v));
+
       if (uniqueSourceVars.length > 0) {
-        results.push({ file: path.join(projectRoot, 'src/**/*.{ts,tsx,js,jsx}'), variables: uniqueSourceVars });
+        results.push({
+          file: path.join(projectRoot, 'src/**/*.{ts,tsx,js,jsx}'),
+          variables: uniqueSourceVars,
+        });
       }
     }
   }
@@ -162,13 +150,13 @@ async function findViteEnvVariables(projectRoot) {
  */
 async function findViteEnvInSource(srcDir) {
   const viteVars = new Set();
-  
+
   async function scanDirectory(dir) {
     const entries = await fs.readdir(dir, { withFileTypes: true });
-    
+
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
-      
+
       if (entry.isDirectory() && entry.name !== 'node_modules') {
         await scanDirectory(fullPath);
       } else if (entry.isFile() && /\.(ts|tsx|js|jsx)$/.test(entry.name)) {
@@ -195,53 +183,31 @@ async function findViteEnvInSource(srcDir) {
  * - 패키지 재설치 명령어 안내
  */
 async function guideDependencyReset(projectRoot) {
-  console.log(chalk.blue.bold('\n📋 의존성 갱신 가이드'));
-  console.log(chalk.gray('─'.repeat(50)));
-
-  // 패키지 매니저 감지
   const pm = detectPackageManager(projectRoot);
   const lockFile = getLockFileName(pm);
-
-  // 1. 기존 모듈 제거 명령
-  console.log(chalk.yellow.bold('\n1️⃣  기존 모듈 제거'));
-  console.log(chalk.white('   Vite 환경에서 설치된 기존 node_modules와 캐시 파일을 삭제합니다.\n'));
-  
-  // OS별 명령어 제공
-  console.log(chalk.cyan('   📌 macOS / Linux:'));
-  console.log(chalk.bgBlack.white(`   rm -rf node_modules ${lockFile}`));
-  console.log();
-  console.log(chalk.cyan('   📌 Windows (PowerShell):'));
-  console.log(chalk.bgBlack.white(`   Remove-Item -Recurse -Force node_modules, ${lockFile}`));
-  console.log();
-  console.log(chalk.cyan('   📌 Windows (CMD):'));
-  console.log(chalk.bgBlack.white(`   rmdir /s /q node_modules && del ${lockFile}`));
-
-  // 2. Next.js 모듈 설치 명령
-  console.log(chalk.yellow.bold('\n2️⃣  Next.js 모듈 설치'));
-  console.log(chalk.white('   Next.js 종속성이 반영된 새로운 패키지를 설치합니다.\n'));
-  
   const installCmd = getInstallCommand(pm);
-  console.log(chalk.bgBlack.white(`   ${installCmd}`));
 
-  // 추가 안내
-  console.log(chalk.yellow.bold('\n3️⃣  캐시 정리 (선택사항)'));
-  console.log(chalk.white('   문제가 지속되면 패키지 매니저 캐시를 정리하세요:\n'));
-  
+  console.log(chalk.white('의존성 재설치'));
+
+  // ① 기존 모듈 제거
+  console.log(chalk.white('  ① 기존 node_modules 삭제'));
+  console.log(chalk.gray('    Vite 환경의 패키지가 남아 있어 충돌할 수 있습니다. 삭제 후 재설치하세요.'));
+  console.log(chalk.gray(`    · macOS / Linux:  rm -rf node_modules ${lockFile}`));
+  console.log(chalk.gray(`    · Windows (PowerShell):  Remove-Item -Recurse -Force node_modules, ${lockFile}`));
+
+  // ② 재설치
+  console.log(chalk.white('  ② 패키지 재설치'));
+  console.log(chalk.gray(`    ${installCmd}`));
+
+  // ③ 캐시 정리 (선택)
+  console.log(chalk.white('  ③ 캐시 정리 (설치 중 문제가 생길 경우)'));
   if (pm === 'npm') {
-    console.log(chalk.bgBlack.white('   npm cache clean --force'));
+    console.log(chalk.gray('    npm cache clean --force'));
   } else if (pm === 'yarn') {
-    console.log(chalk.bgBlack.white('   yarn cache clean'));
+    console.log(chalk.gray('    yarn cache clean'));
   } else if (pm === 'pnpm') {
-    console.log(chalk.bgBlack.white('   pnpm store prune'));
+    console.log(chalk.gray('    pnpm store prune'));
   }
-
-  console.log(chalk.gray('\n' + '─'.repeat(50)));
-
-  // 요약 출력
-  console.log(chalk.green.bold('\n📝 전체 실행 순서 요약:\n'));
-  console.log(chalk.white(`   1. rm -rf node_modules ${lockFile}`));
-  console.log(chalk.white(`   2. ${installCmd}`));
-  console.log(chalk.white('   3. npm run dev (또는 yarn dev, pnpm dev)'));
 }
 
 /**
@@ -258,9 +224,12 @@ function detectPackageManager(projectRoot) {
  */
 function getLockFileName(pm) {
   switch (pm) {
-    case 'yarn': return 'yarn.lock';
-    case 'pnpm': return 'pnpm-lock.yaml';
-    default: return 'package-lock.json';
+    case 'yarn':
+      return 'yarn.lock';
+    case 'pnpm':
+      return 'pnpm-lock.yaml';
+    default:
+      return 'package-lock.json';
   }
 }
 
@@ -269,9 +238,12 @@ function getLockFileName(pm) {
  */
 function getInstallCommand(pm) {
   switch (pm) {
-    case 'yarn': return 'yarn install';
-    case 'pnpm': return 'pnpm install';
-    default: return 'npm install';
+    case 'yarn':
+      return 'yarn install';
+    case 'pnpm':
+      return 'pnpm install';
+    default:
+      return 'npm install';
   }
 }
 
@@ -281,19 +253,17 @@ function getInstallCommand(pm) {
 
 /**
  * Step 6 환경 변수 & 의존성 가이드 실행
+ *
+ * @param {string} projectRoot
+ * @param {{ reportPath?: string }} [options]
  */
-async function runEnvAndDependencyGuide(projectRoot) {
-  console.log(chalk.blue.bold('\n🚀 Step 6: 환경 변수 설정 & 의존성 갱신 가이드'));
-  console.log(chalk.gray('=================================================='));
-
-  // 1. 환경 변수 마이그레이션 가이드
+async function runEnvAndDependencyGuide(projectRoot, options = {}) {
   await guideEnvMigration(projectRoot);
-
-  // 2. 의존성 갱신 가이드
   await guideDependencyReset(projectRoot);
 
-  console.log(chalk.green.bold('\n✅ Step 6 가이드 출력 완료!'));
-  console.log(chalk.yellow('   위 안내에 따라 환경 변수 파일과 의존성을 업데이트하세요.'));
+  if (options.reportPath) {
+    console.log(chalk.gray(`※ 성능 레포트: ${options.reportPath}`));
+  }
 }
 
 // ============================================================================

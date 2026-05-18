@@ -108,9 +108,7 @@ async function prepareInteractiveSeedForCli(session, sessionPath) {
   );
   await fs.writeFile(seedFile, full, 'utf8');
   // eslint-disable-next-line no-console
-  console.log(
-    `\nNextify: Gemini CLI 시드가 길어 명령줄 대신 파일로 전달합니다:\n  ${seedFile}\n`,
-  );
+  // 내부 처리 과정으로 사용자에게 노출하지 않음
   return buildShortInteractiveSeedPointerPrompt(seedFile);
 }
 
@@ -300,12 +298,7 @@ async function runAiReviewSessionCliStream(opts) {
       stage1Spinner.stop();
     }
   } else if (normalizedMode === 'interactive-seeded') {
-    const stage1Spinner = ora('Preparing interactive review seed...').start();
-    try {
-      interactiveSeedPrompt = await prepareInteractiveSeedForCli(session, sessionPath);
-    } finally {
-      stage1Spinner.stop();
-    }
+    interactiveSeedPrompt = await prepareInteractiveSeedForCli(session, sessionPath);
   }
 
   const primaryModel = model || process.env.NEXTIFY_GEMINI_CLI_MODEL || 'gemini-2.5-flash-lite';

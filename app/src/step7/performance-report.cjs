@@ -441,7 +441,7 @@ async function ensureDependenciesInstalled(projectRoot) {
   const nodeModulesPath = path.join(projectRoot, 'node_modules');
   if (await fs.pathExists(nodeModulesPath)) return;
 
-  console.log(chalk.gray(`의존성 설치가 필요합니다: ${projectRoot}`));
+  console.log(chalk.gray(`    → 의존성을 설치하는 중…`));
   const runtime = resolvePackageManagerCommand(projectRoot);
   await runCommand(runtime.cmd, [...runtime.argsPrefix, 'install'], { cwd: projectRoot });
 }
@@ -712,7 +712,7 @@ async function runLighthouseSeries(url, { runs = DEFAULT_LIGHTHOUSE_RUNS, warmup
     const runIndex = i + 1;
     console.log(
       chalk.gray(
-        `[Lighthouse] ${isWarmup ? 'warmup' : 'measure'} ${runIndex}/${totalRuns} - ${url}`
+        `    ${isWarmup ? '준비 중' : `측정 중 (${runIndex - warmups}/${measuredRuns})`}…`
       )
     );
     // eslint-disable-next-line no-await-in-loop
@@ -780,7 +780,7 @@ async function stopServerProcess(server) {
 }
 
 async function measureTarget({ label, projectRoot, kind, lighthouseRuns, warmupRuns }) {
-  console.log(chalk.gray(`\n[측정] ${label}`));
+  console.log(chalk.gray(`\n  → ${label} 성능 측정 중…`));
   await runBuild(projectRoot, kind);
 
   const port = await getFreePort(kind === 'vite' ? 4173 : 3000);
@@ -1679,8 +1679,7 @@ async function generatePerformanceReport({
   });
 
   if (failures.length > 0) {
-    console.log(chalk.yellow(`\n⚠️  부분 성능 레포트 생성 완료: ${outputMarkdownPath}`));
-    console.log(chalk.gray(`   - 성공: ${targets.length}, 실패: ${failures.length}\n`));
+    console.log(chalk.yellow(`\n⚠️  부분 성능 레포트 생성 완료: ${outputMarkdownPath}\n`));
     return;
   }
 

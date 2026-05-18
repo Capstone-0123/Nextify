@@ -559,7 +559,7 @@ async function migrateBrowserAPIComponents(projectRoot) {
             ? 'App Router Server Component'
             : "'use client' 미보유";
         const rel = path.relative(projectRoot, targetFilePath).split(path.sep).join('/');
-        console.log(`      ⏭️  ${rel}: ${imp.componentIdentifier} dynamic({ ssr: false }) 주입 스킵 — ${reason} (정적 import 유지)`);
+        console.log(`    ⏭️  ${rel} — ${reason}, Server Component이라 Dynamic Import 미적용`);
         continue;
       }
 

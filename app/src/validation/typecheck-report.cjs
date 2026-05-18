@@ -423,7 +423,7 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
       if (r.removedTargets.length > 0) {
         console.log(
           chalk.cyan(
-            `   🧹 typecheck 직전 src/ 결정론 sweep: ${r.removedTargets.length}건 정리 (${r.changedFiles.length}개 파일)`,
+            `   typecheck 직전 src/ 결정론 sweep: ${r.removedTargets.length}건 정리 (${r.changedFiles.length}개 파일)`,
           ),
         );
       }
@@ -514,7 +514,7 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
 
   console.log(
     chalk.gray(
-      `   📋 1차 검사: ${first.errors.length}개 에러 — 자동 수정 시도 시작`,
+      `   1차 검사: ${first.errors.length}개 에러 — 자동 수정 시도 시작`,
     ),
   );
 
@@ -526,15 +526,15 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
       if (autofixSummary.totalFixed > 0) {
         console.log(
           chalk.cyan(
-            `   🛠  결정론적 자동 수정: ${autofixSummary.totalFixed}건 (${autofixSummary.fixedFiles.length}개 파일) — 토큰 비용 0`,
+            `   패턴 기반 자동 수정: ${autofixSummary.totalFixed}건 (${autofixSummary.fixedFiles.length}개 파일)`,
           ),
         );
       } else {
-        console.log(chalk.gray('   ℹ️  결정론적 자동 수정 대상 없음'));
+        console.log(chalk.gray('   패턴 기반 자동 수정 대상 없음'));
       }
     } catch (e) {
       console.log(
-        chalk.gray(`   ⚠️  결정론적 자동 수정 중 오류(무시): ${e?.message || e}`),
+        chalk.gray(`   ⚠️ 패턴 기반 자동 수정 중 오류(무시): ${e?.message || e}`),
       );
     }
   }
@@ -554,7 +554,7 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
       const delta = first.errors.length - secondErrors.length;
       console.log(
         chalk.gray(
-          `   📋 2차 검사: ${secondErrors.length}개 잔여 (자동 수정으로 ${delta >= 0 ? delta : 0}건 해소)`,
+          `   2차 검사: ${secondErrors.length}개 잔여 (패턴 기반 자동 수정으로 ${delta >= 0 ? delta : 0}건 해소)`,
         ),
       );
     }
@@ -615,7 +615,7 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
         });
       } catch (e) {
         console.log(
-          chalk.gray(`   ⚠️  AI 보정 중 오류(무시): ${e?.message || e}`),
+          chalk.gray(`   ⚠️ Gemini 수정 중 오류(무시): ${e?.message || e}`),
         );
       }
 
@@ -643,7 +643,7 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
           if (rolledBack.length > 0) {
             console.log(
               chalk.yellow(
-                `   ↩️  AI 보정 회귀 ${rolledBack.length}건 감지 → 백업으로 롤백`,
+                `   ⚠️ Gemini 수정이 오히려 에러를 늘려 ${rolledBack.length}건 되돌림`,
               ),
             );
             // 롤백했으니 한 번 더 tsc 4차 실행
@@ -670,7 +670,7 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
           if (aiSummary.filesChanged.length > 0) {
             console.log(
               chalk.cyan(
-                `   🤖 AI 보정 결과: ${aiSummary.filesChanged.length}개 파일 변경, ${aiDelta >= 0 ? aiDelta : 0}건 해소`,
+                `   Gemini 수정 결과: ${aiSummary.filesChanged.length}개 파일 변경, ${aiDelta >= 0 ? aiDelta : 0}건 해소`,
               ),
             );
           }
@@ -687,10 +687,10 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
       `   ✅ 타입 검사 통과 (총 ${(elapsedMs / 1000).toFixed(1)}s)`,
     ];
     if (autofixSummary.totalFixed > 0) {
-      summary.push(`      • 결정론적 자동 수정: ${autofixSummary.totalFixed}건`);
+      summary.push(`      • 패턴 기반 자동 수정: ${autofixSummary.totalFixed}건`);
     }
     if (aiSummary.filesChanged.length > 0) {
-      summary.push(`      • AI 보정: ${aiSummary.filesChanged.length}개 파일`);
+      summary.push(`      • Gemini 수정: ${aiSummary.filesChanged.length}개 파일`);
     }
     if (aiSummary.rolledBack.length > 0) {
       summary.push(`      • 회귀 롤백: ${aiSummary.rolledBack.length}개 파일`);
@@ -772,10 +772,10 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
   }
   const stageLine = [];
   if (autofixSummary.totalFixed > 0) {
-    stageLine.push(`결정론 ${autofixSummary.totalFixed}건 해소`);
+    stageLine.push(`패턴 기반 자동 수정 ${autofixSummary.totalFixed}건 해소`);
   }
   if (aiSummary.filesChanged.length > 0) {
-    stageLine.push(`AI ${aiSummary.filesChanged.length}개 파일 보정`);
+    stageLine.push(`Gemini 수정 ${aiSummary.filesChanged.length}개 파일`);
   }
   if (aiSummary.rolledBack.length > 0) {
     stageLine.push(`회귀 ${aiSummary.rolledBack.length}개 롤백`);

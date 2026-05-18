@@ -26,23 +26,23 @@ function normalizeRelPathsForDisplay(paths) {
  * @param {string} leadLine 제목(개수는 함수가 붙임). 예: "  발견 위치", "\n✅ Gemini 적용 완료"
  * @param {string[]} paths
  */
-function printRelPathsBlock(style, leadLine, paths) {
+function printRelPathsBlock(style, leadLine, paths, indent = '') {
   const list = normalizeRelPathsForDisplay(paths);
   const max = getPathListPreviewMax();
   if (list.length === 0) {
-    console.log(style(`${leadLine} (0개):`));
+    console.log(style(`${indent}${leadLine} (0개):`));
     return;
   }
-  console.log(style(`${leadLine} (${list.length}개):`));
+  console.log(style(`${indent}${leadLine} (${list.length}개):`));
   const preview = list.slice(0, max);
   for (const p of preview) {
-    console.log(style(`    ${p}`));
+    console.log(style(`${indent}    ${p}`));
   }
   const omitted = list.length - preview.length;
   if (omitted > 0) {
     console.log(
       style(
-        `  … 외 ${omitted}개 (총 ${list.length}개, 표시 상한 ${max} — NEXTIFY_PATH_LIST_PREVIEW_MAX 로 변경)`
+        `${indent}  … 외 ${omitted}개 (총 ${list.length}개, 표시 상한 ${max} — NEXTIFY_PATH_LIST_PREVIEW_MAX 로 변경)`
       )
     );
   }

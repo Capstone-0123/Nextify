@@ -1155,7 +1155,12 @@ async function runDefaultOrchestrator() {
           logStep('성능 레포트의 step1~6 비교 결과가 step1~7과 동일해질 수 있습니다.');
         }
       }
-      await stepRunner(projectRoot);
+      if (stepName === 'step6') {
+        const expectedReportPath = path.join(projectRoot, 'nextify-performance-report.md');
+        await stepRunner(projectRoot, { reportPath: expectedReportPath });
+      } else {
+        await stepRunner(projectRoot);
+      }
     }
   });
 
@@ -1216,11 +1221,18 @@ async function runDefaultOrchestrator() {
   }
 
   // 2) 코드 리뷰 여부 확인
+  console.log(chalk.gray('──────────────────────────────────────────────────'));
+  console.log(chalk.white('코드 리뷰 안내'));
+  console.log(chalk.white('· Nextify Review 패널에서 파일을 클릭하면 변경 전후 코드를 비교할 수 있습니다.'));
+  console.log(chalk.white('· 변경 전·후 파일 경로를 모두 Gemini에 붙여 넣으면 해당 파일에 대해 질문할 수 있습니다.'));
+  console.log(chalk.white('· Gemini는 코드 수정을 제안만 합니다. 실제 수정은 직접 파일을 열어서 하세요.'));
+  console.log(chalk.white('· 종료하려면 Ctrl+C를 누르세요.'));
+  console.log(chalk.gray('──────────────────────────────────────────────────'));
   const { useReview } = await inquirer.prompt([
     {
       type: 'confirm',
       name: 'useReview',
-      message: 'diff 및 AI를 통한 코드 리뷰를 진행하시겠습니까?',
+      message: '변경된 파일을 확인하고 Gemini로 코드 리뷰하시겠습니까?',
       default: true,
     },
   ]);
