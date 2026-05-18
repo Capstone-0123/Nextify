@@ -17,10 +17,51 @@ function extensionListIncludesNextifyReview(lines) {
 }
 const EXCLUDED_DIRS = new Set(['.git', '.next', 'dist', 'node_modules', REVIEW_ROOT_DIR]);
 
+/**
+ * 현재 호스트 에디터를 환경 변수로 감지합니다.
+ * - VS Code 통합 터미널: `TERM_PROGRAM=vscode` 또는 `VSCODE_PID` 존재
+ * - Cursor 통합 터미널:  `TERM_PROGRAM=cursor` 또는 `CURSOR_TRACE_ID` 존재
+ * - 명시적 우선 지정:    `NEXTIFY_PREFERRED_EDITOR=vscode|cursor|code-insiders`
+ *
+ * 반환값: 'vscode' | 'cursor' | 'code-insiders' | null
+ */
+function detectHostEditor() {
+  const explicit = String(process.env.NEXTIFY_PREFERRED_EDITOR || '').trim().toLowerCase();
+  if (explicit === 'vscode' || explicit === 'code') return 'vscode';
+  if (explicit === 'cursor') return 'cursor';
+  if (explicit === 'code-insiders' || explicit === 'vscode-insiders') return 'code-insiders';
+
+  // Cursor 가 TERM_PROGRAM=vscode 를 그대로 상속하는 경우가 있어 CURSOR_TRACE_ID 를 먼저 본다.
+  if (process.env.CURSOR_TRACE_ID) return 'cursor';
+  if (process.env.VSCODE_INJECTION || process.env.VSCODE_PID) {
+    // VSCODE_GIT_ASKPASS_NODE 같은 경로에 'cursor' 가 포함되면 Cursor.
+    const askPath = String(process.env.VSCODE_GIT_ASKPASS_NODE || '').toLowerCase();
+    if (askPath.includes('cursor')) return 'cursor';
+    return 'vscode';
+  }
+  const termProgram = String(process.env.TERM_PROGRAM || '').toLowerCase();
+  if (termProgram === 'vscode') return 'vscode';
+  if (termProgram === 'cursor') return 'cursor';
+  return null;
+}
+
 function getEditorCommands() {
-  return process.platform === 'win32'
-    ? ['code.cmd', 'code', 'code-insiders.cmd', 'code-insiders', 'cursor.cmd', 'cursor']
-    : ['code', 'code-insiders', 'cursor'];
+  const host = detectHostEditor();
+  const isWin = process.platform === 'win32';
+
+  const groups = {
+    vscode: isWin ? ['code.cmd', 'code'] : ['code'],
+    'code-insiders': isWin ? ['code-insiders.cmd', 'code-insiders'] : ['code-insiders'],
+    cursor: isWin ? ['cursor.cmd', 'cursor'] : ['cursor'],
+  };
+
+  // 호스트 에디터를 가장 앞으로 보내고, 나머지는 vscode → code-insiders → cursor 순으로 폴백
+  const order = host ? [host] : [];
+  for (const k of ['vscode', 'code-insiders', 'cursor']) {
+    if (!order.includes(k)) order.push(k);
+  }
+
+  return order.flatMap((k) => groups[k]);
 }
 
 async function createStepReviewSession(projectRoot, stepName, executeStep) {

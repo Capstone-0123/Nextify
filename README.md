@@ -62,16 +62,19 @@ npm run vsix
 - 기본 오케스트레이터(`migrate-next`)의 AI 리뷰는 Gemini CLI(`gemini`)를 사용합니다.
 - 기본 오케스트레이터는 리뷰 직전에 Gemini CLI 설치 여부를 확인하고, 없으면 자동 설치를 시도합니다.
 - 자동 설치 실패 시 수동 설치 후 재실행하세요: `npm install -g @google/gemini-cli` (또는 `yarn global add @google/gemini-cli`, `pnpm add -g @google/gemini-cli`)
-- 기본 오케스트레이터는 step1~7을 한 번에 실행한 뒤, 최종 **Gemini CLI 대화형 리뷰(view-only)**와 **성능 레포트 생성**까지 한 번에 진행합니다.
-- step1~7 이후 **추적된 파일 변경이 하나도 없으면** 성능 레포트와 코드 리뷰 프롬프트는 생략됩니다(`migrate-next report`로 필요 시 별도 생성).
+- 기본 오케스트레이터는 step1~6을 실행한 뒤, **Next.js 심화 변환(step7)**, **성능 비교 레포트**, **Gemini CLI 코드 리뷰**를 각각 yes/no 로 선택하도록 묻습니다. 모두 건너뛰면 마이그레이션 결과만 남고 종료합니다.
+- step1~6(또는 step7) 이후 **추적된 파일 변경이 하나도 없으면** 성능 레포트와 코드 리뷰 프롬프트는 생략됩니다(`migrate-next report`/`migrate-next review`로 필요 시 별도 실행).
 - 기본 레포트 파일은 `nextify-performance-report.md` 로 생성됩니다.
-- Nextify Review 패널은 트리/diff 확인 및 선택 파일의 before/after 경로 복사 기능을 제공합니다.
+- Nextify Review 패널은 트리/diff 확인 및 선택 파일의 BEFORE/AFTER 경로 복사 기능을 제공합니다. 세션은 `FileSystemWatcher`로 자동 갱신됩니다.
 
 ## 실행 명령어 (CLI)
 
 ```bash
 # 기본 오케스트레이터(서브커맨드 없음):
-# step1~step7 순차 처리 -> 성능 레포트 생성 -> 코드 리뷰 진행 여부 확인 -> (Yes) diff 및 Gemini 대화형 리뷰(view-only)
+# step1~step6 실행 후, 다음 3가지를 각각 yes/no로 선택
+#   1) Next.js 심화 변환(step7: next/image, next/font, Dynamic Import 등)
+#   2) 성능 비교 레포트(Vite vs Next.js) 생성
+#   3) Gemini CLI 코드 리뷰(view-only)
 migrate-next
 
 # step1~step7만 순차 실행 (레포트/AI 리뷰 제외)
@@ -95,9 +98,22 @@ migrate-next ask -q "질문..." --stream
 # Gemini가 준 JSON을 지정 파일에만 적용(검증용)
 migrate-next ask --apply -f path1,path2 -q "지시..."
 
-# 레포트만 별도 재생성(필요 시)
+# 레포트만 별도 재생성 (이미 마이그레이션이 끝난 폴더에서)
 migrate-next report
+
+# 코드 리뷰만 단독 실행 (기존 .ai-migration/stepN/session.json 재사용)
+migrate-next review
+migrate-next review --session <session.json 경로>
 ```
+
+### 부분 기능만 사용하고 싶다면
+
+| 원하는 작업 | 명령어 |
+|---|---|
+| step1~7만 실행 (레포트/리뷰 제외) | `migrate-next steps` |
+| 마이그레이션 후 나중에 성능 레포트만 생성 | `migrate-next report` |
+| 마이그레이션 후 나중에 코드 리뷰만 진행 | `migrate-next review` |
+| step7(심화 변환)만 단독 실행 | `migrate-next step7` |
 
 ## CLI 출력 형식
 
@@ -132,9 +148,15 @@ CLI는 일관된 색상·기호 규칙으로 출력합니다.
 
 Extension 쪽은 “명령어 테스트”라기보다 VS Code / Cursor에서 확장 실행을 확인합니다.
 
-`app/extension/README.md` 기준으로 F5로 Extension Development Host를 띄우거나, 마켓플레이스/VSIX로 설치한 뒤 실제 프로젝트 루트에서 `migrate-next`(기본) 또는 `migrate-next step1 --review`를 실행한 다음 **Nextify Review** 패널에서 트리·diff·before/after 경로 복사를 확인합니다.
+`app/extension/README.md` 기준으로 F5로 Extension Development Host를 띄우거나, 마켓플레이스/VSIX로 설치한 뒤 실제 프로젝트 루트에서 `migrate-next`(기본) 또는 `migrate-next step1 --review`를 실행한 다음 **Nextify Review** 패널에서 트리·diff·BEFORE/AFTER 경로 복사를 확인합니다.
 
-내부 커맨드: `nextifyReview.refreshSession`, `nextifyReview.openChange`, `nextifyReview.copySessionPath`, `nextifyReview.copyBeforePath`, `nextifyReview.copyAfterPath`
+패널 UI:
+- 변경 파일은 트리로 표시되며, 각 파일 옆 뱃지는 변경 종류를 수동태로 나타냅니다 (`created` / `modified` / `deleted`).
+- 파일명을 클릭하면 BEFORE/AFTER diff 뷰가 열립니다.
+- 상단 툴바의 **Copy BEFORE Path** / **Copy AFTER Path** 버튼으로 선택된 파일의 경로를 복사해 Gemini CLI 등에 `@경로` 형태로 붙여 넣을 수 있습니다.
+- `session.json` 갱신은 `FileSystemWatcher`로 자동 감지됩니다(별도 새로고침 불필요).
+
+내부 커맨드: `nextifyReview.refreshSession`, `nextifyReview.openChange`, `nextifyReview.copySessionPath`, `nextifyReview.copyBeforePath`, `nextifyReview.copyAfterPath` (UI 버튼은 BEFORE/AFTER 두 가지만 노출)
 
 ---
 

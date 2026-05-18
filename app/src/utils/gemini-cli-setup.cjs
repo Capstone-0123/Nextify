@@ -8,10 +8,12 @@ function resolveGeminiCommand() {
   if (process.platform === 'win32') {
     // Windows에서는 npm/yarn 전역 shim(.cmd)이 PATH 탐색에서 누락되는 경우가 있어
     // cmd.exe를 통해 실제 커맨드 해석 결과를 우선 확인합니다.
+    // windowsHide: true 로 사용자 시야에 cmd 창이 깜빡이지 않도록 합니다.
     const winProbe = spawnSync('cmd.exe', ['/d', '/s', '/c', 'gemini --version'], {
       stdio: 'pipe',
       encoding: 'utf8',
       shell: false,
+      windowsHide: true,
     });
     if (!winProbe.error && winProbe.status === 0) {
       return 'gemini';
@@ -24,6 +26,7 @@ function resolveGeminiCommand() {
       stdio: 'pipe',
       encoding: 'utf8',
       shell: false,
+      windowsHide: true,
     });
     if (!result.error && result.status === 0) {
       return candidate;
@@ -52,12 +55,24 @@ function getInstallAttempts(preferredPm) {
 
 function runCommand(command, cwd) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, {
-      cwd,
-      stdio: 'inherit',
-      shell: true,
-      windowsHide: true,
-    });
+    // Windows: `shell: true` + `npm install -g ...` 조합은 손자 프로세스가
+    // 새 cmd 창을 띄우는 경우가 있다. (windowsHide 는 직속 자식에만 적용)
+    // ai-review-session.cjs 가 쓰는 패턴(`cmd.exe /d /s /c <cmd>` + shell:false)
+    // 으로 통일해 현재 터미널 안에서 출력되도록 만든다.
+    const isWin = process.platform === 'win32';
+    const child = isWin
+      ? spawn('cmd.exe', ['/d', '/s', '/c', command], {
+          cwd,
+          stdio: 'inherit',
+          shell: false,
+          windowsHide: true,
+        })
+      : spawn(command, {
+          cwd,
+          stdio: 'inherit',
+          shell: true,
+          windowsHide: true,
+        });
     child.on('error', reject);
     child.on('close', (code, signal) => {
       if (code === 0) {

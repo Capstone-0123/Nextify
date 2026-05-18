@@ -1,6 +1,12 @@
 const vscode = require('vscode');
 const fs = require('fs');
 
+const TYPE_PAST_TENSE = {
+  create: 'created',
+  modify: 'modified',
+  delete: 'deleted',
+};
+
 function activate(context) {
   const controller = new NextifyReviewController();
   controller.attach(context);
@@ -60,12 +66,14 @@ function renderTreeContentHtml(node, depth, currentChangeId) {
   for (const f of fileEntries) {
     const c = f.change;
     const id = escapeHtml(c.id);
-    const type = escapeHtml(c.type || 'unknown');
+    const rawType = c.type || 'unknown';
+    const type = escapeHtml(TYPE_PAST_TENSE[rawType] || rawType);
+    const badgeClass = `badge-btn badge-${escapeHtml(rawType)}`;
     const activeClass = currentChangeId && c.id === currentChangeId ? ' active' : '';
     html += `
 <div class="tree-file${activeClass}" style="padding-left:${pad + indentPx}px">
   <button type="button" class="link file-link" data-command="openChange" data-change-id="${id}">${escapeHtml(f.name)}</button>
-  <button type="button" class="badge-btn" data-command="openChange" data-change-id="${id}" title="diff 열기">${type}</button>
+  <button type="button" class="${badgeClass}" data-command="openChange" data-change-id="${id}" title="diff 열기">${type}</button>
 </div>`;
   }
 
@@ -245,7 +253,7 @@ class NextifyReviewController {
     }
     this.lastMissingSessionKey = marker;
     vscode.window.setStatusBarMessage(
-      'Nextify Review: 활성 세션이 없습니다. 해당 프로젝트 루트에서 migrate-next 실행 후 패널을 새로고침하세요.',
+      'Nextify Review: 활성 세션이 없습니다. 해당 프로젝트 루트에서 migrate-next 실행 시 자동으로 갱신됩니다.',
       4000,
     );
   }
@@ -369,7 +377,7 @@ class NextifyReviewController {
         '워크스페이스에 폴더를 연 뒤(파일 → 폴더 열기), 프로젝트 루트에서 <code>migrate-next</code> 또는 CLI로 생성된 <code>.ai-migration/.../session.json</code>이 보이도록 하세요.';
     } else {
       emptyInner =
-        '이 폴더에서 <code>.ai-migration/.../session.json</code>을 찾지 못했습니다. 해당 프로젝트 루트에서 <code>migrate-next</code>를 실행한 뒤 새로고침하세요.';
+        '이 폴더에서 <code>.ai-migration/.../session.json</code>을 찾지 못했습니다. 해당 프로젝트 루트에서 <code>migrate-next</code>를 실행한 뒤 자동 갱신을 기다리세요.';
     }
 
     const items = this.isLoading
@@ -382,9 +390,6 @@ class NextifyReviewController {
       !this.isLoading && this.session && this.sessionCandidateCount > 1
         ? '같은 창에서 <code>session.json</code> 후보가 여러 개면 <strong>step 번호가 가장 큰</strong> 파일을 사용합니다. '
         : '';
-    const disabled = this.isLoading ? 'disabled' : '';
-    const openCurrentDisabled = this.isLoading || !hasSession || !current ? 'disabled' : '';
-    const copyPathDisabled = this.isLoading || !hasSession ? 'disabled' : '';
     const copySelectedPathDisabled = this.isLoading || !hasSession || !current ? 'disabled' : '';
 
     this.view.webview.html = `<!DOCTYPE html>
@@ -402,10 +407,7 @@ class NextifyReviewController {
       display: grid;
       gap: 8px;
       grid-template-columns: 1fr 1fr;
-      margin-bottom: 8px;
-    }
-    .toolbar-row2 {
-      grid-template-columns: 1fr;
+      margin-bottom: 12px;
     }
     .summary {
       font-size: 12px;
@@ -441,6 +443,28 @@ class NextifyReviewController {
     }
     button.file-link {
       margin-right: 8px;
+    }
+    button.toolbar-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 8px 10px;
+      font-size: 12px;
+      font-weight: 500;
+      border-radius: 6px;
+      border: 1px solid var(--vscode-button-border, transparent);
+      transition: filter 0.12s ease, transform 0.06s ease;
+    }
+    button.toolbar-btn:not(:disabled):hover {
+      filter: brightness(1.1);
+    }
+    button.toolbar-btn:not(:disabled):active {
+      transform: translateY(1px);
+    }
+    button.toolbar-btn .arrow {
+      font-size: 11px;
+      opacity: 0.85;
     }
     .tree-root {
       border: 1px solid var(--vscode-editorWidget-border, transparent);
@@ -502,6 +526,18 @@ class NextifyReviewController {
     button.badge-btn:hover {
       filter: brightness(1.08);
     }
+    button.badge-create {
+      background: var(--vscode-charts-green, var(--vscode-badge-background));
+      color: var(--vscode-editor-background);
+    }
+    button.badge-modify {
+      background: var(--vscode-charts-yellow, var(--vscode-badge-background));
+      color: var(--vscode-editor-background);
+    }
+    button.badge-delete {
+      background: var(--vscode-charts-red, var(--vscode-badge-background));
+      color: var(--vscode-editor-background);
+    }
     .empty {
       border: 1px dashed var(--vscode-editorWidget-border, transparent);
       border-radius: 6px;
@@ -512,20 +548,15 @@ class NextifyReviewController {
 </head>
 <body>
   <div class="toolbar">
-    <button type="button" data-command="refresh" ${disabled}>Refresh</button>
-    <button type="button" data-command="openChange" data-change-id="${escapeHtml(current?.id || '')}" ${openCurrentDisabled}>
-      Open diff (selected)
+    <button type="button" class="toolbar-btn" data-command="copyBeforePath" ${copySelectedPathDisabled} title="선택한 파일의 BEFORE(원본) 경로를 클립보드에 복사">
+      <span class="arrow">◀</span> Copy BEFORE Path
+    </button>
+    <button type="button" class="toolbar-btn" data-command="copyAfterPath" ${copySelectedPathDisabled} title="선택한 파일의 AFTER(마이그레이션 결과) 경로를 클립보드에 복사">
+      Copy AFTER Path <span class="arrow">▶</span>
     </button>
   </div>
-  <div class="toolbar toolbar-row2">
-    <button type="button" data-command="copySessionPath" ${copyPathDisabled}>Copy session.json path</button>
-  </div>
-  <div class="toolbar">
-    <button type="button" data-command="copyBeforePath" ${copySelectedPathDisabled}>Copy BEFORE path</button>
-    <button type="button" data-command="copyAfterPath" ${copySelectedPathDisabled}>Copy AFTER path</button>
-  </div>
   <div class="summary">${sessionMeta}</div>
-  <div class="hint">${multiSessionHint}폴더를 펼쳐 파일을 선택한 다음 path 복사 버튼을 누르세요. Gemini CLI에는 <code>@복사한경로</code> 형태로 붙여 넣으면 됩니다.</div>
+  <div class="hint">${multiSessionHint}폴더를 펼쳐 파일을 클릭하면 diff가 열리고, 위 버튼으로 경로를 복사할 수 있습니다. Gemini CLI에는 <code>@복사한경로</code> 형태로 붙여 넣으세요.</div>
   ${items}
   <script>
     const vscode = acquireVsCodeApi();

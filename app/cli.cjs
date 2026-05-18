@@ -147,11 +147,18 @@ program.addHelpText(
   'after',
   `\n예시:\n` +
     `  migrate-next\n` +
-    `    - step1~step7 순차 실행 → 최종 변경 스냅샷(\`.ai-migration/step7/session.json\`) → 성능 레포트 생성 → 선택 시 Gemini CLI 대화형 리뷰(view-only).\n` +
+    `    - step1~step6 실행 후, 다음 항목을 각각 yes/no 로 선택합니다:\n` +
+    `        1) Next.js 심화 변환(step7: next/image, next/font, Dynamic Import 등)\n` +
+    `        2) 성능 비교 레포트 생성 (Lighthouse 측정)\n` +
+    `        3) Gemini CLI 코드 리뷰 (view-only)\n` +
     `    - Gemini CLI 미설치 시 자동 설치를 시도합니다(리뷰를 선택한 경우). 진행 중 Ctrl+C는 Gemini CLI 리뷰만 중단합니다.\n` +
     `  migrate-next steps\n` +
     `    - 같은 폴더에서 step1~step7만 순차 실행합니다. (\`.ai-migration\`/성능 레포트/Gemini 리뷰는 만들지 않습니다.)\n` +
-    `    - 이후 \`migrate-next report\`(레포트) 또는 인자 없이 \`migrate-next\`(전체 파이프라인)를 사용하세요.\n` +
+    `    - 이후 \`migrate-next report\`(레포트) 또는 \`migrate-next review\`(리뷰)로 부분 기능만 별도 실행할 수 있습니다.\n` +
+    `  migrate-next review\n` +
+    `    - 기존 .ai-migration/stepN/session.json 으로 Gemini CLI 리뷰만 단독 실행 (\`--session <path>\` 지정 가능).\n` +
+    `  migrate-next report\n` +
+    `    - 성능 비교 레포트만 별도 재생성.\n` +
     `\n레거시(기존 step1 preview clone 방식):\n` +
     `  migrate-next step1 --review\n`,
 );
@@ -513,6 +520,7 @@ program
   .option('--runs <number>', 'Lighthouse 측정 횟수 (기본 5)', (v) => Number(v), 5)
   .option('--warmup-runs <number>', 'Lighthouse 워밍업 횟수 (기본 1)', (v) => Number(v), 1)
   .action(async (options) => {
+    const reportStartedAt = Date.now();
     try {
       const projectRoot = process.cwd();
       const outputPath = options.output ? path.resolve(options.output) : path.join(projectRoot, 'nextify-performance-report.md');
@@ -541,6 +549,7 @@ program
         outputMarkdownPath: outputPath,
         lighthouseRuns,
         warmupRuns,
+        startedAt: reportStartedAt,
       });
     } catch (error) {
       console.error(chalk.red('\n❌ report 오류 발생:'), error);
@@ -640,6 +649,82 @@ program
       }
     } catch (error) {
       console.error(chalk.red('\n❌ 오류 발생:'), error.message);
+      process.exit(1);
+    }
+  });
+
+
+// =========================================================
+// Command: Review (Gemini CLI review using an existing session.json)
+// =========================================================
+program
+  .command('review')
+  .description('기존 마이그레이션 세션(session.json)으로 Gemini CLI 코드 리뷰만 단독 실행')
+  .option(
+    '--session <path>',
+    'session.json 경로 (생략 시 .ai-migration/stepN/session.json 자동 탐색, N이 큰 것 우선)',
+  )
+  .action(async (options) => {
+    try {
+      const cwd = process.cwd();
+
+      let sessionPath = options.session ? path.resolve(options.session) : null;
+      if (sessionPath && !(await fs.pathExists(sessionPath))) {
+        logError(`지정한 session.json을 찾을 수 없습니다: ${sessionPath}`);
+        process.exit(1);
+      }
+
+      if (!sessionPath) {
+        sessionPath = await findLatestStepSession(cwd);
+      }
+
+      if (!sessionPath) {
+        logError('재사용할 session.json을 찾지 못했습니다.');
+        logStep('먼저 `migrate-next` 또는 `migrate-next steps` 로 마이그레이션을 진행하거나, --session <path> 로 직접 지정하세요.');
+        process.exit(1);
+      }
+
+      logSection('Gemini CLI 코드 리뷰 (재사용)');
+      logStep(`세션 파일: ${sessionPath}`);
+      logStep('Nextify Review 확장 + Gemini CLI 가 이미 설치되어있습니다. 곧바로 리뷰를 시작합니다.');
+      logStep('  · 확장 미설치 시 패널이 안 보일 수 있습니다 → Marketplace `capstone0123.nextify-review` 설치.');
+      logStep('  · Gemini CLI 미설치 시 ENOENT 로 종료됩니다 → `npm install -g @google/gemini-cli` 후 재실행.');
+      logStep('리뷰는 view-only입니다. 진행 중 중단하려면 Ctrl+C를 누르세요.');
+      logStep('@파일경로를 붙여 넣어 해당 파일을 참조할 수 있습니다.');
+
+      const aiAbort = new AbortController();
+      const onSigint = () => {
+        if (!aiAbort.signal.aborted) {
+          process.stdout.write('\n');
+          logWarn('Ctrl+C 감지: 현재 Gemini CLI 리뷰를 중단합니다.');
+          aiAbort.abort();
+        }
+      };
+
+      process.on('SIGINT', onSigint);
+      try {
+        await runAiReviewSessionStream({
+          sessionPath,
+          signal: aiAbort.signal,
+          transport: 'cli',
+          mode: 'interactive-seeded',
+          model: process.env.NEXTIFY_GEMINI_CLI_MODEL || 'gemini-2.5-flash-lite',
+          workingDirectory: cwd,
+          onChunk: (t) => process.stdout.write(t),
+        });
+      } catch (err) {
+        if (err?.code === 'ENOENT') {
+          logError('Gemini CLI를 찾을 수 없습니다.');
+          logWarn('Gemini CLI를 설치하고 `gemini` 명령이 PATH에서 실행되는지 확인하세요. (예: `npm install -g @google/gemini-cli`)');
+        }
+        throw err;
+      } finally {
+        process.off('SIGINT', onSigint);
+      }
+
+      logSuccess('코드 리뷰 완료.');
+    } catch (error) {
+      console.error(chalk.red('\n❌ review 오류 발생:'), error?.message || error);
       process.exit(1);
     }
   });
@@ -788,6 +873,34 @@ function printNextSteps(installCmd, reportPath) {
   if (reportPath) logStep(`성능 레포트 확인: ${reportPath}`);
 }
 
+/**
+ * `.ai-migration/stepN/session.json` 후보 중 step 번호가 가장 큰(즉 가장 최근 단계의) 파일 경로를 반환합니다.
+ * 없으면 null.
+ * @param {string} projectRoot
+ * @returns {Promise<string|null>}
+ */
+async function findLatestStepSession(projectRoot) {
+  const reviewRoot = path.join(projectRoot, REVIEW_ROOT_DIR);
+  if (!(await fs.pathExists(reviewRoot))) return null;
+
+  const entries = await fs.readdir(reviewRoot, { withFileTypes: true });
+  let bestStep = -1;
+  let bestPath = null;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const m = /^step(\d+)$/i.exec(entry.name);
+    if (!m) continue;
+    const stepNum = Number(m[1]);
+    const candidate = path.join(reviewRoot, entry.name, 'session.json');
+    if (!(await fs.pathExists(candidate))) continue;
+    if (stepNum > bestStep) {
+      bestStep = stepNum;
+      bestPath = candidate;
+    }
+  }
+  return bestPath;
+}
+
 async function cleanupStaleStepArtifacts(projectRoot) {
   const reviewRoot = path.join(projectRoot, REVIEW_ROOT_DIR);
   if (!(await fs.pathExists(reviewRoot))) return;
@@ -892,6 +1005,7 @@ async function runPerformanceReportSafely(reportOptions) {
 
 async function runDefaultOrchestrator() {
   const cwd = process.cwd();
+  const orchestratorStartedAt = Date.now();
 
   // 1) detect & validate project type
   const pm = detectPackageManager(cwd);
@@ -972,6 +1086,17 @@ async function runDefaultOrchestrator() {
   await cleanupStaleStepArtifacts(targetPath);
   await ensureOrchestratorMeta(cwd, targetPath, mode);
 
+  // step1~6은 기본 마이그레이션, step7은 "Next.js 심화 변환"으로 사용자 선택입니다.
+  // 무조건 적용되는 것이 아니라, 트레이드오프(코드 구조 변경)를 사용자가 인지한 뒤 결정합니다.
+  const { runFinalOptimize } = await inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'runFinalOptimize',
+      message: 'Next.js 심화 변환(next/image, next/font, Dynamic Import 등)을 적용하시겠습니까?',
+      default: true,
+    },
+  ]);
+
   const stepEntries = [
     ['step1', runStep1],
     ['step2', runStep2],
@@ -979,10 +1104,16 @@ async function runDefaultOrchestrator() {
     ['step4', runStep4],
     ['step5', runStep5],
     ['step6', runStep6],
-    ['step7', runStep7],
   ];
+  if (runFinalOptimize) {
+    stepEntries.push(['step7', runStep7]);
+  }
 
-  const finalReviewSession = await createSnapshotReviewSession(targetPath, 'step7', async (projectRoot) => {
+  // step7 적용 여부에 따라 최종 리뷰 세션 디렉터리도 분기합니다.
+  // (확장은 step 번호가 가장 큰 session.json 을 자동으로 선택)
+  const finalSnapshotStep = runFinalOptimize ? 'step7' : 'step6';
+
+  const finalReviewSession = await createSnapshotReviewSession(targetPath, finalSnapshotStep, async (projectRoot) => {
     for (const [stepName, stepRunner] of stepEntries) {
       const partNum = stepName.replace('step', '');
       logSection(`Part ${partNum} (${stepName})`);
@@ -1003,9 +1134,10 @@ async function runDefaultOrchestrator() {
   });
 
   const { manifest, manifestPath } = finalReviewSession;
+  const finalStepLabel = runFinalOptimize ? 'step1~step7' : 'step1~step6';
 
   if (!manifestPath || !Array.isArray(manifest?.changes) || manifest.changes.length === 0) {
-    logSuccess('step1~step7 완료: 최종 변경 없음');
+    logSuccess(`${finalStepLabel} 완료: 최종 변경 없음`);
     logStep('변경 추적 결과가 비어 성능 레포트·코드 리뷰 단계는 건너뜁니다. 필요하면 `migrate-next report` 또는 전체 플로우를 다시 확인하세요.');
     const installCmd = getInstallCommand(pm);
     printNextSteps(installCmd, null);
@@ -1013,28 +1145,48 @@ async function runDefaultOrchestrator() {
   }
 
   const typeSummary = summarizeChangeTypes(manifest.changes);
-  logSuccess(`step1~step7 완료 (변경 ${manifest.changes.length}개)`);
-  logStep(`create ${typeSummary.create}  modify ${typeSummary.modify}  delete ${typeSummary.delete}`);
+  logSuccess(`${finalStepLabel} 완료 (변경 ${manifest.changes.length}개)`);
+  logStep(`created ${typeSummary.create}  modified ${typeSummary.modify}  deleted ${typeSummary.delete}`);
 
-  // 1) 성능 레포트 생성
-  logSection('성능 레포트 생성');
-  const reportPath = path.join(targetPath, 'nextify-performance-report.md');
-  // step7 진입 직전에 미리 만들어 둔 스냅샷 경로를 명시적으로 전달합니다.
-  // (그렇지 않으면 generatePerformanceReport 가 이 시점에 다시 createPreStep7Snapshot 을 호출하는데,
-  //  이미 step7 가 끝난 상태이므로 snapshot 이 step7 결과의 복사본이 되어 비교가 무의미해집니다.)
-  const preStep7SnapshotRoot = path.join(
-    path.dirname(targetPath),
-    `${path.basename(targetPath)}__nextify_snapshots`,
-    'pre-step7',
-  );
-  const reportResult = await runPerformanceReportSafely({
-    projectRoot: targetPath,
-    outputMarkdownPath: reportPath,
-    preStep7Root: preStep7SnapshotRoot,
-  });
-  if (!reportResult.success) {
-    logWarn(`성능 레포트 생성에 실패했습니다: ${reportResult.error.message}`);
-    logStep('마이그레이션 결과는 유지됩니다. 필요 시 `migrate-next report`로 재시도하세요.');
+  // 1) 성능 레포트 생성 여부 확인
+  let reportPath = null;
+  let reportResult = { success: false };
+  if (runFinalOptimize) {
+    const { doReport } = await inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'doReport',
+        message: '성능 비교 레포트(Vite vs Next.js)를 생성하시겠습니까? (Lighthouse 측정으로 수 분 소요)',
+        default: true,
+      },
+    ]);
+
+    if (doReport) {
+      logSection('성능 레포트 생성');
+      reportPath = path.join(targetPath, 'nextify-performance-report.md');
+      // step7 진입 직전에 미리 만들어 둔 스냅샷 경로를 명시적으로 전달합니다.
+      // (그렇지 않으면 generatePerformanceReport 가 이 시점에 다시 createPreStep7Snapshot 을 호출하는데,
+      //  이미 step7 가 끝난 상태이므로 snapshot 이 step7 결과의 복사본이 되어 비교가 무의미해집니다.)
+      const preStep7SnapshotRoot = path.join(
+        path.dirname(targetPath),
+        `${path.basename(targetPath)}__nextify_snapshots`,
+        'pre-step7',
+      );
+      reportResult = await runPerformanceReportSafely({
+        projectRoot: targetPath,
+        outputMarkdownPath: reportPath,
+        preStep7Root: preStep7SnapshotRoot,
+        startedAt: orchestratorStartedAt,
+      });
+      if (!reportResult.success) {
+        logWarn(`성능 레포트 생성에 실패했습니다: ${reportResult.error.message}`);
+        logStep('마이그레이션 결과는 유지됩니다. 필요 시 `migrate-next report`로 재시도하세요.');
+      }
+    } else {
+      logStep('성능 레포트 생성을 건너뜁니다. 필요 시 `migrate-next report`로 생성할 수 있습니다.');
+    }
+  } else {
+    logStep('Next.js 심화 변환을 건너뛰어 성능 레포트 단계도 생략합니다. 필요 시 `migrate-next step7` 후 `migrate-next report`로 생성할 수 있습니다.');
   }
 
   // 2) 코드 리뷰 여부 확인
@@ -1049,6 +1201,7 @@ async function runDefaultOrchestrator() {
 
   if (!useReview) {
     logSuccess('마이그레이션 완료.');
+    logStep('나중에 리뷰만 다시 실행하려면: `migrate-next review`');
     const installCmd = getInstallCommand(pm);
     printNextSteps(installCmd, reportResult.success ? reportPath : null);
     return;

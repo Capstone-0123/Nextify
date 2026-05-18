@@ -3,10 +3,14 @@ const path = require('path');
 const net = require('net');
 const chalk = require('chalk');
 const os = require('os');
+const { spawnSync } = require('child_process');
 
 const { detectPackageManager } = require('../utils/project-info.cjs');
 const { runCommand, startCommand } = require('../utils/exec.cjs');
 const { cloneProject } = require('../utils/copy.cjs');
+
+const CLI_PKG = require('../../package.json');
+const REVIEW_ROOT_DIR = '.ai-migration';
 
 const DEFAULT_LIGHTHOUSE_RUNS = 5;
 const DEFAULT_LIGHTHOUSE_WARMUP_RUNS = 1;
@@ -767,7 +771,481 @@ function renderTargetDetail(target) {
 `;
 }
 
-function renderMarkdownReport({ targets, failures }) {
+// ---------------------------------------------------------------------------
+// 변경 통계 / 헤더 / 단계 요약 헬퍼들
+// ---------------------------------------------------------------------------
+
+function safeReadJsonSync(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    return fs.readJsonSync(filePath);
+  } catch {
+    return null;
+  }
+}
+
+function getGitShortHash(cwd) {
+  try {
+    const r = spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
+      cwd,
+      stdio: 'pipe',
+      encoding: 'utf-8',
+      shell: false,
+      windowsHide: true,
+      timeout: 3000,
+    });
+    if (!r.error && r.status === 0) {
+      const out = String(r.stdout || '').trim();
+      return out || null;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function detectNpmVersion() {
+  try {
+    const cmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const r = spawnSync(cmd, ['--version'], {
+      stdio: 'pipe',
+      encoding: 'utf-8',
+      shell: false,
+      windowsHide: true,
+      timeout: 3000,
+    });
+    if (!r.error && r.status === 0) {
+      const out = String(r.stdout || '').trim();
+      return out || null;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function describeOs() {
+  const platform = process.platform;
+  const release = os.release();
+  if (platform === 'win32') {
+    // Node 가 보는 release 는 NT 버전(10.0.x). 그대로 보여줌.
+    return `Windows ${release}`;
+  }
+  if (platform === 'darwin') return `macOS ${release}`;
+  if (platform === 'linux') return `Linux ${release}`;
+  return `${platform} ${release}`;
+}
+
+function formatDurationMs(ms) {
+  if (!Number.isFinite(ms) || ms < 1000) return null;
+  const totalSec = Math.round(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  if (m <= 0) return `${s}초`;
+  return `${m}분 ${String(s).padStart(2, '0')}초`;
+}
+
+function formatLocalIsoLike(date) {
+  // 사용자가 예시로 준 형식: YYYY-MM-DDTHH:MM:SS+09:00 (로컬 타임존)
+  const pad = (n) => String(Math.abs(n)).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  const mm = pad(date.getMonth() + 1);
+  const dd = pad(date.getDate());
+  const hh = pad(date.getHours());
+  const mi = pad(date.getMinutes());
+  const ss = pad(date.getSeconds());
+  const tzMin = -date.getTimezoneOffset();
+  const sign = tzMin >= 0 ? '+' : '-';
+  const tzh = pad(Math.floor(Math.abs(tzMin) / 60));
+  const tzm = pad(Math.abs(tzMin) % 60);
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}${sign}${tzh}:${tzm}`;
+}
+
+function buildReportHeader({ now, toolVersion, toolCommit, project, elapsedMs }) {
+  const nodeV = process.version;
+  const npmV = detectNpmVersion();
+  const osLabel = describeOs();
+  const elapsedLabel = formatDurationMs(elapsedMs);
+
+  const lines = [];
+  lines.push(`생성 시각: ${formatLocalIsoLike(now)}`);
+  lines.push(
+    `도구 버전: nextify-cli ${toolVersion}${toolCommit ? ` (commit ${toolCommit})` : ''}`,
+  );
+  if (project && project.name) {
+    lines.push(
+      `대상 프로젝트: ${project.name}${project.commit ? ` (commit ${project.commit})` : ''}`,
+    );
+  }
+  const envParts = [`Node ${nodeV}`];
+  if (npmV) envParts.push(`npm ${npmV}`);
+  envParts.push(osLabel);
+  lines.push(`실행 환경: ${envParts.join(' / ')}`);
+  if (elapsedLabel) {
+    lines.push(`총 실행 시간: ${elapsedLabel}`);
+  }
+  return lines.join('  \n');
+}
+
+const STEP_DESCRIPTIONS = [
+  { step: 1, title: 'Vite 환경 → Next 환경 (설정/스크립트/엔트리)' },
+  { step: 2, title: '라우팅 구조 변환 (React Router → App Router)' },
+  { step: 3, title: '라우팅 페이지 변환 (page.tsx/layout.tsx 생성)' },
+  { step: 4, title: '스타일/리소스/공개 자산 이전' },
+  { step: 5, title: "'use client' 처리 · Zustand 등 전역 상태 마이그레이션" },
+  { step: 6, title: '환경 변수 / 의존성 검토 가이드' },
+  { step: 7, title: 'next/image · next/font · 동적 import · 타입 보정' },
+];
+
+function renderStepsSummaryTable({ finalStepNumber }) {
+  const lines = [];
+  lines.push('| Step | 내용 | 결과 |');
+  lines.push('|------|------|------|');
+  for (const s of STEP_DESCRIPTIONS) {
+    let status;
+    if (finalStepNumber == null) {
+      status = '✅ Pass';
+    } else if (s.step <= finalStepNumber) {
+      status = '✅ Pass';
+    } else {
+      status = '⏭️ Skipped';
+    }
+    lines.push(`| Step ${s.step} | ${s.title} | ${status} |`);
+  }
+  return lines.join('\n');
+}
+
+function categorizeFile(relPath) {
+  if (!relPath) return null;
+  const p = String(relPath).replace(/\\/g, '/').toLowerCase();
+  const base = p.split('/').pop() || '';
+
+  // Config (먼저 검사 — config 파일이 styles/utils 분류와 충돌 안 하도록)
+  if (
+    base.startsWith('next.config.') ||
+    base.startsWith('tsconfig') ||
+    base === 'package.json' ||
+    base === 'package-lock.json' ||
+    base === '.eslintrc' || base.startsWith('.eslintrc.') ||
+    base === '.prettierrc' || base.startsWith('.prettierrc.') ||
+    base === '.gitignore' ||
+    base === 'postcss.config.js' || base === 'postcss.config.mjs' ||
+    base === 'tailwind.config.js' || base === 'tailwind.config.ts' ||
+    base === 'vite.config.ts' || base === 'vite.config.js'
+  ) {
+    return 'config';
+  }
+
+  // Routes (app router)
+  if (
+    p.startsWith('app/') ||
+    p.startsWith('src/app/') ||
+    p.startsWith('pages/') ||
+    p.startsWith('src/pages/')
+  ) {
+    return 'routes';
+  }
+
+  // Styles
+  if (/\.(css|scss|sass|less|styl)$/.test(base)) {
+    return 'styles';
+  }
+
+  // Components
+  if (p.includes('/components/') || p.startsWith('components/')) {
+    return 'components';
+  }
+
+  // Utils / Types
+  if (
+    p.includes('/utils/') || p.startsWith('utils/') ||
+    p.includes('/types/') || p.startsWith('types/') ||
+    p.includes('/lib/') || p.startsWith('lib/') ||
+    p.includes('/hooks/') || p.startsWith('hooks/')
+  ) {
+    return 'utils';
+  }
+
+  return null;
+}
+
+function isClientComponent(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return false;
+    const head = fs.readFileSync(filePath, 'utf-8').slice(0, 512);
+    return /^['"]use client['"];?/m.test(head);
+  } catch {
+    return false;
+  }
+}
+
+function isLikelyComponentFile(relPath) {
+  if (!relPath) return false;
+  const p = String(relPath).replace(/\\/g, '/');
+  if (!/\.(tsx|jsx)$/.test(p)) return false;
+  return true;
+}
+
+function countLines(text) {
+  if (!text) return 0;
+  // 마지막 줄에 개행이 없어도 1 라인으로 카운트.
+  const n = text.split('\n').length;
+  return n;
+}
+
+function looksLikeRouteFile(relPath) {
+  if (!relPath) return false;
+  const p = String(relPath).replace(/\\/g, '/').toLowerCase();
+  const base = p.split('/').pop() || '';
+  if (!(p.startsWith('app/') || p.startsWith('src/app/'))) return false;
+  return (
+    base === 'page.tsx' || base === 'page.jsx' || base === 'page.ts' || base === 'page.js' ||
+    base === 'layout.tsx' || base === 'layout.jsx' ||
+    base === 'route.ts' || base === 'route.js'
+  );
+}
+
+function computeChangeStats(manifest, projectRoot) {
+  const empty = {
+    available: false,
+    created: 0,
+    modified: 0,
+    deleted: 0,
+    renamed: 0,
+    plusLOC: 0,
+    minusLOC: 0,
+    byCategory: {
+      routes: { created: 0, modified: 0, deleted: 0 },
+      components: { created: 0, modified: 0, deleted: 0 },
+      config: { created: 0, modified: 0, deleted: 0 },
+      styles: { created: 0, modified: 0, deleted: 0 },
+      utils: { created: 0, modified: 0, deleted: 0 },
+    },
+    useClientCount: 0,
+    totalComponentCount: 0,
+    newRouteFileCount: 0,
+    totalProjectFiles: null,
+    changedFiles: 0,
+  };
+
+  if (!manifest || !Array.isArray(manifest.changes)) {
+    return empty;
+  }
+
+  const stats = { ...empty, available: true, byCategory: JSON.parse(JSON.stringify(empty.byCategory)) };
+  const seenAfterPaths = new Set();
+
+  for (const change of manifest.changes) {
+    const type = change.type;
+    const rel = change.relativePath || change.afterRelativePath || change.beforeRelativePath || '';
+
+    if (type === 'create') stats.created++;
+    else if (type === 'modify') stats.modified++;
+    else if (type === 'delete') stats.deleted++;
+    else if (type === 'rename' || type === 'move') stats.renamed++;
+
+    // LOC 카운트 (베스트-에포트). before/after 스냅샷이 없으면 스킵.
+    const beforeCandidates = [
+      change.beforeAbsolutePath,
+      change.beforePath,
+      change.beforeSnapshotPath,
+      change.diffBeforePath,
+    ];
+    const afterCandidates = [
+      change.afterAbsolutePath,
+      change.afterPath,
+      change.diffAfterPath,
+    ];
+    let beforeText = '';
+    let afterText = '';
+    for (const p of beforeCandidates) {
+      if (p && fs.existsSync(p)) {
+        try { beforeText = fs.readFileSync(p, 'utf-8'); break; } catch { /* */ }
+      }
+    }
+    for (const p of afterCandidates) {
+      if (p && fs.existsSync(p)) {
+        try { afterText = fs.readFileSync(p, 'utf-8'); break; } catch { /* */ }
+      }
+    }
+
+    const beforeLines = countLines(beforeText);
+    const afterLines = countLines(afterText);
+
+    if (type === 'create') {
+      stats.plusLOC += afterLines;
+    } else if (type === 'delete') {
+      stats.minusLOC += beforeLines;
+    } else if (type === 'modify' || type === 'rename' || type === 'move') {
+      const diff = afterLines - beforeLines;
+      if (diff > 0) stats.plusLOC += diff;
+      else stats.minusLOC += -diff;
+    }
+
+    const cat = categorizeFile(rel);
+    if (cat && stats.byCategory[cat]) {
+      if (type === 'create') stats.byCategory[cat].created++;
+      else if (type === 'modify') stats.byCategory[cat].modified++;
+      else if (type === 'delete') stats.byCategory[cat].deleted++;
+    }
+
+    if (rel && (type === 'create' || type === 'modify')) {
+      seenAfterPaths.add(rel.replace(/\\/g, '/'));
+    }
+    if (type === 'create' && looksLikeRouteFile(rel)) {
+      stats.newRouteFileCount++;
+    }
+  }
+
+  stats.changedFiles = seenAfterPaths.size;
+
+  // use client 카운트 — 프로젝트 루트에서 .tsx/.jsx 컴포넌트 후보를 훑음.
+  if (projectRoot) {
+    try {
+      const scanRoots = [
+        path.join(projectRoot, 'app'),
+        path.join(projectRoot, 'src'),
+        path.join(projectRoot, 'components'),
+      ].filter((p) => fs.existsSync(p));
+
+      const componentFiles = [];
+      const SKIP_DIRS = new Set(['node_modules', '.next', '.git', '__nextify_snapshots', REVIEW_ROOT_DIR, '.nextify', 'dist', 'build']);
+
+      function walk(dir) {
+        let entries;
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        for (const ent of entries) {
+          if (SKIP_DIRS.has(ent.name)) continue;
+          const full = path.join(dir, ent.name);
+          if (ent.isDirectory()) walk(full);
+          else if (ent.isFile() && /\.(tsx|jsx)$/.test(ent.name)) {
+            componentFiles.push(full);
+          }
+        }
+      }
+      for (const r of scanRoots) walk(r);
+
+      stats.totalComponentCount = componentFiles.length;
+      for (const f of componentFiles) {
+        if (isClientComponent(f)) stats.useClientCount++;
+      }
+    } catch {
+      /* ignore */
+    }
+
+    // 전체 프로젝트 파일 수 (대략) — 변경 파일 비율 계산용.
+    try {
+      const SKIP_DIRS = new Set(['node_modules', '.next', '.git', '__nextify_snapshots', REVIEW_ROOT_DIR, '.nextify', 'dist', 'build']);
+      let count = 0;
+      function walkAll(dir) {
+        let entries;
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        for (const ent of entries) {
+          if (SKIP_DIRS.has(ent.name)) continue;
+          const full = path.join(dir, ent.name);
+          if (ent.isDirectory()) walkAll(full);
+          else if (ent.isFile()) count++;
+        }
+      }
+      walkAll(projectRoot);
+      stats.totalProjectFiles = count;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // (silence unused warning)
+  void isLikelyComponentFile;
+
+  return stats;
+}
+
+function findLatestSessionManifest(projectRoot) {
+  // 가장 최근 step 의 session.json 을 찾아 반환. 없으면 null.
+  try {
+    const root = path.join(projectRoot, REVIEW_ROOT_DIR);
+    if (!fs.existsSync(root)) return null;
+    const entries = fs.readdirSync(root, { withFileTypes: true });
+    const stepDirs = entries
+      .filter((e) => e.isDirectory() && /^step\d+$/.test(e.name))
+      .map((e) => ({ name: e.name, num: Number(e.name.replace('step', '')) }))
+      .sort((a, b) => b.num - a.num);
+    for (const sd of stepDirs) {
+      const sessionPath = path.join(root, sd.name, 'session.json');
+      if (fs.existsSync(sessionPath)) {
+        const manifest = safeReadJsonSync(sessionPath);
+        if (manifest) {
+          return { manifest, sessionPath, stepNumber: sd.num };
+        }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function renderChangeStatsTable(stats) {
+  const fmtNum = (n) => Number(n || 0).toLocaleString('en-US');
+  const netFiles = (stats.created || 0) - (stats.deleted || 0);
+  const netSign = netFiles >= 0 ? '+' : '−';
+  return [
+    '| 항목 | 개수 |',
+    '| --- | ---: |',
+    `| Created | ${fmtNum(stats.created)} |`,
+    `| Modified | ${fmtNum(stats.modified)} |`,
+    `| Deleted | ${fmtNum(stats.deleted)} |`,
+    `| Renamed/Moved | ${fmtNum(stats.renamed)} |`,
+    `| +LOC | ${fmtNum(stats.plusLOC)} |`,
+    `| −LOC | ${fmtNum(stats.minusLOC)} |`,
+    `| Net files (Created − Deleted) | ${netSign}${fmtNum(Math.abs(netFiles))} |`,
+  ].join('\n');
+}
+
+function renderCategoryTable(byCategory) {
+  const rows = [
+    { key: 'routes', label: 'Routes (`app/`)' },
+    { key: 'components', label: 'Components' },
+    { key: 'config', label: 'Config (`next.config.*`, `tsconfig.*` 등)' },
+    { key: 'styles', label: 'Styles' },
+    { key: 'utils', label: 'Utils / Types' },
+  ];
+  const lines = ['| 카테고리 | Created | Modified | Deleted |', '| --- | ---: | ---: | ---: |'];
+  for (const r of rows) {
+    const v = byCategory[r.key] || { created: 0, modified: 0, deleted: 0 };
+    lines.push(`| ${r.label} | ${v.created} | ${v.modified} | ${v.deleted} |`);
+  }
+  return lines.join('\n');
+}
+
+function renderAdditionalStats(stats) {
+  const lines = [];
+  if (stats.totalComponentCount > 0 || stats.useClientCount > 0) {
+    lines.push(`> \`use client\` 표시된 컴포넌트: ${stats.useClientCount} / ${stats.totalComponentCount}  `);
+  }
+  if (stats.newRouteFileCount > 0) {
+    lines.push(`> 새로 생성된 라우트 파일: ${stats.newRouteFileCount}  `);
+  }
+  if (stats.totalProjectFiles && stats.changedFiles) {
+    const ratio = (stats.changedFiles / stats.totalProjectFiles) * 100;
+    lines.push(
+      `> 변경 파일 비율: ${stats.changedFiles} / ${stats.totalProjectFiles} (${ratio.toFixed(1)}%)`,
+    );
+  }
+  return lines.join('\n');
+}
+
+function renderMarkdownReport({
+  targets,
+  failures,
+  manifestInfo,
+  changeStats,
+  toolVersion,
+  toolCommit,
+  project,
+  startedAt,
+  now,
+}) {
   const rows = targets.map((t) => pickSummaryRow(t));
   const summaryRows = rows.length
     ? rows
@@ -786,14 +1264,39 @@ function renderMarkdownReport({ targets, failures }) {
           .map((item) => `- ${item.label}: ${item.errorMessage}`)
           .join('\n')
       : '- 없음';
-  const now = new Date().toISOString();
-  const measurementConfig = targets[0]?.lighthouse || {};
-  const measuredRuns = measurementConfig.measuredRuns ?? DEFAULT_LIGHTHOUSE_RUNS;
-  const warmupRuns = measurementConfig.warmups ?? DEFAULT_LIGHTHOUSE_WARMUP_RUNS;
 
-  return `# Nextify Performance Report
+  const reportNow = now || new Date();
+  const elapsedMs = startedAt ? reportNow.getTime() - startedAt : null;
 
-생성 시각: ${now}
+  const header = buildReportHeader({
+    now: reportNow,
+    toolVersion,
+    toolCommit,
+    project,
+    elapsedMs,
+  });
+
+  const finalStepNumber = manifestInfo?.stepNumber ?? null;
+  const stepsTable = renderStepsSummaryTable({ finalStepNumber });
+
+  const hasChangeStats = changeStats && changeStats.available;
+  const changeStatsBlock = hasChangeStats
+    ? `## 변경 파일 통계
+
+${renderChangeStatsTable(changeStats)}
+
+### 카테고리별 변경
+
+${renderCategoryTable(changeStats.byCategory)}
+${renderAdditionalStats(changeStats) ? `\n${renderAdditionalStats(changeStats)}\n` : ''}`
+    : `## 변경 파일 통계
+
+> session.json 을 찾지 못해 변경 통계를 표시할 수 없습니다. (\`.ai-migration/stepN/session.json\` 필요)
+`;
+
+  return `# Nextify Migration Report
+
+${header}
 
 ## 비교 대상
 
@@ -809,25 +1312,28 @@ function renderMarkdownReport({ targets, failures }) {
 - FCP/LCP/SEO 표준편차(작을수록 안정적)
 - Total JS payload size (폴더 용량)
 
-## 측정 설정
+## 변환 요약 (Step 1 ~ Step 7)
 
-- Lighthouse warmup runs: ${warmupRuns}
-- Lighthouse measured runs: ${measuredRuns}
-- Summary 기준: median (표준편차/범위 함께 표시)
+${stepsTable}
 
+${changeStatsBlock}
 ## 결과 요약 (${targets.length}-way, successful targets)
 
 | Target | FCP (median) | FCP σ | LCP (median) | LCP σ | SEO (median) | SEO σ | Total JS payload size |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 ${summaryRows}
 
-## 측정 상세
-
-${detailSection}
-
 ## 실패 항목
 
 ${failureSection}
+
+---
+
+<details>
+<summary><b>📊 측정 상세 보기</b></summary>
+
+${detailSection}
+</details>
 `;
 }
 
@@ -956,7 +1462,9 @@ async function generatePerformanceReport({
   outputMarkdownPath,
   lighthouseRuns,
   warmupRuns,
+  startedAt,
 }) {
+  const reportStartedAt = startedAt || Date.now();
   const meta = await readNextifyMeta(projectRoot);
   const baselineFromMeta = meta?.sourceViteProjectRoot;
 
@@ -997,7 +1505,39 @@ async function generatePerformanceReport({
     }
   }
 
-  const md = renderMarkdownReport({ targets, failures });
+  // ------------------------------------------------------------------
+  // 변경 통계 / 환경 정보 수집 (실패해도 레포트 본문 생성은 계속)
+  // ------------------------------------------------------------------
+  const manifestInfo = findLatestSessionManifest(projectRoot);
+  const changeStats = computeChangeStats(manifestInfo?.manifest, projectRoot);
+
+  const toolVersion = CLI_PKG && CLI_PKG.version ? String(CLI_PKG.version) : '0.0.0';
+  const toolCommit = getGitShortHash(MIGRATOR_APP_ROOT);
+
+  let project = null;
+  try {
+    const pkgPath = path.join(projectRoot, 'package.json');
+    const pkg = safeReadJsonSync(pkgPath);
+    if (pkg && pkg.name) {
+      project = { name: pkg.name, commit: getGitShortHash(projectRoot) };
+    } else {
+      project = { name: path.basename(projectRoot), commit: getGitShortHash(projectRoot) };
+    }
+  } catch {
+    project = { name: path.basename(projectRoot), commit: null };
+  }
+
+  const md = renderMarkdownReport({
+    targets,
+    failures,
+    manifestInfo,
+    changeStats,
+    toolVersion,
+    toolCommit,
+    project,
+    startedAt: reportStartedAt,
+    now: new Date(),
+  });
   await fs.writeFile(outputMarkdownPath, md, 'utf-8');
 
   await ensureNextifyMeta(projectRoot, {
