@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.3 — 2026-05-11
+
+### Added
+
+- **CLI ↔ Nextify Review:** 기본 오케스트레이터에서 코드 리뷰 단계 진입 전·`migrate-next step1 --review`에서 확장 미설치 시 Marketplace 설치 확인(`NEXTIFY_ASSUME_YES=1`면 확인 생략), 설치 시도 후 패널 포커스.
+
+### Changed
+
+- **확장(Nextify Review 패널):** 워크스페이스에 폴더가 없을 때·세션이 없을 때 안내 문구 구분. 동일 창에 `session.json` 후보가 여러 개면 step 번호 우선 선택 안내.
+
+### Fixed
+
+- **`migrate-next --help` 후행 예시:** `migrate-next steps` 설명을 실제 동작(레포트·Gemini 리뷰 미실행 등)과 일치하도록 수정.
+- **`migrate-next step1 --review` 종료 안내:** Accept/Reject 언급 제거(view-only 패널과 일치).
+
 ## 0.1.2 — 2026-05-04
 
 ### Changed
