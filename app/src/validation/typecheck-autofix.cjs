@@ -1,6 +1,6 @@
 'use strict';
 
-// app/src/step7/typecheck-autofix.cjs
+// app/src/validation/typecheck-autofix.cjs
 // Step7 끝의 typecheck 결과를 받아 결정론적(LLM 호출 없는) 자동 수정을 수행.
 // - 토큰 비용 0
 // - 화이트리스트 코드만 수정 (오작 위험을 최소화)
@@ -10,6 +10,11 @@
 const fs = require('fs-extra');
 const path = require('path');
 const { Project, SyntaxKind } = require('ts-morph');
+const { applyAppRouterFixes } = require('./typecheck-app-router-fix.cjs');
+const {
+  fixCannotFindModule,
+  resolveImportSpecifierToAbsPath,
+} = require('./typecheck-module-resolve.cjs');
 
 // ---- 화이트리스트 ---------------------------------------------------------
 
@@ -25,12 +30,35 @@ const UNUSED_ALL_IMPORTS_CODE = 'TS6192';
 
 // "Cannot find name 'X'" — 표준 식별자에 한해서만 자동 import 추가
 const CANNOT_FIND_CODE = 'TS2304';
+const CANNOT_FIND_SUGGESTED_CODE = 'TS2552';
+const JSX_NULL_INTRINSIC_CODE = 'TS2339';
+const MODULE_NOT_FOUND_CODE = 'TS2307';
+const NO_EXPORTED_MEMBER_CODE = 'TS2614';
+const IMPORT_CONFLICT_CODE = 'TS2440';
+const MISSING_EXPORT_CODE = 'TS2459';
 
 const AUTOFIXABLE_CODES = new Set([
   ...UNUSED_DECL_CODES,
   UNUSED_ALL_IMPORTS_CODE,
   CANNOT_FIND_CODE,
+  CANNOT_FIND_SUGGESTED_CODE,
+  JSX_NULL_INTRINSIC_CODE,
+  MODULE_NOT_FOUND_CODE,
+  NO_EXPORTED_MEMBER_CODE,
+  IMPORT_CONFLICT_CODE,
+  MISSING_EXPORT_CODE,
 ]);
+
+// tsc 라인 단위 외에 파일 단위(App Router 패턴) 보정을 돌릴 트리거
+const APP_ROUTER_BULK_CODES = new Set([
+  'TS2353',
+  'TS2345',
+  'TS2786',
+  'TS2607',
+  'TS17001',
+]);
+
+const FILE_PASS_CODES = new Set([...AUTOFIXABLE_CODES, ...APP_ROUTER_BULK_CODES]);
 
 // ---- import 안전성 판정 ---------------------------------------------------
 
@@ -152,6 +180,49 @@ function getNearestIdentifier(node) {
   return node.getFirstChildByKind?.(SyntaxKind.Identifier) || null;
 }
 
+/**
+ * TS6133 대상 중 문자열/숫자 등 부수효과 없는 초기값이면 변수문 전체 제거 (아이콘 URL 상수 등)
+ */
+function isTrivialUnusedInitializer(init) {
+  if (!init) return false;
+  const k = init.getKind();
+  if (
+    k === SyntaxKind.StringLiteral ||
+    k === SyntaxKind.NumericLiteral ||
+    k === SyntaxKind.TrueKeyword ||
+    k === SyntaxKind.FalseKeyword ||
+    k === SyntaxKind.NullKeyword ||
+    k === SyntaxKind.NoSubstitutionTemplateLiteral
+  ) {
+    return true;
+  }
+  if (k === SyntaxKind.Identifier && init.getText() === 'undefined') return true;
+  if (k === SyntaxKind.ArrayLiteralExpression) {
+    return init.getElements().every((el) => isTrivialUnusedInitializer(el));
+  }
+  if (k === SyntaxKind.ObjectLiteralExpression) {
+    return init.getProperties().length === 0;
+  }
+  return false;
+}
+
+function removeVariableDeclarationStatement(vd) {
+  const list = vd.getParent();
+  if (!list || list.getKind() !== SyntaxKind.VariableDeclarationList) return false;
+  const decls = list.getDeclarations();
+  if (decls.length === 1) {
+    const stmt = list.getParent();
+    if (stmt && stmt.getKind() === SyntaxKind.VariableStatement) {
+      stmt.remove();
+      return true;
+    }
+  } else {
+    vd.remove();
+    return true;
+  }
+  return false;
+}
+
 // ---- 개별 에러 처리 -------------------------------------------------------
 
 /**
@@ -183,7 +254,10 @@ function fixUnusedDeclaration(sourceFile, error) {
 
   // 3) const/let X = ...
   if (parentKind === SyntaxKind.VariableDeclaration) {
-    // 사이드이펙트가 있을 수 있으므로 제거하지 말고 rename.
+    const init = parent.getInitializer();
+    if (isTrivialUnusedInitializer(init)) {
+      return removeVariableDeclarationStatement(parent);
+    }
     return tryRenameToUnderscore(parent);
   }
 
@@ -210,7 +284,8 @@ function fixUnusedDeclaration(sourceFile, error) {
     const spec = importDecl?.getModuleSpecifierValue();
     if (!isSafeImportSource(spec)) return false;
     try {
-      parent.removeDefaultImport?.();
+      if (!importDecl || typeof importDecl.removeDefaultImport !== 'function') return false;
+      importDecl.removeDefaultImport();
     } catch {
       return false;
     }
@@ -275,6 +350,24 @@ function fixUnusedAllImports(sourceFile, error) {
 }
 
 /**
+ * TS2339: Property 'null' does not exist on type 'JSX.IntrinsicElements'.
+ * - 마이그레이션 중 <null>...</null> 같은 비정상 JSX 태그를 Fragment 로 치환
+ */
+function fixJsxNullIntrinsic(sourceFile, error) {
+  if (!/Property 'null' does not exist on type 'JSX\.IntrinsicElements'/i.test(error.message || '')) {
+    return false;
+  }
+  const fullText = sourceFile.getFullText();
+  const nextText = fullText
+    .replace(/<\s*null\s*>/g, '<>')
+    .replace(/<\s*\/\s*null\s*>/g, '</>')
+    .replace(/<\s*null\s*\/\s*>/g, '<></>');
+  if (nextText === fullText) return false;
+  sourceFile.replaceWithText(nextText);
+  return true;
+}
+
+/**
  * 표준 React/Next 식별자에 한해 import 추가.
  */
 function addStandardImportIfMissing(sourceFile, identName) {
@@ -322,6 +415,136 @@ function fixCannotFindName(sourceFile, error) {
   return addStandardImportIfMissing(sourceFile, m[1]);
 }
 
+function importPathsRoughlyEqual(specInFile, pathFromMessage) {
+  if (!specInFile || !pathFromMessage) return false;
+  const a = specInFile.replace(/\\/g, '/');
+  const b = pathFromMessage.replace(/\\/g, '/');
+  if (a === b) return true;
+  if (a.endsWith(b) || b.endsWith(a)) return true;
+  return false;
+}
+
+/**
+ * TS2614: named import 가 없고 default 를 쓰라는 tsc 힌트가 있을 때
+ */
+function fixDefaultImportMember(sourceFile, error) {
+  const msg = error.message || '';
+  const memberM = /has no exported member ['"]([^'"]+)['"]/.exec(msg);
+  const hintM =
+    /Did you mean to use ['`]import (\w+) from ["']([^"']+)["']['`] instead\?/i.exec(msg) ||
+    /Did you mean to use import (\w+) from ["']([^"']+)["'] instead\?/i.exec(msg) ||
+    /Did you mean ['`]import (\w+) from ["']([^"']+)["']['`]\?/i.exec(msg);
+  if (!memberM || !hintM) return false;
+  const member = memberM[1];
+  const hintedName = hintM[1];
+  const modPath = hintM[2];
+  if (member !== hintedName) return false;
+
+  for (const decl of sourceFile.getImportDeclarations()) {
+    const spec = decl.getModuleSpecifierValue();
+    if (!importPathsRoughlyEqual(spec, modPath)) continue;
+    const named = decl.getNamedImports().find((n) => n.getName() === member);
+    if (!named) continue;
+    named.remove();
+    if (decl.getDefaultImport()) return false;
+    decl.setDefaultImport(member);
+    return true;
+  }
+  return false;
+}
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * TS2440: next/image default import 이름이 로컬 선언과 충돌 — Next{Name} 로 치환 (심볼은 메시지에서 읽음)
+ */
+function fixNextDefaultImportNameConflict(sourceFile, error) {
+  const msg = error.message || '';
+  const m = /conflicts with local declaration of ['"]([^'"]+)['"]/i.exec(msg);
+  if (!m) return false;
+  const sym = m[1];
+  if (!/^[A-Za-z_$][\w$]*$/.test(sym)) return false;
+  const decl = sourceFile.getImportDeclarations().find(
+    (d) => d.getModuleSpecifierValue() === 'next/image' && d.getDefaultImport()?.getText() === sym,
+  );
+  if (!decl) return false;
+  const alias = `Next${sym}`;
+  const text = sourceFile.getFullText();
+  const importRe = new RegExp(
+    `import\\s+${escapeRegExp(sym)}\\s+from\\s+(['"])next/image\\1`,
+    'g',
+  );
+  if (!text.match(importRe)) return false;
+  importRe.lastIndex = 0;
+  let next = text.replace(importRe, `import ${alias} from $1next/image$1`);
+  const reSym = escapeRegExp(sym);
+  next = next.replace(new RegExp(`<\\s*\\/\\s*${reSym}\\s*>`, 'gi'), `</${alias}>`);
+  next = next.replace(new RegExp(`<\\s*${reSym}\\s*\\/>`, 'gi'), `<${alias} />`);
+  next = next.replace(new RegExp(`<\\s*${reSym}\\s*>`, 'gi'), `<${alias}>`);
+  next = next.replace(new RegExp(`<\\s*${reSym}\\s+`, 'gi'), `<${alias} `);
+  if (next === text) return false;
+  sourceFile.replaceWithText(next);
+  return true;
+}
+
+/**
+ * TS2459: 모듈 내부 타입이 export 되지 않음 — 해당 파일에 export 추가
+ */
+async function fixMissingTypeExport(projectRoot, importerRelPath, error) {
+  const msg = error.message || '';
+  const modM = /Module\s+['"]([^'"]+)['"]/.exec(msg);
+  const nameM = /declares\s+['"]([^'"]+)['"]\s+locally/i.exec(msg);
+  if (!modM || !nameM) return false;
+  const modSpec = modM[1];
+  const typeName = nameM[1];
+  const targetAbs = resolveImportSpecifierToAbsPath(projectRoot, importerRelPath, modSpec);
+  if (!targetAbs) return false;
+
+  const proj = new Project({ skipAddingFilesFromTsConfig: true });
+  let targetSf;
+  try {
+    targetSf = proj.addSourceFileAtPath(targetAbs);
+  } catch {
+    return false;
+  }
+
+  let touched = false;
+  for (const node of targetSf.getInterfaces()) {
+    if (node.getName() === typeName && !node.isExported()) {
+      node.setIsExported(true);
+      touched = true;
+      break;
+    }
+  }
+  if (!touched) {
+    for (const node of targetSf.getTypeAliases()) {
+      if (node.getName() === typeName && !node.isExported()) {
+        node.setIsExported(true);
+        touched = true;
+        break;
+      }
+    }
+  }
+  if (!touched) {
+    for (const node of targetSf.getEnums()) {
+      if (node.getName() === typeName && !node.isExported()) {
+        node.setIsExported(true);
+        touched = true;
+        break;
+      }
+    }
+  }
+  if (!touched) return false;
+  try {
+    await targetSf.save();
+  } catch {
+    return false;
+  }
+  return true;
+}
+
 // ---- 파일/배치 진입점 -----------------------------------------------------
 
 /**
@@ -341,6 +564,18 @@ async function autofixSingleFile(projectRoot, relPath, fileErrors) {
     return { fixed: 0, applied: [] };
   }
 
+  let bulk = 0;
+  const wantsBulk = fileErrors.some((e) => APP_ROUTER_BULK_CODES.has(e.code));
+  const wantsStandard = fileErrors.some((e) => AUTOFIXABLE_CODES.has(e.code));
+  const wantsModule = fileErrors.some((e) => e.code === MODULE_NOT_FOUND_CODE);
+  if ((wantsBulk || wantsStandard || wantsModule) && /\.(tsx|ts)$/.test(relPath)) {
+    try {
+      bulk = applyAppRouterFixes(sourceFile, projectRoot, relPath);
+    } catch {
+      bulk = 0;
+    }
+  }
+
   // 라인/컬럼 내림차순으로 처리해 노드 위치 변동 영향을 줄인다.
   const sorted = [...fileErrors].sort(
     (a, b) => b.line - a.line || b.column - a.column,
@@ -356,8 +591,18 @@ async function autofixSingleFile(projectRoot, relPath, fileErrors) {
         ok = fixUnusedDeclaration(sourceFile, err);
       } else if (err.code === UNUSED_ALL_IMPORTS_CODE) {
         ok = fixUnusedAllImports(sourceFile, err);
-      } else if (err.code === CANNOT_FIND_CODE) {
+      } else if (err.code === CANNOT_FIND_CODE || err.code === CANNOT_FIND_SUGGESTED_CODE) {
         ok = fixCannotFindName(sourceFile, err);
+      } else if (err.code === JSX_NULL_INTRINSIC_CODE) {
+        ok = fixJsxNullIntrinsic(sourceFile, err);
+      } else if (err.code === MODULE_NOT_FOUND_CODE) {
+        ok = fixCannotFindModule(sourceFile, err, projectRoot, relPath);
+      } else if (err.code === NO_EXPORTED_MEMBER_CODE) {
+        ok = fixDefaultImportMember(sourceFile, err);
+      } else if (err.code === IMPORT_CONFLICT_CODE) {
+        ok = fixNextDefaultImportNameConflict(sourceFile, err);
+      } else if (err.code === MISSING_EXPORT_CODE) {
+        ok = await fixMissingTypeExport(projectRoot, relPath, err);
       }
     } catch {
       ok = false;
@@ -367,6 +612,8 @@ async function autofixSingleFile(projectRoot, relPath, fileErrors) {
       applied.push({ code: err.code, line: err.line, column: err.column });
     }
   }
+
+  fixed += bulk;
 
   if (fixed > 0) {
     try {
@@ -387,7 +634,7 @@ async function autofixSingleFile(projectRoot, relPath, fileErrors) {
  */
 async function autofixErrors(projectRoot, errors) {
   const filtered = (Array.isArray(errors) ? errors : []).filter((e) =>
-    AUTOFIXABLE_CODES.has(e.code),
+    FILE_PASS_CODES.has(e.code),
   );
 
   const byFile = new Map();
@@ -419,6 +666,8 @@ module.exports = {
   autofixErrors,
   autofixSingleFile,
   AUTOFIXABLE_CODES,
+  FILE_PASS_CODES,
+  MODULE_NOT_FOUND_CODE,
   STANDARD_IDENT_IMPORT,
   isSafeImportSource,
 };

@@ -3,6 +3,66 @@ const path = require('path');
 const { generateText, getNextifyScopeRules } = require('./gemini-client.cjs');
 const { sweepAfterAiApply } = require('./post-ai-sweep.cjs');
 
+let _ts = null;
+function getTs() {
+  if (_ts) return _ts;
+  try {
+    _ts = require('typescript');
+  } catch {
+    _ts = null;
+  }
+  return _ts;
+}
+
+/**
+ * 파일 확장자에 맞는 ScriptKind 를 고른다.
+ * @param {string} relPath
+ */
+function pickScriptKind(ts, relPath) {
+  const ext = path.extname(relPath).toLowerCase();
+  switch (ext) {
+    case '.tsx':
+      return ts.ScriptKind.TSX;
+    case '.ts':
+      return ts.ScriptKind.TS;
+    case '.jsx':
+      return ts.ScriptKind.JSX;
+    case '.js':
+    case '.mjs':
+    case '.cjs':
+      return ts.ScriptKind.JS;
+    default:
+      return ts.ScriptKind.Unknown;
+  }
+}
+
+/**
+ * 단일 파일 내용에 대한 syntax 진단 개수.
+ * 파싱 자체가 불가하면 Number.POSITIVE_INFINITY 를 반환한다.
+ * @param {string} relPath
+ * @param {string} content
+ * @returns {number}
+ */
+function countSyntaxDiagnostics(relPath, content) {
+  const ts = getTs();
+  if (!ts) return 0;
+  try {
+    const kind = pickScriptKind(ts, relPath);
+    if (kind === ts.ScriptKind.Unknown) return 0;
+    const sf = ts.createSourceFile(
+      relPath,
+      content,
+      ts.ScriptTarget.Latest,
+      false,
+      kind,
+    );
+    const diags = sf.parseDiagnostics || [];
+    return diags.length;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
 /** @param {string} p */
 function normRelKey(p) {
   return path.normalize(p.trim()).split(path.sep).join('/');
@@ -59,6 +119,67 @@ function extractFirstJsonObjectText(text) {
 }
 
 /**
+ * JSON 문자열 안의 잘못된 이스케이프 시퀀스를 복구한다.
+ * Gemini 가 TypeScript/JS 소스(정규식 \w, \d, \s 등)를 content 값에 넣을 때
+ * JSON 표준상 유효하지 않은 \X 형태를 그대로 출력해 JSON.parse 가 터지는 경우를 처리.
+ * 유효한 이스케이프(" \ / b f n r t u)는 건드리지 않는다.
+ * @param {string} t
+ * @returns {string}
+ */
+function repairJsonEscapes(t) {
+  // JSON 문자열 토큰 바깥은 건드리지 않고, 문자열 값 내부만 수정한다.
+  // 접근: 전체 텍스트를 한 글자씩 읽어 문자열 컨텍스트 내부에서만 치환.
+  let result = '';
+  let inString = false;
+  let i = 0;
+  const VALID_ESCAPES = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u']);
+  while (i < t.length) {
+    const ch = t[i];
+    if (!inString) {
+      if (ch === '"') inString = true;
+      result += ch;
+      i++;
+    } else {
+      if (ch === '\\') {
+        const next = t[i + 1];
+        if (next === undefined) {
+          result += ch;
+          i++;
+        } else if (VALID_ESCAPES.has(next)) {
+          // 유효한 이스케이프 — 그대로 통과
+          result += ch + next;
+          i += 2;
+          // \uXXXX — 4자리 헥스까지 소비
+          if (next === 'u') {
+            const hex = t.slice(i, i + 4);
+            result += hex;
+            i += 4;
+          }
+        } else {
+          // 유효하지 않은 이스케이프 → \\ 로 교체
+          result += '\\\\';
+          i++;
+        }
+      } else if (ch === '"') {
+        inString = false;
+        result += ch;
+        i++;
+      } else {
+        // JSON 문자열 안의 raw 제어문자(0x00–0x1f)를 unicode 이스케이프로
+        const code = ch.charCodeAt(0);
+        if (code < 0x20) {
+          result += `\\u${code.toString(16).padStart(4, '0')}`;
+        } else {
+          result += ch;
+        }
+        i++;
+      }
+    }
+  }
+  return result;
+}
+
+/**
  * 모델 응답 한 항목을 디스크 적용용 형식 `{ path, content }` 로 정규화합니다.
  *
  * 두 형식을 모두 지원합니다 (모델이 둘 중 하나를 선택):
@@ -104,7 +225,13 @@ function normalizePatchEntry(entry) {
  */
 function parseApplyJson(raw) {
   const t = extractFirstJsonObjectText(raw);
-  const data = JSON.parse(t);
+  let data;
+  try {
+    data = JSON.parse(t);
+  } catch {
+    // 잘못된 이스케이프(\w, \d, \s 등 정규식 이스케이프)를 복구 후 재시도
+    data = JSON.parse(repairJsonEscapes(t));
+  }
   if (!data || !Array.isArray(data.files)) {
     throw new Error('JSON 형식 오류: { "files": [ { "path", "content"|"contentB64" } ] } 가 필요합니다.');
   }
@@ -196,10 +323,11 @@ function matchAllowedPath(aiPath, allowedRelPaths) {
  * @param {string} projectRoot
  * @param {{ path: string, content: string }[]} filesFromAi
  * @param {string[]} allowedRelPaths
- * @returns {Promise<string[]>} 실제로 디스크에 쓰인 상대 경로 목록
+ * @returns {Promise<{ written: string[], rejected: { path: string, reason: string, before: number, after: number }[], skipped: string[] }>}
  */
 async function applyAiFilesToDisk(projectRoot, filesFromAi, allowedRelPaths) {
   const written = [];
+  const rejected = [];
   const skipped = [];
   for (const f of filesFromAi) {
     const rel = matchAllowedPath(f.path, allowedRelPaths);
@@ -211,17 +339,43 @@ async function applyAiFilesToDisk(projectRoot, filesFromAi, allowedRelPaths) {
     if (!isPathInsideProject(projectRoot, abs)) {
       throw new Error(`경로 검증 실패: ${rel}`);
     }
+
+    // ── 안전망: AI 가 새로 보낸 전체 파일 콘텐츠가 *기존 파일보다*
+    //    syntax 진단을 더 많이 만들면 적용을 거부한다.
+    //    (전체 파일 재작성이 schema 라 작은 영역만 고치겠다며
+    //     멀쩡하던 JSX 짝맞춤을 망가뜨리는 사고를 막기 위함.)
+    let beforeDiag = 0;
+    try {
+      if (await fs.pathExists(abs)) {
+        const prev = await fs.readFile(abs, 'utf8');
+        beforeDiag = countSyntaxDiagnostics(rel, prev);
+      }
+    } catch {
+      beforeDiag = 0;
+    }
+    const afterDiag = countSyntaxDiagnostics(rel, f.content);
+    if (afterDiag > beforeDiag) {
+      rejected.push({
+        path: rel,
+        reason: 'syntax_regression',
+        before: beforeDiag,
+        after: afterDiag,
+      });
+      continue;
+    }
+
     await fs.ensureDir(path.dirname(abs));
     await fs.writeFile(abs, f.content, 'utf8');
     written.push(rel);
   }
   if (skipped.length > 0) {
+    // eslint-disable-next-line no-console
     console.warn(
       `\n⚠️  Gemini 응답에 화이트리스트 외 ${skipped.length}개 path가 포함되어 있어 건너뜁니다 (정상 path는 그대로 적용됨):`,
     );
     for (const s of skipped) console.warn(`   - ${s}`);
   }
-  return written;
+  return { written, rejected, skipped };
 }
 
 // Gemini 2.5 Pro/Flash 의 응답 토큰 상한. 1.5 계열 모델은 내부적으로 8k 로 cap 되지만
@@ -365,8 +519,18 @@ async function applyWithAutoBatching({
     try {
       const patches = await requestPatchesForBatch({ question, context, batch });
       if (patches.length > 0) {
-        const w = await applyAiFilesToDisk(projectRoot, patches, allowedRelPaths);
+        const { written: w, rejected } = await applyAiFilesToDisk(projectRoot, patches, allowedRelPaths);
         written.push(...w);
+        if (rejected.length > 0) {
+          // eslint-disable-next-line no-console
+          console.log(
+            `   🛡️  AI 패치 ${rejected.length}건을 syntax 회귀로 거부 (디스크는 원본 유지):`,
+          );
+          for (const r of rejected) {
+            // eslint-disable-next-line no-console
+            console.log(`      - ${r.path} (syntax diag ${r.before} → ${r.after})`);
+          }
+        }
       }
     } catch (e) {
       if (e && e.code === 'BATCH_NEEDS_SPLIT' && batch.length > 1) {

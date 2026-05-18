@@ -3,12 +3,16 @@ const path = require('path');
 const net = require('net');
 const chalk = require('chalk');
 const os = require('os');
+const { spawnSync } = require('child_process');
 
-const { detectPackageManager } = require('../utils/project-info.cjs');
-const { runCommand, startCommand } = require('../utils/exec.cjs');
+const { resolvePackageManagerCommand } = require('../utils/project-info.cjs');
+const { runCommand, startCommand, attachOutputCapture } = require('../utils/exec.cjs');
 const { cloneProject } = require('../utils/copy.cjs');
 
-const DEFAULT_LIGHTHOUSE_RUNS = 5;
+const CLI_PKG = require('../../package.json');
+const REVIEW_ROOT_DIR = '.ai-migration';
+
+const DEFAULT_LIGHTHOUSE_RUNS = 3;
 const DEFAULT_LIGHTHOUSE_WARMUP_RUNS = 1;
 
 // 마이그레이션 도구(app/) 루트. 이 파일은 app/src/step7/performance-report.cjs 이므로 두 단계 위가 app/.
@@ -63,23 +67,16 @@ async function chromeLauncherPackageInstalled() {
  * 실패하면 사용자에게 수동 안내 메시지를 던집니다.
  */
 async function tryAutoInstallMigratorDeps() {
-  const pm = detectPackageManager(MIGRATOR_APP_ROOT) || 'npm';
+  const runtime = resolvePackageManagerCommand(MIGRATOR_APP_ROOT);
+  const pm = runtime.pm || 'npm';
   console.log(
     chalk.yellow(
       `\n⚠️  Lighthouse 측정을 위한 의존성(lighthouse, chrome-launcher)을 찾지 못했습니다.\n` +
-        `   ${MIGRATOR_APP_ROOT} 에서 ${pm} install 을 자동 실행합니다...`
+        `   ${MIGRATOR_APP_ROOT} 에서 ${runtime.displayInstall} 을 자동 실행합니다...`
     )
   );
   try {
-    if (pm === 'yarn') {
-      await runCommand('yarn', ['install'], { cwd: MIGRATOR_APP_ROOT });
-    } else if (pm === 'pnpm') {
-      await runCommand('pnpm', ['install'], { cwd: MIGRATOR_APP_ROOT });
-    } else if (pm === 'bun') {
-      await runCommand('bun', ['install'], { cwd: MIGRATOR_APP_ROOT });
-    } else {
-      await runCommand('npm', ['install'], { cwd: MIGRATOR_APP_ROOT });
-    }
+    await runCommand(runtime.cmd, [...runtime.argsPrefix, 'install'], { cwd: MIGRATOR_APP_ROOT });
     console.log(chalk.green('   ✔ 자동 설치 완료. 다시 시도합니다.\n'));
     return true;
   } catch (installErr) {
@@ -87,7 +84,7 @@ async function tryAutoInstallMigratorDeps() {
       `Lighthouse 의존성 자동 설치에 실패했습니다.\n` +
         `다음 명령을 직접 실행한 뒤 다시 시도하세요.\n` +
         `  cd "${MIGRATOR_APP_ROOT}"\n` +
-        `  ${pm} install\n` +
+        `  ${runtime.displayInstall}\n` +
         `(Windows PowerShell에서는 경로에 공백이 있어도 따옴표로 감싸세요)\n` +
         `자동 설치 오류: ${installErr.message}`
     );
@@ -248,7 +245,17 @@ async function getFreePort(preferred = 4173) {
   throw new Error('사용 가능한 포트를 찾지 못했습니다.');
 }
 
-async function waitForHttpReady(url, timeoutMs = 120_000) {
+async function waitForHttpReady(url, options = {}) {
+  // 기존 시그니처 호환 (두 번째 인자가 number 인 경우 timeoutMs 로 해석).
+  let timeoutMs = 120_000;
+  let child = null;
+  if (typeof options === 'number') {
+    timeoutMs = options;
+  } else if (options && typeof options === 'object') {
+    if (typeof options.timeoutMs === 'number') timeoutMs = options.timeoutMs;
+    if (options.child) child = options.child;
+  }
+
   const start = Date.now();
   // Node 18+ has fetch; Node 16 might not. Use http module fallback.
   const http = require('http');
@@ -271,6 +278,19 @@ async function waitForHttpReady(url, timeoutMs = 120_000) {
   }
 
   while (Date.now() - start < timeoutMs) {
+    // child 가 조기 종료한 경우 즉시 throw — 죽은 서버를 timeoutMs 동안 헛으로 폴링하지 않게 한다.
+    if (child && (child.exitCode != null || child.signalCode)) {
+      const err = new Error(
+        child.signalCode
+          ? `서버 프로세스가 시그널 ${child.signalCode} 로 조기 종료되었습니다 (URL=${url})`
+          : `서버 프로세스가 코드 ${child.exitCode} 로 조기 종료되었습니다 (URL=${url})`,
+      );
+      err.code = 'SERVER_EARLY_EXIT';
+      err.exitCode = child.exitCode;
+      err.signalCode = child.signalCode;
+      throw err;
+    }
+
     try {
       for (const candidateUrl of candidates) {
         // eslint-disable-next-line no-await-in-loop
@@ -294,7 +314,71 @@ async function waitForHttpReady(url, timeoutMs = 120_000) {
     // eslint-disable-next-line no-await-in-loop
     await new Promise((r) => setTimeout(r, 1500));
   }
-  throw new Error(`서버 준비 대기 시간 초과: ${url}`);
+  const err = new Error(`서버 준비 대기 시간 초과: ${url}`);
+  err.code = 'SERVER_TIMEOUT';
+  throw err;
+}
+
+/**
+ * 서버 기동 실패(timeout 또는 조기 종료) 시 사용자에게 보여줄 친절 에러 메시지를 합성.
+ * - 캡처된 child 의 마지막 출력을 함께 첨부 (가장 큰 진단 가치).
+ * - OS 별 수동 점검 명령을 분기.
+ * - 마이그레이션 결과물은 보존된다는 점을 명시.
+ */
+function buildHelpfulServerError(originalErr, info) {
+  const { url, port, projectRoot, recentOutput, label, kind } = info;
+  const code = originalErr?.code;
+  const isTimeout = code === 'SERVER_TIMEOUT' || /시간 초과/.test(originalErr?.message || '');
+  const isEarlyExit =
+    code === 'SERVER_EARLY_EXIT' || /조기 종료/.test(originalErr?.message || '');
+
+  const lines = [];
+  lines.push(`[${label}] ${originalErr?.message || originalErr}`);
+  lines.push('');
+  lines.push('가능한 원인:');
+  if (isEarlyExit) {
+    lines.push('  - 서버 프로세스가 즉시 비정상 종료 (가장 흔한 원인)');
+    lines.push('    · 빌드 산출물 누락/손상 (.next 또는 dist 폴더)');
+    lines.push('    · package.json scripts.start / preview 가 잘못된 명령');
+    lines.push('    · node_modules 손상 / 의존성 미설치');
+  }
+  if (isTimeout) {
+    lines.push('  - 서버는 시작했으나 ready 상태에 도달 못 함');
+    lines.push('    · 저사양 머신에서 첫 응답이 매우 느린 경우 (120s 초과)');
+    lines.push(`    · 서버가 다른 포트로 fallback 떠서 폴링 (${url}) 과 어긋남`);
+    lines.push('    · 백신/방화벽이 localhost binding 을 차단');
+  }
+  lines.push(`  - 포트 ${port} 점유 race (free port 확정 직후 다른 프로세스가 점유)`);
+  lines.push('');
+  lines.push('[서버 마지막 출력]');
+  if (recentOutput && recentOutput.trim().length > 0) {
+    lines.push(recentOutput);
+  } else {
+    lines.push('(없음 — 서버가 stdout/stderr 에 아무것도 출력하지 않았습니다)');
+  }
+  lines.push('');
+  lines.push('수동 점검 가이드:');
+  lines.push(`  cd "${projectRoot}"`);
+  lines.push('  npm install         # node_modules 누락이면');
+  if (kind === 'vite') {
+    lines.push('  npm run build       # dist 산출물 다시');
+    lines.push(`  npx vite preview --port ${port} --strictPort   # 직접 실행해 에러 확인`);
+  } else {
+    lines.push('  npm run build       # .next 산출물 다시');
+    lines.push(`  npx next start -p ${port}    # 직접 실행해 에러 확인`);
+  }
+  if (process.platform === 'win32') {
+    lines.push(`  netstat -ano | findstr :${port}    # 포트 점유 확인`);
+  } else {
+    lines.push(`  lsof -iTCP:${port} -sTCP:LISTEN     # 포트 점유 확인`);
+  }
+  lines.push('');
+  lines.push('마이그레이션 결과물은 그대로 보존됩니다. 위 명령으로 직접 원인을 확인 후 다시 시도하세요.');
+
+  const finalErr = new Error(lines.join('\n'));
+  finalErr.cause = originalErr;
+  finalErr.code = code || 'SERVER_BOOT_FAILED';
+  return finalErr;
 }
 
 async function directorySizeBytes(dirPath) {
@@ -331,11 +415,26 @@ async function readPackageJson(projectRoot) {
   return fs.readJson(pkgPath);
 }
 
-function getPmRunCommand(pm) {
-  if (pm === 'yarn') return { cmd: 'yarn', run: (script) => ['run', script] };
-  if (pm === 'pnpm') return { cmd: 'pnpm', run: (script) => ['run', script] };
-  if (pm === 'bun') return { cmd: 'bun', run: (script) => ['run', script] };
-  return { cmd: 'npm', run: (script) => ['run', script] };
+async function hasCustomWebpackConfig(projectRoot) {
+  const candidates = ['next.config.js', 'next.config.cjs', 'next.config.mjs', 'next.config.ts'];
+  for (const name of candidates) {
+    const p = path.join(projectRoot, name);
+    if (!(await fs.pathExists(p))) continue;
+    try {
+      const raw = await fs.readFile(p, 'utf8');
+      // next config 내 webpack 커스터마이징 흔적만 잡는다.
+      if (/\bwebpack\s*[:(]/.test(raw)) return true;
+    } catch {
+      // ignore
+    }
+  }
+  return false;
+}
+
+function getPmRuntime(projectRoot) {
+  const runtime = resolvePackageManagerCommand(projectRoot);
+  const run = (script) => [...runtime.argsPrefix, 'run', script];
+  return { ...runtime, run };
 }
 
 async function ensureDependenciesInstalled(projectRoot) {
@@ -343,33 +442,44 @@ async function ensureDependenciesInstalled(projectRoot) {
   if (await fs.pathExists(nodeModulesPath)) return;
 
   console.log(chalk.gray(`    → 의존성을 설치하는 중…`));
-
-  const pm = detectPackageManager(projectRoot);
-  if (pm === 'yarn') {
-    await runCommand('yarn', ['install'], { cwd: projectRoot, stdio: 'pipe' });
-    return;
-  }
-  if (pm === 'pnpm') {
-    await runCommand('pnpm', ['install'], { cwd: projectRoot, stdio: 'pipe' });
-    return;
-  }
-  if (pm === 'bun') {
-    await runCommand('bun', ['install'], { cwd: projectRoot, stdio: 'pipe' });
-    return;
-  }
-  await runCommand('npm', ['install'], { cwd: projectRoot, stdio: 'pipe' });
+  const runtime = resolvePackageManagerCommand(projectRoot);
+  await runCommand(runtime.cmd, [...runtime.argsPrefix, 'install'], { cwd: projectRoot });
 }
 
 async function runBuild(projectRoot, kind) {
   await ensureDependenciesInstalled(projectRoot);
-  const pm = detectPackageManager(projectRoot);
-  const { cmd, run } = getPmRunCommand(pm);
+  const runtime = getPmRuntime(projectRoot);
 
   if (kind === 'vite') {
-    await runCommand(cmd, [...run('build')], { cwd: projectRoot, stdio: 'pipe' });
+    await runCommand(runtime.cmd, runtime.run('build'), { cwd: projectRoot });
     return;
   }
-  await runCommand(cmd, [...run('build')], { cwd: projectRoot, stdio: 'pipe' });
+  // Next 16+ 에서 webpack 커스터마이징이 있으면 Turbopack 기본 빌드가 즉시 실패한다.
+  // 성능 측정용 빌드는 시작부터 webpack 모드로 강제해 불필요한 실패 로그를 줄인다.
+  if (await hasCustomWebpackConfig(projectRoot)) {
+    await runCommand(runtime.cmd, [...runtime.run('build'), '--webpack'], {
+      cwd: projectRoot,
+    });
+    return;
+  }
+  try {
+    await runCommand(runtime.cmd, runtime.run('build'), { cwd: projectRoot });
+  } catch (err) {
+    const msg = String(err?.message || err || '');
+    const turbopackWebpackConflict =
+      /using Turbopack, with a [`'"]webpack[`'"] config and no [`'"]turbopack[`'"] config/i.test(msg) ||
+      /As of Next\.js 16 Turbopack is enabled by default/i.test(msg);
+    if (!turbopackWebpackConflict) throw err;
+
+    console.log(
+      chalk.yellow(
+        '⚠️  Next.js 16 Turbopack/webpack 충돌 감지: 성능 측정을 위해 `next build --webpack`으로 1회 재시도합니다.',
+      ),
+    );
+    await runCommand(runtime.cmd, [...runtime.run('build'), '--webpack'], {
+      cwd: projectRoot,
+    });
+  }
 }
 
 /**
@@ -391,56 +501,64 @@ function drainChildStdio(child) {
 
 async function startServer(projectRoot, kind, port) {
   await ensureDependenciesInstalled(projectRoot);
-  const pm = detectPackageManager(projectRoot);
-  const { cmd, run } = getPmRunCommand(pm);
+  const runtime = getPmRuntime(projectRoot);
+  const pm = runtime.pm;
 
   const pkg = await readPackageJson(projectRoot);
   const scripts = pkg.scripts || {};
+
+  // 호스트/포트를 env 로 함께 강제: 일부 PM/OS 에서 `-p` 인자가 next 까지 도달하지 않는 케이스가 있어
+  // PORT 환경변수와 -p 인자 두 경로를 같이 줘서 일치를 보장. HOSTNAME=127.0.0.1 로 고정해
+  // Windows IPv6 우선/0.0.0.0 binding 미스매치도 방지한다.
+  const childEnv = {
+    ...process.env,
+    PORT: String(port),
+    HOSTNAME: '127.0.0.1',
+  };
+
+  // PORT 환경변수만으로 포트를 제어.
+  // yarn berry(2+)는 `-p` 인자를 자신의 --project 옵션으로 가로채서 실패하고,
+  // PM 별 `--` 전달 방식도 달라 환경변수가 가장 안전하다. (develop 브랜치 개선 반영)
+  const childEnvNext = { ...childEnv };   // childEnv 에 이미 PORT/HOSTNAME 이 있음
+
+  let child;
 
   if (kind === 'vite') {
     if (scripts.preview) {
       const args =
         pm === 'yarn'
-          ? [...run('preview'), '--port', String(port), '--strictPort']
-          : [...run('preview'), '--', '--port', String(port), '--strictPort'];
-      const child = startCommand(cmd, args, { cwd: projectRoot, stdio: 'pipe' });
-      drainChildStdio(child);
-      return child;
+          ? [...runtime.run('preview'), '--port', String(port), '--strictPort']
+          : [...runtime.run('preview'), '--', '--port', String(port), '--strictPort'];
+      child = startCommand(runtime.cmd, args, { cwd: projectRoot, stdio: 'pipe', env: childEnv });
+    } else {
+      // fallback: try npx vite preview
+      child = startCommand(
+        'npx',
+        ['vite', 'preview', '--port', String(port), '--strictPort'],
+        { cwd: projectRoot, stdio: 'pipe', env: childEnv },
+      );
     }
-    // fallback: try npx vite preview
-    const child = startCommand(
-      'npx',
-      ['vite', 'preview', '--port', String(port), '--strictPort'],
-      { cwd: projectRoot, stdio: 'pipe' }
-    );
-    drainChildStdio(child);
-    return child;
-  }
-
-  // next start: -p 플래그를 패키지 매니저로 넘기지 않고 PORT 환경 변수로 전달합니다.
-  // 이유:
-  //  - yarn berry(2+)는 `-p` 를 자기 자신의 `--project` 옵션으로 가로채서
-  //    `yarn run start -- -p 3000` 호출 시 "Invalid project directory ...\\-p" 에러로 실패합니다.
-  //    (Windows + cmd.exe 환경에서 재현. PowerShell에서 손으로 입력하면 동작해 헷갈리기 쉽습니다.)
-  //  - npm 은 `--` 를, yarn 은 `--` 가 필요 없는 등 패키지 매니저별 인자 전달 방식이 달라
-  //    플래그 충돌을 피하려면 환경 변수가 가장 안전합니다.
-  // Next.js 는 PORT 환경 변수를 기본 지원합니다 (next start 문서 참고).
-  const nextEnv = { ...process.env, PORT: String(port) };
-  if (scripts.start) {
-    const child = startCommand(cmd, [...run('start')], {
+  } else if (scripts.start) {
+    // next start: -p 인자 없이 PORT 환경변수만 사용 (yarn berry 대응)
+    child = startCommand(runtime.cmd, [...runtime.run('start')], {
       cwd: projectRoot,
       stdio: 'pipe',
-      env: nextEnv,
+      env: childEnvNext,
     });
-    drainChildStdio(child);
-    return child;
+  } else {
+    child = startCommand('npx', ['next', 'start'], {
+      cwd: projectRoot,
+      stdio: 'pipe',
+      env: childEnvNext,
+    });
   }
-  const child = startCommand('npx', ['next', 'start'], {
-    cwd: projectRoot,
-    stdio: 'pipe',
-    env: nextEnv,
-  });
-  drainChildStdio(child);
+
+  // stdout/stderr 캡처 부착:
+  //   1) 'pipe' 로 띄워두고 호출자가 한 번도 읽지 않으면 OS 파이프 버퍼가 가득 차서 child 가
+  //      writev() 에서 멈출 수 있다 — 우리 케이스의 가장 의심스러운 hang 원인.
+  //   2) 사고(timeout/조기 종료) 시 마지막 출력을 사용자에게 그대로 보여줘 진단을 가능하게 한다.
+  child.__capture = attachOutputCapture(child, { maxLines: 80 });
+
   return child;
 }
 
@@ -670,7 +788,20 @@ async function measureTarget({ label, projectRoot, kind, lighthouseRuns, warmupR
   const server = await startServer(projectRoot, kind, port);
 
   try {
-    await waitForHttpReady(url);
+    try {
+      // child 핸들을 함께 넘겨 조기 종료 시 즉시 빠져나가게 한다 (헛 폴링 회피).
+      await waitForHttpReady(url, { child: server });
+    } catch (waitErr) {
+      const recent = server?.__capture?.getRecent?.(60) || '';
+      throw buildHelpfulServerError(waitErr, {
+        url,
+        port,
+        projectRoot,
+        recentOutput: recent,
+        label,
+        kind,
+      });
+    }
     const lighthouseResult = await runLighthouseSeries(url, {
       runs: lighthouseRuns,
       warmupRuns,
@@ -767,7 +898,481 @@ function renderTargetDetail(target) {
 `;
 }
 
-function renderMarkdownReport({ targets, failures }) {
+// ---------------------------------------------------------------------------
+// 변경 통계 / 헤더 / 단계 요약 헬퍼들
+// ---------------------------------------------------------------------------
+
+function safeReadJsonSync(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    return fs.readJsonSync(filePath);
+  } catch {
+    return null;
+  }
+}
+
+function getGitShortHash(cwd) {
+  try {
+    const r = spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
+      cwd,
+      stdio: 'pipe',
+      encoding: 'utf-8',
+      shell: false,
+      windowsHide: true,
+      timeout: 3000,
+    });
+    if (!r.error && r.status === 0) {
+      const out = String(r.stdout || '').trim();
+      return out || null;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function detectNpmVersion() {
+  try {
+    const cmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const r = spawnSync(cmd, ['--version'], {
+      stdio: 'pipe',
+      encoding: 'utf-8',
+      shell: false,
+      windowsHide: true,
+      timeout: 3000,
+    });
+    if (!r.error && r.status === 0) {
+      const out = String(r.stdout || '').trim();
+      return out || null;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function describeOs() {
+  const platform = process.platform;
+  const release = os.release();
+  if (platform === 'win32') {
+    // Node 가 보는 release 는 NT 버전(10.0.x). 그대로 보여줌.
+    return `Windows ${release}`;
+  }
+  if (platform === 'darwin') return `macOS ${release}`;
+  if (platform === 'linux') return `Linux ${release}`;
+  return `${platform} ${release}`;
+}
+
+function formatDurationMs(ms) {
+  if (!Number.isFinite(ms) || ms < 1000) return null;
+  const totalSec = Math.round(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  if (m <= 0) return `${s}초`;
+  return `${m}분 ${String(s).padStart(2, '0')}초`;
+}
+
+function formatLocalIsoLike(date) {
+  // 사용자가 예시로 준 형식: YYYY-MM-DDTHH:MM:SS+09:00 (로컬 타임존)
+  const pad = (n) => String(Math.abs(n)).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  const mm = pad(date.getMonth() + 1);
+  const dd = pad(date.getDate());
+  const hh = pad(date.getHours());
+  const mi = pad(date.getMinutes());
+  const ss = pad(date.getSeconds());
+  const tzMin = -date.getTimezoneOffset();
+  const sign = tzMin >= 0 ? '+' : '-';
+  const tzh = pad(Math.floor(Math.abs(tzMin) / 60));
+  const tzm = pad(Math.abs(tzMin) % 60);
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}${sign}${tzh}:${tzm}`;
+}
+
+function buildReportHeader({ now, toolVersion, toolCommit, project, elapsedMs }) {
+  const nodeV = process.version;
+  const npmV = detectNpmVersion();
+  const osLabel = describeOs();
+  const elapsedLabel = formatDurationMs(elapsedMs);
+
+  const lines = [];
+  lines.push(`생성 시각: ${formatLocalIsoLike(now)}`);
+  lines.push(
+    `도구 버전: nextify-cli ${toolVersion}${toolCommit ? ` (commit ${toolCommit})` : ''}`,
+  );
+  if (project && project.name) {
+    lines.push(
+      `대상 프로젝트: ${project.name}${project.commit ? ` (commit ${project.commit})` : ''}`,
+    );
+  }
+  const envParts = [`Node ${nodeV}`];
+  if (npmV) envParts.push(`npm ${npmV}`);
+  envParts.push(osLabel);
+  lines.push(`실행 환경: ${envParts.join(' / ')}`);
+  if (elapsedLabel) {
+    lines.push(`총 실행 시간: ${elapsedLabel}`);
+  }
+  return lines.join('  \n');
+}
+
+const STEP_DESCRIPTIONS = [
+  { step: 1, title: 'Vite 환경 → Next 환경 (설정/스크립트/엔트리)' },
+  { step: 2, title: '라우팅 구조 변환 (React Router → App Router)' },
+  { step: 3, title: '라우팅 페이지 변환 (page.tsx/layout.tsx 생성)' },
+  { step: 4, title: '스타일/리소스/공개 자산 이전' },
+  { step: 5, title: "'use client' 처리 · Zustand 등 전역 상태 마이그레이션" },
+  { step: 6, title: '환경 변수 / 의존성 검토 가이드' },
+  { step: 7, title: 'next/image · next/font · 동적 import · 타입 보정' },
+];
+
+function renderStepsSummaryTable({ finalStepNumber }) {
+  const lines = [];
+  lines.push('| Step | 내용 | 결과 |');
+  lines.push('|------|------|------|');
+  for (const s of STEP_DESCRIPTIONS) {
+    let status;
+    if (finalStepNumber == null) {
+      status = '✅ Pass';
+    } else if (s.step <= finalStepNumber) {
+      status = '✅ Pass';
+    } else {
+      status = '⏭️ Skipped';
+    }
+    lines.push(`| Step ${s.step} | ${s.title} | ${status} |`);
+  }
+  return lines.join('\n');
+}
+
+function categorizeFile(relPath) {
+  if (!relPath) return null;
+  const p = String(relPath).replace(/\\/g, '/').toLowerCase();
+  const base = p.split('/').pop() || '';
+
+  // Config (먼저 검사 — config 파일이 styles/utils 분류와 충돌 안 하도록)
+  if (
+    base.startsWith('next.config.') ||
+    base.startsWith('tsconfig') ||
+    base === 'package.json' ||
+    base === 'package-lock.json' ||
+    base === '.eslintrc' || base.startsWith('.eslintrc.') ||
+    base === '.prettierrc' || base.startsWith('.prettierrc.') ||
+    base === '.gitignore' ||
+    base === 'postcss.config.js' || base === 'postcss.config.mjs' ||
+    base === 'tailwind.config.js' || base === 'tailwind.config.ts' ||
+    base === 'vite.config.ts' || base === 'vite.config.js'
+  ) {
+    return 'config';
+  }
+
+  // Routes (app router)
+  if (
+    p.startsWith('app/') ||
+    p.startsWith('src/app/') ||
+    p.startsWith('pages/') ||
+    p.startsWith('src/pages/')
+  ) {
+    return 'routes';
+  }
+
+  // Styles
+  if (/\.(css|scss|sass|less|styl)$/.test(base)) {
+    return 'styles';
+  }
+
+  // Components
+  if (p.includes('/components/') || p.startsWith('components/')) {
+    return 'components';
+  }
+
+  // Utils / Types
+  if (
+    p.includes('/utils/') || p.startsWith('utils/') ||
+    p.includes('/types/') || p.startsWith('types/') ||
+    p.includes('/lib/') || p.startsWith('lib/') ||
+    p.includes('/hooks/') || p.startsWith('hooks/')
+  ) {
+    return 'utils';
+  }
+
+  return null;
+}
+
+function isClientComponent(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return false;
+    const head = fs.readFileSync(filePath, 'utf-8').slice(0, 512);
+    return /^['"]use client['"];?/m.test(head);
+  } catch {
+    return false;
+  }
+}
+
+function isLikelyComponentFile(relPath) {
+  if (!relPath) return false;
+  const p = String(relPath).replace(/\\/g, '/');
+  if (!/\.(tsx|jsx)$/.test(p)) return false;
+  return true;
+}
+
+function countLines(text) {
+  if (!text) return 0;
+  // 마지막 줄에 개행이 없어도 1 라인으로 카운트.
+  const n = text.split('\n').length;
+  return n;
+}
+
+function looksLikeRouteFile(relPath) {
+  if (!relPath) return false;
+  const p = String(relPath).replace(/\\/g, '/').toLowerCase();
+  const base = p.split('/').pop() || '';
+  if (!(p.startsWith('app/') || p.startsWith('src/app/'))) return false;
+  return (
+    base === 'page.tsx' || base === 'page.jsx' || base === 'page.ts' || base === 'page.js' ||
+    base === 'layout.tsx' || base === 'layout.jsx' ||
+    base === 'route.ts' || base === 'route.js'
+  );
+}
+
+function computeChangeStats(manifest, projectRoot) {
+  const empty = {
+    available: false,
+    created: 0,
+    modified: 0,
+    deleted: 0,
+    renamed: 0,
+    plusLOC: 0,
+    minusLOC: 0,
+    byCategory: {
+      routes: { created: 0, modified: 0, deleted: 0 },
+      components: { created: 0, modified: 0, deleted: 0 },
+      config: { created: 0, modified: 0, deleted: 0 },
+      styles: { created: 0, modified: 0, deleted: 0 },
+      utils: { created: 0, modified: 0, deleted: 0 },
+    },
+    useClientCount: 0,
+    totalComponentCount: 0,
+    newRouteFileCount: 0,
+    totalProjectFiles: null,
+    changedFiles: 0,
+  };
+
+  if (!manifest || !Array.isArray(manifest.changes)) {
+    return empty;
+  }
+
+  const stats = { ...empty, available: true, byCategory: JSON.parse(JSON.stringify(empty.byCategory)) };
+  const seenAfterPaths = new Set();
+
+  for (const change of manifest.changes) {
+    const type = change.type;
+    const rel = change.relativePath || change.afterRelativePath || change.beforeRelativePath || '';
+
+    if (type === 'create') stats.created++;
+    else if (type === 'modify') stats.modified++;
+    else if (type === 'delete') stats.deleted++;
+    else if (type === 'rename' || type === 'move') stats.renamed++;
+
+    // LOC 카운트 (베스트-에포트). before/after 스냅샷이 없으면 스킵.
+    const beforeCandidates = [
+      change.beforeAbsolutePath,
+      change.beforePath,
+      change.beforeSnapshotPath,
+      change.diffBeforePath,
+    ];
+    const afterCandidates = [
+      change.afterAbsolutePath,
+      change.afterPath,
+      change.diffAfterPath,
+    ];
+    let beforeText = '';
+    let afterText = '';
+    for (const p of beforeCandidates) {
+      if (p && fs.existsSync(p)) {
+        try { beforeText = fs.readFileSync(p, 'utf-8'); break; } catch { /* */ }
+      }
+    }
+    for (const p of afterCandidates) {
+      if (p && fs.existsSync(p)) {
+        try { afterText = fs.readFileSync(p, 'utf-8'); break; } catch { /* */ }
+      }
+    }
+
+    const beforeLines = countLines(beforeText);
+    const afterLines = countLines(afterText);
+
+    if (type === 'create') {
+      stats.plusLOC += afterLines;
+    } else if (type === 'delete') {
+      stats.minusLOC += beforeLines;
+    } else if (type === 'modify' || type === 'rename' || type === 'move') {
+      const diff = afterLines - beforeLines;
+      if (diff > 0) stats.plusLOC += diff;
+      else stats.minusLOC += -diff;
+    }
+
+    const cat = categorizeFile(rel);
+    if (cat && stats.byCategory[cat]) {
+      if (type === 'create') stats.byCategory[cat].created++;
+      else if (type === 'modify') stats.byCategory[cat].modified++;
+      else if (type === 'delete') stats.byCategory[cat].deleted++;
+    }
+
+    if (rel && (type === 'create' || type === 'modify')) {
+      seenAfterPaths.add(rel.replace(/\\/g, '/'));
+    }
+    if (type === 'create' && looksLikeRouteFile(rel)) {
+      stats.newRouteFileCount++;
+    }
+  }
+
+  stats.changedFiles = seenAfterPaths.size;
+
+  // use client 카운트 — 프로젝트 루트에서 .tsx/.jsx 컴포넌트 후보를 훑음.
+  if (projectRoot) {
+    try {
+      const scanRoots = [
+        path.join(projectRoot, 'app'),
+        path.join(projectRoot, 'src'),
+        path.join(projectRoot, 'components'),
+      ].filter((p) => fs.existsSync(p));
+
+      const componentFiles = [];
+      const SKIP_DIRS = new Set(['node_modules', '.next', '.git', '__nextify_snapshots', REVIEW_ROOT_DIR, '.nextify', 'dist', 'build']);
+
+      function walk(dir) {
+        let entries;
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        for (const ent of entries) {
+          if (SKIP_DIRS.has(ent.name)) continue;
+          const full = path.join(dir, ent.name);
+          if (ent.isDirectory()) walk(full);
+          else if (ent.isFile() && /\.(tsx|jsx)$/.test(ent.name)) {
+            componentFiles.push(full);
+          }
+        }
+      }
+      for (const r of scanRoots) walk(r);
+
+      stats.totalComponentCount = componentFiles.length;
+      for (const f of componentFiles) {
+        if (isClientComponent(f)) stats.useClientCount++;
+      }
+    } catch {
+      /* ignore */
+    }
+
+    // 전체 프로젝트 파일 수 (대략) — 변경 파일 비율 계산용.
+    try {
+      const SKIP_DIRS = new Set(['node_modules', '.next', '.git', '__nextify_snapshots', REVIEW_ROOT_DIR, '.nextify', 'dist', 'build']);
+      let count = 0;
+      function walkAll(dir) {
+        let entries;
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        for (const ent of entries) {
+          if (SKIP_DIRS.has(ent.name)) continue;
+          const full = path.join(dir, ent.name);
+          if (ent.isDirectory()) walkAll(full);
+          else if (ent.isFile()) count++;
+        }
+      }
+      walkAll(projectRoot);
+      stats.totalProjectFiles = count;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // (silence unused warning)
+  void isLikelyComponentFile;
+
+  return stats;
+}
+
+function findLatestSessionManifest(projectRoot) {
+  // 가장 최근 step 의 session.json 을 찾아 반환. 없으면 null.
+  try {
+    const root = path.join(projectRoot, REVIEW_ROOT_DIR);
+    if (!fs.existsSync(root)) return null;
+    const entries = fs.readdirSync(root, { withFileTypes: true });
+    const stepDirs = entries
+      .filter((e) => e.isDirectory() && /^step\d+$/.test(e.name))
+      .map((e) => ({ name: e.name, num: Number(e.name.replace('step', '')) }))
+      .sort((a, b) => b.num - a.num);
+    for (const sd of stepDirs) {
+      const sessionPath = path.join(root, sd.name, 'session.json');
+      if (fs.existsSync(sessionPath)) {
+        const manifest = safeReadJsonSync(sessionPath);
+        if (manifest) {
+          return { manifest, sessionPath, stepNumber: sd.num };
+        }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function renderChangeStatsTable(stats) {
+  const fmtNum = (n) => Number(n || 0).toLocaleString('en-US');
+  const netFiles = (stats.created || 0) - (stats.deleted || 0);
+  const netSign = netFiles >= 0 ? '+' : '−';
+  return [
+    '| 항목 | 개수 |',
+    '| --- | ---: |',
+    `| Created | ${fmtNum(stats.created)} |`,
+    `| Modified | ${fmtNum(stats.modified)} |`,
+    `| Deleted | ${fmtNum(stats.deleted)} |`,
+    `| Renamed/Moved | ${fmtNum(stats.renamed)} |`,
+    `| +LOC | ${fmtNum(stats.plusLOC)} |`,
+    `| −LOC | ${fmtNum(stats.minusLOC)} |`,
+    `| Net files (Created − Deleted) | ${netSign}${fmtNum(Math.abs(netFiles))} |`,
+  ].join('\n');
+}
+
+function renderCategoryTable(byCategory) {
+  const rows = [
+    { key: 'routes', label: 'Routes (`app/`)' },
+    { key: 'components', label: 'Components' },
+    { key: 'config', label: 'Config (`next.config.*`, `tsconfig.*` 등)' },
+    { key: 'styles', label: 'Styles' },
+    { key: 'utils', label: 'Utils / Types' },
+  ];
+  const lines = ['| 카테고리 | Created | Modified | Deleted |', '| --- | ---: | ---: | ---: |'];
+  for (const r of rows) {
+    const v = byCategory[r.key] || { created: 0, modified: 0, deleted: 0 };
+    lines.push(`| ${r.label} | ${v.created} | ${v.modified} | ${v.deleted} |`);
+  }
+  return lines.join('\n');
+}
+
+function renderAdditionalStats(stats) {
+  const lines = [];
+  if (stats.totalComponentCount > 0 || stats.useClientCount > 0) {
+    lines.push(`> \`use client\` 표시된 컴포넌트: ${stats.useClientCount} / ${stats.totalComponentCount}  `);
+  }
+  if (stats.newRouteFileCount > 0) {
+    lines.push(`> 새로 생성된 라우트 파일: ${stats.newRouteFileCount}  `);
+  }
+  if (stats.totalProjectFiles && stats.changedFiles) {
+    const ratio = (stats.changedFiles / stats.totalProjectFiles) * 100;
+    lines.push(
+      `> 변경 파일 비율: ${stats.changedFiles} / ${stats.totalProjectFiles} (${ratio.toFixed(1)}%)`,
+    );
+  }
+  return lines.join('\n');
+}
+
+function renderMarkdownReport({
+  targets,
+  failures,
+  manifestInfo,
+  changeStats,
+  toolVersion,
+  toolCommit,
+  project,
+  startedAt,
+  now,
+}) {
   const rows = targets.map((t) => pickSummaryRow(t));
   const summaryRows = rows.length
     ? rows
@@ -786,14 +1391,39 @@ function renderMarkdownReport({ targets, failures }) {
           .map((item) => `- ${item.label}: ${item.errorMessage}`)
           .join('\n')
       : '- 없음';
-  const now = new Date().toISOString();
-  const measurementConfig = targets[0]?.lighthouse || {};
-  const measuredRuns = measurementConfig.measuredRuns ?? DEFAULT_LIGHTHOUSE_RUNS;
-  const warmupRuns = measurementConfig.warmups ?? DEFAULT_LIGHTHOUSE_WARMUP_RUNS;
 
-  return `# Nextify Performance Report
+  const reportNow = now || new Date();
+  const elapsedMs = startedAt ? reportNow.getTime() - startedAt : null;
 
-생성 시각: ${now}
+  const header = buildReportHeader({
+    now: reportNow,
+    toolVersion,
+    toolCommit,
+    project,
+    elapsedMs,
+  });
+
+  const finalStepNumber = manifestInfo?.stepNumber ?? null;
+  const stepsTable = renderStepsSummaryTable({ finalStepNumber });
+
+  const hasChangeStats = changeStats && changeStats.available;
+  const changeStatsBlock = hasChangeStats
+    ? `## 변경 파일 통계
+
+${renderChangeStatsTable(changeStats)}
+
+### 카테고리별 변경
+
+${renderCategoryTable(changeStats.byCategory)}
+${renderAdditionalStats(changeStats) ? `\n${renderAdditionalStats(changeStats)}\n` : ''}`
+    : `## 변경 파일 통계
+
+> session.json 을 찾지 못해 변경 통계를 표시할 수 없습니다. (\`.ai-migration/stepN/session.json\` 필요)
+`;
+
+  return `# Nextify Migration Report
+
+${header}
 
 ## 비교 대상
 
@@ -809,25 +1439,28 @@ function renderMarkdownReport({ targets, failures }) {
 - FCP/LCP/SEO 표준편차(작을수록 안정적)
 - Total JS payload size (폴더 용량)
 
-## 측정 설정
+## 변환 요약 (Step 1 ~ Step 7)
 
-- Lighthouse warmup runs: ${warmupRuns}
-- Lighthouse measured runs: ${measuredRuns}
-- Summary 기준: median (표준편차/범위 함께 표시)
+${stepsTable}
 
+${changeStatsBlock}
 ## 결과 요약 (${targets.length}-way, successful targets)
 
 | Target | FCP (median) | FCP σ | LCP (median) | LCP σ | SEO (median) | SEO σ | Total JS payload size |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 ${summaryRows}
 
-## 측정 상세
-
-${detailSection}
-
 ## 실패 항목
 
 ${failureSection}
+
+---
+
+<details>
+<summary><b>📊 측정 상세 보기</b></summary>
+
+${detailSection}
+</details>
 `;
 }
 
@@ -956,7 +1589,9 @@ async function generatePerformanceReport({
   outputMarkdownPath,
   lighthouseRuns,
   warmupRuns,
+  startedAt,
 }) {
+  const reportStartedAt = startedAt || Date.now();
   const meta = await readNextifyMeta(projectRoot);
   const baselineFromMeta = meta?.sourceViteProjectRoot;
 
@@ -997,7 +1632,39 @@ async function generatePerformanceReport({
     }
   }
 
-  const md = renderMarkdownReport({ targets, failures });
+  // ------------------------------------------------------------------
+  // 변경 통계 / 환경 정보 수집 (실패해도 레포트 본문 생성은 계속)
+  // ------------------------------------------------------------------
+  const manifestInfo = findLatestSessionManifest(projectRoot);
+  const changeStats = computeChangeStats(manifestInfo?.manifest, projectRoot);
+
+  const toolVersion = CLI_PKG && CLI_PKG.version ? String(CLI_PKG.version) : '0.0.0';
+  const toolCommit = getGitShortHash(MIGRATOR_APP_ROOT);
+
+  let project = null;
+  try {
+    const pkgPath = path.join(projectRoot, 'package.json');
+    const pkg = safeReadJsonSync(pkgPath);
+    if (pkg && pkg.name) {
+      project = { name: pkg.name, commit: getGitShortHash(projectRoot) };
+    } else {
+      project = { name: path.basename(projectRoot), commit: getGitShortHash(projectRoot) };
+    }
+  } catch {
+    project = { name: path.basename(projectRoot), commit: null };
+  }
+
+  const md = renderMarkdownReport({
+    targets,
+    failures,
+    manifestInfo,
+    changeStats,
+    toolVersion,
+    toolCommit,
+    project,
+    startedAt: reportStartedAt,
+    now: new Date(),
+  });
   await fs.writeFile(outputMarkdownPath, md, 'utf-8');
 
   await ensureNextifyMeta(projectRoot, {

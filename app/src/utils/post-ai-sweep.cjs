@@ -31,6 +31,15 @@ const AI_META_COMMENT_PATTERNS = [
   /^[ \t]*\/\/\s*guarded by typeof window[^\n]*\r?\n/gm,
 ];
 
+// AI가 잘못 삽입하는 "쓰레기 줄" 패턴들.
+// TypeScript/JS 에서 유효한 문법이 아니고 빌드를 깨뜨리는 줄만 제거 (보수적).
+// 예: `\ mendorong axiosInstance.interceptors.request.use(` 처럼 줄 맨 앞에 백슬래시+공백+텍스트.
+const AI_GARBAGE_LINE_PATTERNS = [
+  // 행 맨 앞에 \ 가 홀로 서있고 뒤에 공백·문자가 이어지는 패턴 (TS 표현식으로 무효)
+  // 단, \\(줄 연속), \n, \r 같은 정상 escape는 건드리지 않는다.
+  /^([ \t]*)\\[ \t]+\S/gm,
+];
+
 // 처리 대상 확장자
 const SUPPORTED_EXT = /\.(t|j)sx?$/;
 
@@ -623,6 +632,26 @@ async function sweepSingleFile(projectRoot, relPath) {
   if (cleaned !== fullText) {
     sourceFile.replaceWithText(cleaned);
     modified = true;
+    fullText = cleaned;
+  }
+
+  // 2-b) AI 쓰레기 줄 제거 (\ 홀로 줄 앞에 오는 문법 오류 줄 등)
+  cleaned = fullText;
+  for (const re of AI_GARBAGE_LINE_PATTERNS) {
+    // 패턴이 줄 전체가 아니라 첫 부분만 매칭하므로, 해당 행에서 \ 이전까지만 남긴다
+    // (indent + \<space>text) → indent만 남기거나 줄 전체 제거
+    cleaned = cleaned.replace(re, (match, indent) => {
+      // 같은 줄에 indent 외에 아무것도 없게 되면 빈 줄로 교체 → 후술 trim에서 처리
+      // indent가 없으면 줄 자체를 빈 줄로
+      return indent || '';
+    });
+  }
+  // 위에서 남은 빈 줄을 추가로 제거 (연속 두 줄 이상 빈 줄은 하나로 압축)
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+  if (cleaned !== fullText) {
+    sourceFile.replaceWithText(cleaned);
+    modified = true;
+    removedTargets.push(`${relPath}:ai_garbage_line`);
   }
 
   // 3) Server Component 에 박힌 dynamic(..., { ssr: false }) 의 ssr: false 만 제거

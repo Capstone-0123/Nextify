@@ -842,6 +842,9 @@ export default nextConfig;
       nextConfigContent = nextConfigContent.replace(
         'const nextConfig = {}',
         `const nextConfig = {
+  // Next.js 16 defaults to Turbopack; declare an empty key to silence the
+  // "webpack config but no turbopack config" build error.
+  turbopack: {},
   webpack(config) {
     config.module.rules.push({
       test: /\\.svg$/i,
@@ -857,6 +860,7 @@ export default nextConfig;
       nextConfigContent = nextConfigContent.replace(
         /(const nextConfig\s*=\s*\{)/,
         `$1
+  turbopack: {},
   webpack(config) {
     config.module.rules.push({
       test: /\\.svg$/i,
@@ -902,6 +906,14 @@ export default nextConfig;
     }
   }
 
+  // Next.js 16 에서 webpack 설정이 있으면 turbopack 키도 있어야 에러가 안 난다.
+  if (/webpack\s*\(/.test(nextConfigContent) && !/turbopack\s*:/.test(nextConfigContent)) {
+    nextConfigContent = nextConfigContent.replace(
+      /(const nextConfig\s*=\s*\{)/,
+      `$1\n  turbopack: {},`
+    );
+  }
+
   await fs.writeFile(nextConfigPath, nextConfigContent);
 }
 
@@ -943,6 +955,7 @@ export default nextConfig;
       nextConfigContent = nextConfigContent.replace(
         'const nextConfig = {}',
         `const nextConfig = {
+  turbopack: {},
   webpack(config) {
     config.module.rules.push({
       test: /\\.svg$/i,
@@ -957,6 +970,7 @@ export default nextConfig;
       nextConfigContent = nextConfigContent.replace(
         /(const nextConfig\s*=\s*\{)/,
         `$1
+  turbopack: {},
   webpack(config) {
     config.module.rules.push({
       test: /\\.svg$/i,
@@ -997,6 +1011,13 @@ export default nextConfig;
         );
       }
     }
+  }
+
+  if (/webpack\s*\(/.test(nextConfigContent) && !/turbopack\s*:/.test(nextConfigContent)) {
+    nextConfigContent = nextConfigContent.replace(
+      /(const nextConfig\s*=\s*\{)/,
+      `$1\n  turbopack: {},`
+    );
   }
 
   await fs.writeFile(nextConfigPath, nextConfigContent);
@@ -1709,7 +1730,15 @@ async function migrateTsConfigApp(cwd) {
     ];
 
     // 5.2. exclude 설정
-    tsConfig.exclude = ['node_modules'];
+    // - .ai-migration / __nextify_snapshots 는 Nextify 내부의 스냅샷·검토 산출물로,
+    //   각 step 별 *부분 변환* 결과가 들어 있어 그대로 type-check 대상이 되면
+    //   사용자 빌드를 망가뜨린다. 반드시 제외한다.
+    tsConfig.exclude = [
+      'node_modules',
+      '.ai-migration',
+      '__nextify_snapshots',
+      '**/__nextify_snapshots/**',
+    ];
 
     // 변경사항 저장
     await fs.writeJson(tsConfigPath, tsConfig, { spaces: 2 });
@@ -1720,6 +1749,51 @@ async function migrateTsConfigApp(cwd) {
     console.warn(chalk.yellow(`⚠️  tsconfig.app.json 이관 건너뜀: ${e.message}`));
     return false;
   }
+}
+
+/**
+ * paths 항목을 배열 문자열로 정규화해 동치 비교
+ */
+function normalizePathEntry(val) {
+  const arr = Array.isArray(val) ? val : [val];
+  return JSON.stringify(arr);
+}
+
+/**
+ * tsconfig.json(existing) 과 tsconfig.app.json(app) 의 paths 를 병합한다.
+ * - 한쪽에만 있는 키: 충돌 없이 결과에 포함 (예: 루트만 @/* 를 쓰는 경우)
+ * - 양쪽에 같은 키: 값이 다르면 충돌로 보고 사용자 판단 필요
+ */
+function mergeTsconfigPaths(existingPaths, appPaths) {
+  const existing =
+    existingPaths && typeof existingPaths === 'object' && !Array.isArray(existingPaths)
+      ? { ...existingPaths }
+      : {};
+  const app =
+    appPaths && typeof appPaths === 'object' && !Array.isArray(appPaths) ? appPaths : {};
+
+  const merged = { ...existing };
+  const conflictingKeys = [];
+
+  for (const [key, appVal] of Object.entries(app)) {
+    if (existing[key] === undefined) {
+      merged[key] = appVal;
+      continue;
+    }
+    const exVal = existing[key];
+    if (normalizePathEntry(exVal) !== normalizePathEntry(appVal)) {
+      conflictingKeys.push({
+        key,
+        tsconfigJson: exVal,
+        tsconfigApp: appVal,
+      });
+    }
+  }
+
+  if (conflictingKeys.length > 0) {
+    return { ok: false, merged: null, conflictingKeys };
+  }
+  return { ok: true, merged, conflictingKeys: [] };
 }
 
 // 4. baseUrl, paths 설정 이관
@@ -1786,27 +1860,23 @@ async function migrateBaseUrlAndPaths(cwd, tsConfig, appCompilerOptions) {
     }
   }
 
-  // paths 처리
+  // paths 처리 (전체 JSON 동일 비교 대신 키 단위 병합 — 한쪽에만 있는 alias 는 자동 통합)
   if (appPaths !== undefined) {
     if (existingPaths !== undefined) {
-      // 기존 paths와 비교
-      const existingPathsStr = JSON.stringify(existingPaths);
-      const appPathsStr = JSON.stringify(appPaths);
-      
-      if (existingPathsStr !== appPathsStr) {
-        // 값이 다르면 충돌로 판단
+      const mergeResult = mergeTsconfigPaths(existingPaths, appPaths);
+      if (!mergeResult.ok) {
         return {
           hasConflict: true,
           conflictType: 'paths',
           conflictDetails: {
             existing: existingPaths,
-            new: appPaths
-          }
+            new: appPaths,
+            conflictingKeys: mergeResult.conflictingKeys,
+          },
         };
       }
-      // 값이 동일하면 유지
+      tsConfig.compilerOptions.paths = mergeResult.merged;
     } else {
-      // 존재하지 않으면 추가
       tsConfig.compilerOptions.paths = appPaths;
     }
   }
@@ -1891,9 +1961,21 @@ function printTsConfigConflictGuide(conflictType, conflictDetails) {
     console.log(chalk.yellow(`  tsconfig.json baseUrl: "${conflictDetails.existing}"`));
     console.log(chalk.yellow(`  tsconfig.app.json baseUrl: "${conflictDetails.new}"`));
   } else if (conflictType === 'paths') {
-    console.log(chalk.yellow(`  tsconfig.json paths 와 tsconfig.app.json paths 가 다릅니다.`));
-    console.log(chalk.gray(`    tsconfig.json: ${JSON.stringify(conflictDetails.existing)}`));
-    console.log(chalk.gray(`    tsconfig.app.json: ${JSON.stringify(conflictDetails.new)}`));
+    console.log(
+      chalk.yellow(
+        `  tsconfig.json 과 tsconfig.app.json 이 같은 paths 키에 서로 다른 값을 쓰고 있습니다.`
+      )
+    );
+    if (conflictDetails.conflictingKeys && conflictDetails.conflictingKeys.length > 0) {
+      for (const row of conflictDetails.conflictingKeys) {
+        console.log(chalk.gray(`    "${row.key}":`));
+        console.log(chalk.gray(`      tsconfig.json      → ${JSON.stringify(row.tsconfigJson)}`));
+        console.log(chalk.gray(`      tsconfig.app.json  → ${JSON.stringify(row.tsconfigApp)}`));
+      }
+    } else {
+      console.log(chalk.gray(`    tsconfig.json: ${JSON.stringify(conflictDetails.existing)}`));
+      console.log(chalk.gray(`    tsconfig.app.json: ${JSON.stringify(conflictDetails.new)}`));
+    }
   } else if (conflictType === 'alias-paths') {
     console.log(chalk.yellow(`  vite resolve.alias 와 tsconfig.app.json paths 가 같은 키에서 다릅니다.`));
     console.log(chalk.gray(`    키 "${conflictDetails.key}"`));
@@ -1907,6 +1989,13 @@ function printTsConfigConflictGuide(conflictType, conflictDetails) {
   }
 
   console.log(chalk.cyan('\n📋 사용자 직접처리를 위한 가이드:'));
+  if (conflictType === 'paths') {
+    console.log(
+      chalk.gray(
+        '  · @types 만 다르다면: 루트 types/ 폴더(전역 선언) vs src/types(앱 타입) 중 실제 import 가 어느 쪽을 가리키는지 확인한 뒤 한쪽으로 통일하세요.'
+      )
+    );
+  }
   console.log(chalk.gray('  1. 프로젝트에 맞는 최종 baseUrl / paths 한 벌만 남기도록 tsconfig.json 을 직접 수정하세요.'));
   console.log(
     chalk.gray(

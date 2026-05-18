@@ -11,7 +11,15 @@ const fs = require('fs-extra');
 // ============================================================================
 
 /**
- * Router 관련 컴포넌트 이름 목록 (제외 대상)
+ * Router 관련 컴포넌트/팩토리 이름 목록 (Provider 후보에서 제외).
+ *
+ * 이 목록에 들어가면:
+ *  - <RouterProvider /> 같은 자기-닫는 JSX 가 self-closing Provider 로 분류되지 않음
+ *  - 의존 변수 추적(createBrowserRouter 결과 등) 도 따라가지 않음
+ *
+ * react-router 의 라우팅은 Next.js 의 파일 시스템 라우팅으로 step3 route-migrator
+ * 가 변환한다. provider-generator 가 이걸 옮겨버리면 src/app/providers.tsx 가
+ * createBrowserRouter / RouterProvider 를 import 없이 호출해 빌드가 깨진다.
  */
 const ROUTER_COMPONENTS = [
   'BrowserRouter',
@@ -19,9 +27,12 @@ const ROUTER_COMPONENTS = [
   'Router',
   'Switch',
   'Routes',
+  'Route',
   'MemoryRouter',
   'StaticRouter',
   'NativeRouter',
+  'RouterProvider',
+  'Outlet',
 ];
 
 /**

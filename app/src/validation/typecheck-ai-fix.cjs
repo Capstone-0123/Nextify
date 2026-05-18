@@ -1,6 +1,6 @@
 'use strict';
 
-// app/src/step7/typecheck-ai-fix.cjs
+// app/src/validation/typecheck-ai-fix.cjs
 // 결정론적 autofix 가 못 잡은 잔여 TypeScript 에러를 Gemini 로 1회 보정.
 // 핵심 원칙:
 //   - "효율적 AI 재호출": 파일당 최대 1회, 좁은 컨텍스트, 토큰 예산 제한
