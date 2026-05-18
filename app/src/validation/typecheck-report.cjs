@@ -1,6 +1,6 @@
 'use strict';
 
-// app/src/step7/typecheck-report.cjs
+// app/src/validation/typecheck-report.cjs
 // Step 7 마지막에 마이그레이션된 프로젝트에서 `tsc --noEmit` 을 실행해
 // 잠재적 빌드 에러를 처리하는 통합 흐름:
 //   1) tsc 1차 → 에러 수집
@@ -25,9 +25,15 @@ const {
   rollbackRegressions,
   DEFAULT_AI_FIX_BUDGET,
 } = require('./typecheck-ai-fix.cjs');
+const {
+  runStaticImportScan,
+  writeStaticImportReport,
+} = require('./static-import-scan.cjs');
 const { sweepAfterAiApply } = require('../utils/post-ai-sweep.cjs');
 
 const REPORT_FILE_NAME = 'nextify-typecheck-report.txt';
+const TSCONFIG_FILE_NAME = 'tsconfig.json';
+const TS_CONFIG_SUSPECT_CODES = new Set(['TS17004', 'TS6142', 'TS1259']);
 
 // 사용자가 곧장 빌드 실패로 만나는 핵심 코드들
 const KEY_TS_ERROR_CODES = new Set([
@@ -36,28 +42,252 @@ const KEY_TS_ERROR_CODES = new Set([
   'TS6196', // 'X' is declared but never used.
   'TS6192', // All imports in import declaration are unused.
   'TS2304', // Cannot find name 'X'.
+  'TS2307', // Cannot find module 'X'.
   'TS2552', // Cannot find name 'X'. Did you mean 'Y'?
 ]);
 
+const ERROR_LABEL_RULES = [
+  {
+    id: 'tsconfig-jsx-interop',
+    when: (e) =>
+      e.code === 'TS17004' ||
+      e.code === 'TS6142' ||
+      (e.code === 'TS1259' && /esModuleInterop/i.test(e.message || '')),
+    lever: 'tsconfig_normalization',
+    autoFixable: false,
+  },
+  {
+    id: 'jsx-null-render',
+    when: (e) =>
+      e.code === 'TS2339' &&
+      /Property 'null' does not exist on type 'JSX\.IntrinsicElements'/i.test(e.message || ''),
+    lever: 'null_return_rewrite',
+    autoFixable: true,
+  },
+  {
+    id: 'router-hook-migration',
+    when: (e) =>
+      (e.code === 'TS2304' || e.code === 'TS2552') &&
+      /Cannot find name ['"`](useLocation|useNavigate|useHistory)['"`]/i.test(e.message || ''),
+    lever: 'router_hook_replacement',
+    autoFixable: false,
+  },
+  {
+    id: 'module-resolution',
+    when: (e) =>
+      e.code === 'TS2307' ||
+      /Cannot find module/i.test(e.message || '') ||
+      /Cannot find type definition file/i.test(e.message || ''),
+    lever: 'alias_and_types_resolution',
+    autoFixable: true,
+  },
+  {
+    id: 'route-object-navigation',
+    when: (e) =>
+      e.code === 'TS2345' &&
+      /Argument of type '\{ pathname: string; query:/i.test(e.message || '') &&
+      /is not assignable to parameter of type 'string'/i.test(e.message || ''),
+    lever: 'next_router_push_rewrite',
+    autoFixable: false,
+  },
+  {
+    id: 'style-namespace-missing',
+    when: (e) =>
+      (e.code === 'TS2304' || e.code === 'TS2552') &&
+      /Cannot find name ['"`](R|styled)['"`]/i.test(e.message || ''),
+    lever: 'style_symbol_restore',
+    autoFixable: false,
+  },
+  {
+    id: 'missing-identifier',
+    when: (e) =>
+      e.code === 'TS2304' || e.code === 'TS2552' || /Cannot find name/i.test(e.message || ''),
+    lever: 'import_injection_or_symbol_fix',
+    autoFixable: true,
+  },
+  {
+    id: 'unused-declaration',
+    when: (e) =>
+      e.code === 'TS6133' ||
+      e.code === 'TS6138' ||
+      e.code === 'TS6192' ||
+      e.code === 'TS6196',
+    lever: 'unused_cleanup',
+    autoFixable: true,
+  },
+  {
+    id: 'router-migration',
+    when: (e) =>
+      /NavigateOptions/i.test(e.message || '') ||
+      /state' does not exist in type 'NavigateOptions'/i.test(e.message || ''),
+    lever: 'router_state_rewrite',
+    autoFixable: false,
+  },
+  {
+    id: 'jsx-component-type',
+    when: (e) =>
+      e.code === 'TS2786' ||
+      e.code === 'TS2607' ||
+      /cannot be used as a JSX component/i.test(e.message || ''),
+    lever: 'react_next_type_alignment',
+    autoFixable: false,
+  },
+];
+
 function hasTsConfig(projectRoot) {
-  return fs.existsSync(path.join(projectRoot, 'tsconfig.json'));
+  return fs.existsSync(path.join(projectRoot, TSCONFIG_FILE_NAME));
+}
+
+/**
+ * 프로젝트 안의 tsc 바이너리(있으면 가장 안정적)를 찾는다.
+ * yarn / pnpm / npm 어떤 매니저로 설치됐든 typescript 가 devDependency 면
+ * `node_modules/.bin/tsc(.cmd)` 가 존재한다.
+ */
+function resolveLocalTscBinary(projectRoot) {
+  const isWin = process.platform === 'win32';
+  const binNames = isWin ? ['tsc.cmd', 'tsc.CMD'] : ['tsc'];
+  for (const name of binNames) {
+    const p = path.join(projectRoot, 'node_modules', '.bin', name);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+/**
+ * 패키지 매니저별로 tsc 를 실행할 명령을 만든다.
+ * - npm  : npx -y tsc ...
+ * - yarn : yarn tsc ... (1.x / 2+ 모두 동일)
+ * - pnpm : pnpm exec tsc ...
+ * - bun  : bunx tsc ...
+ */
+function buildPackageManagerTscCommand(projectRoot) {
+  const isWin = process.platform === 'win32';
+  const ext = (b) => (isWin ? `${b}.cmd` : b);
+
+  if (fs.existsSync(path.join(projectRoot, 'yarn.lock'))) {
+    return { cmd: ext('yarn'), prefix: ['tsc'] };
+  }
+  if (fs.existsSync(path.join(projectRoot, 'pnpm-lock.yaml'))) {
+    return { cmd: ext('pnpm'), prefix: ['exec', 'tsc'] };
+  }
+  if (fs.existsSync(path.join(projectRoot, 'bun.lockb'))) {
+    return { cmd: ext('bunx'), prefix: ['tsc'] };
+  }
+  // npm 또는 lockfile 없음
+  return { cmd: ext('npx'), prefix: ['-y', 'tsc'] };
 }
 
 /**
  * tsc 실행. 표준 출력을 캡처하고 종료 코드를 반환.
- * - npx tsc --noEmit --pretty false 사용해 stable 한 텍스트 결과 보장
+ * - 우선순위 1: 프로젝트 로컬 tsc 바이너리(node_modules/.bin/tsc) 직접 호출 — 가장 안정적
+ * - 우선순위 2: 감지된 패키지 매니저로 실행 (yarn tsc / pnpm exec tsc / bunx tsc / npx tsc)
  * - 큰 프로젝트도 여유롭게 (180s)
  */
 function runTsc(projectRoot) {
-  const args = ['tsc', '--noEmit', '--pretty', 'false'];
-  const result = spawnSync('npx', args, {
+  const tscArgs = ['--noEmit', '--pretty', 'false', '--project', TSCONFIG_FILE_NAME];
+  const baseOptions = {
     cwd: projectRoot,
     encoding: 'utf-8',
-    shell: process.platform === 'win32',
+    shell: false,
     timeout: 180_000,
     env: { ...process.env, FORCE_COLOR: '0' },
-  });
-  return result;
+  };
+
+  const local = resolveLocalTscBinary(projectRoot);
+  if (local) {
+    return spawnSync(local, tscArgs, baseOptions);
+  }
+
+  const { cmd, prefix } = buildPackageManagerTscCommand(projectRoot);
+  return spawnSync(cmd, [...prefix, ...tscArgs], baseOptions);
+}
+
+function isProjectErrorFile(file) {
+  if (!file || typeof file !== 'string') return false;
+  return !file.replace(/\\/g, '/').includes('/node_modules/');
+}
+
+function splitErrorsByOrigin(errors) {
+  const project = [];
+  const external = [];
+  for (const e of Array.isArray(errors) ? errors : []) {
+    if (isProjectErrorFile(e.file)) project.push(e);
+    else external.push(e);
+  }
+  return { project, external };
+}
+
+function countConfigSuspectErrors(errors) {
+  let n = 0;
+  for (const e of Array.isArray(errors) ? errors : []) {
+    if (TS_CONFIG_SUSPECT_CODES.has(e.code)) n++;
+  }
+  return n;
+}
+
+function detectTsConfigHints(projectRoot) {
+  let text = '';
+  try {
+    text = fs.readFileSync(path.join(projectRoot, TSCONFIG_FILE_NAME), 'utf8');
+  } catch {
+    return [];
+  }
+  const hints = [];
+  if (!/"jsx"\s*:\s*"(preserve|react-jsx|react-jsxdev)"/.test(text)) {
+    hints.push('compilerOptions.jsx 누락/부정확');
+  }
+  if (!/"esModuleInterop"\s*:\s*true/.test(text)) {
+    hints.push('compilerOptions.esModuleInterop=true 권장');
+  }
+  if (!/"skipLibCheck"\s*:\s*true/.test(text)) {
+    hints.push('compilerOptions.skipLibCheck=true 권장');
+  }
+  if (!/"lib"\s*:\s*\[[^\]]*"(dom|dom\.iterable)"/is.test(text)) {
+    hints.push('compilerOptions.lib 에 dom/dom.iterable 포함 권장');
+  }
+  return hints;
+}
+
+function classifyError(error) {
+  for (const rule of ERROR_LABEL_RULES) {
+    try {
+      if (rule.when(error)) {
+        return {
+          label: rule.id,
+          lever: rule.lever,
+          autoFixable: rule.autoFixable,
+        };
+      }
+    } catch {
+      // ignore faulty rules
+    }
+  }
+  return {
+    label: 'unknown',
+    lever: 'manual_triage',
+    autoFixable: false,
+  };
+}
+
+function buildLabelSummary(errors) {
+  const byLabel = new Map();
+  for (const e of Array.isArray(errors) ? errors : []) {
+    const c = classifyError(e);
+    const key = c.label;
+    if (!byLabel.has(key)) {
+      byLabel.set(key, {
+        label: c.label,
+        lever: c.lever,
+        autoFixable: c.autoFixable,
+        count: 0,
+        sample: e,
+      });
+    }
+    byLabel.get(key).count += 1;
+  }
+  const rows = [...byLabel.values()];
+  rows.sort((a, b) => b.count - a.count);
+  return rows;
 }
 
 /**
@@ -108,10 +338,15 @@ function runTscAndParse(projectRoot) {
   try {
     result = runTsc(projectRoot);
   } catch (e) {
-    return { ok: false, reason: 'spawn_error', message: e?.message };
+    return { ok: false, reason: 'spawn_error', message: e?.message, stderr: '' };
   }
   if (result.error) {
-    return { ok: false, reason: 'tsc_unavailable', message: result.error.message };
+    return {
+      ok: false,
+      reason: 'tsc_unavailable',
+      message: result.error.message,
+      stderr: result.stderr || '',
+    };
   }
   const exitCode = typeof result.status === 'number' ? result.status : -1;
   const errors = parseTscErrors(result.stdout, result.stderr);
@@ -122,6 +357,19 @@ function runTscAndParse(projectRoot) {
     stdout: result.stdout || '',
     stderr: result.stderr || '',
   };
+}
+
+/**
+ * 콘솔 진단용 — 어떤 경로로 tsc 를 호출하는지 사람이 읽기 좋은 요약 문자열로 반환.
+ * @param {string} projectRoot
+ */
+function describeTscInvocation(projectRoot) {
+  const local = resolveLocalTscBinary(projectRoot);
+  if (local) {
+    return `local binary (${path.relative(projectRoot, local) || local})`;
+  }
+  const { cmd, prefix } = buildPackageManagerTscCommand(projectRoot);
+  return `${cmd} ${prefix.join(' ')}`;
 }
 
 /**
@@ -141,6 +389,9 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
     aiFix = true,
     aiFixBudget = DEFAULT_AI_FIX_BUDGET,
   } = options;
+
+  /** @type {{ ran: boolean, reason?: string, scannedFiles: number, missing: Array<{ file: string, line: number, spec: string }> }} */
+  let staticImportScan = { ran: false, scannedFiles: 0, missing: [] };
 
   if (!hasTsConfig(projectRoot)) {
     return { ran: false, reason: 'no_tsconfig' };
@@ -191,12 +442,74 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
     console.log(
       chalk.gray(`   ⚠️  타입 검사를 건너뜁니다: ${first.message || first.reason}`),
     );
+    // 진단: 어떤 명령으로 시도했는지·이유 요약을 노출해 사용자가
+    // 환경(yarn berry/PnP 등) 문제를 바로 파악할 수 있게 한다.
+    const hint = describeTscInvocation(projectRoot);
+    if (hint) {
+      console.log(chalk.gray(`      ↳ 실행 방식: ${hint}`));
+    }
+    if (first.stderr) {
+      const head = String(first.stderr).split(/\r?\n/).filter(Boolean).slice(0, 3);
+      for (const line of head) {
+        console.log(chalk.gray(`      ↳ stderr: ${line}`));
+      }
+    }
     return { ran: false, reason: first.reason };
   }
 
   if (first.exitCode === 0 && first.errors.length === 0) {
     console.log(chalk.green('   ✅ 타입 검사 통과: 별다른 unused/type 에러가 없습니다.'));
-    return { ran: true, exitCode: 0, errors: [], autofixed: 0, aiFixed: 0 };
+    try {
+      staticImportScan = await runStaticImportScan(projectRoot);
+      if (staticImportScan.ran && staticImportScan.missing.length > 0) {
+        const rp = await writeStaticImportReport(projectRoot, staticImportScan);
+        console.log(
+          chalk.yellow(
+            `   ⚠️  정적 import/에셋: 디스크에 없는 경로 ${staticImportScan.missing.length}건 (빌드 시 Module not found 가능)`,
+          ),
+        );
+        if (rp) console.log(chalk.cyan(`      📄 ${rp}`));
+        console.log(
+          chalk.gray(
+            '      declare module 와일드카드로 tsc 는 통과해도 번들러는 실패할 수 있습니다.',
+          ),
+        );
+      }
+    } catch (e) {
+      console.log(
+        chalk.gray(`   ⚠️  정적 import 스캔(무시): ${e?.message || e}`),
+      );
+    }
+    return {
+      ran: true,
+      exitCode: 0,
+      errors: [],
+      autofixed: 0,
+      aiFixed: 0,
+      staticImportScan,
+    };
+  }
+
+  const firstSplit = splitErrorsByOrigin(first.errors);
+  if (firstSplit.external.length > 0) {
+    console.log(
+      chalk.gray(
+        `   ℹ️  외부 라이브러리(node_modules) 에러 ${firstSplit.external.length}건은 자동 수정 대상에서 제외`,
+      ),
+    );
+  }
+  const suspectCount = countConfigSuspectErrors(first.errors);
+  const suspectRatio = first.errors.length > 0 ? suspectCount / first.errors.length : 0;
+  const tsconfigHints = detectTsConfigHints(projectRoot);
+  if (suspectRatio >= 0.6 && tsconfigHints.length > 0) {
+    console.log(
+      chalk.yellow(
+        `   ⚠️  tsconfig 설정 의심: 에러의 ${Math.round(suspectRatio * 100)}%가 JSX/interop/lib 계열`,
+      ),
+    );
+    for (const hint of tsconfigHints) {
+      console.log(chalk.yellow(`      - ${hint}`));
+    }
   }
 
   console.log(
@@ -209,7 +522,7 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
   let autofixSummary = { totalFixed: 0, fixedFiles: [] };
   if (autofix) {
     try {
-      autofixSummary = await autofixErrors(projectRoot, first.errors);
+      autofixSummary = await autofixErrors(projectRoot, firstSplit.project);
       if (autofixSummary.totalFixed > 0) {
         console.log(
           chalk.cyan(
@@ -247,6 +560,28 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
     }
   }
 
+  try {
+    staticImportScan = await runStaticImportScan(projectRoot);
+    if (staticImportScan.ran && staticImportScan.missing.length > 0) {
+      const rp = await writeStaticImportReport(projectRoot, staticImportScan);
+      console.log(
+        chalk.yellow(
+          `   ⚠️  정적 import/에셋: 디스크에 없는 경로 ${staticImportScan.missing.length}건 (빌드 시 Module not found 가능)`,
+        ),
+      );
+      if (rp) console.log(chalk.cyan(`      📄 ${rp}`));
+      console.log(
+        chalk.gray(
+          '      declare module 와일드카드로 tsc 는 통과해도 번들러는 실패할 수 있습니다.',
+        ),
+      );
+    }
+  } catch (e) {
+    console.log(
+      chalk.gray(`   ⚠️  정적 import 스캔(무시): ${e?.message || e}`),
+    );
+  }
+
   // ── 3) AI 좁은-컨텍스트 1회 재호출 (옵션) ────────────────────────────
   let aiSummary = {
     ran: false,
@@ -260,7 +595,8 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
   let finalStdout = secondStdout;
   let finalStderr = secondStderr;
 
-  if (aiFix && secondErrors.length > 0) {
+  const secondSplit = splitErrorsByOrigin(secondErrors);
+  if (aiFix && secondSplit.project.length > 0) {
     if (!process.env.GEMINI_API_KEY) {
       console.log(
         chalk.gray(
@@ -270,11 +606,11 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
     } else {
       console.log(
         chalk.cyan(
-          `   🤖 AI 보정 시도: 잔여 ${secondErrors.length}건을 파일당 1회씩, 최대 ${aiFixBudget}개 파일 의뢰`,
+          `   🤖 AI 보정 시도: 프로젝트 잔여 ${secondSplit.project.length}건을 파일당 1회씩, 최대 ${aiFixBudget}개 파일 의뢰`,
         ),
       );
       try {
-        aiSummary = await aiFixRemainingErrors(projectRoot, secondErrors, {
+        aiSummary = await aiFixRemainingErrors(projectRoot, secondSplit.project, {
           budget: aiFixBudget,
         });
       } catch (e) {
@@ -360,6 +696,13 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
       summary.push(`      • 회귀 롤백: ${aiSummary.rolledBack.length}개 파일`);
     }
     console.log(chalk.green(summary.join('\n')));
+    if (staticImportScan.ran && staticImportScan.missing.length > 0) {
+      console.log(
+        chalk.yellow(
+          `   ⚠️  정적 import/에셋 미해결 ${staticImportScan.missing.length}건 — ${path.join(projectRoot, 'nextify-static-import-report.txt')}`,
+        ),
+      );
+    }
     return {
       ran: true,
       exitCode: 0,
@@ -368,10 +711,13 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
       aiFixed: aiSummary.filesChanged.length,
       rolledBack: aiSummary.rolledBack.length,
       elapsedMs,
+      staticImportScan,
     };
   }
 
   // 잔여 에러 리포트 파일 저장
+  const finalSplit = splitErrorsByOrigin(finalErrors);
+  const labelSummary = buildLabelSummary(finalSplit.project);
   const reportPath = path.join(projectRoot, REPORT_FILE_NAME);
   const header = [
     '# Nextify TypeScript Typecheck Report',
@@ -381,9 +727,20 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
     `# elapsed: ${(elapsedMs / 1000).toFixed(1)}s`,
     `# autofix(deterministic): ${autofixSummary.totalFixed} fixes / ${autofixSummary.fixedFiles.length} files`,
     `# ai-fix: ${aiSummary.filesChanged.length} files changed, ${aiSummary.rolledBack.length} rolled back`,
+    `# errors(project): ${finalSplit.project.length}`,
+    `# errors(external/node_modules): ${finalSplit.external.length}`,
+    `# labels(project): ${labelSummary.length}`,
+    `# static import / asset unresolved: ${staticImportScan.missing.length} (see nextify-static-import-report.txt)`,
     '#',
     '# 이 리포트는 결정론적 + AI 자동 수정 후에도 남은 에러만 표시합니다.',
     '# 위치를 직접 확인하려면 프로젝트 루트에서 `npx tsc --noEmit` 을 다시 실행하세요.',
+    '# 아래 [Label Summary]는 우선순위와 자동화 가능성을 빠르게 판단하기 위한 분류입니다.',
+    '',
+    '# [Label Summary]',
+    ...labelSummary.slice(0, 12).map(
+      (x) =>
+        `# - ${x.label} | lever=${x.lever} | autoFixable=${x.autoFixable ? 'yes' : 'no'} | count=${x.count} | sample=${x.sample.file}:${x.sample.line}:${x.sample.column}`,
+    ),
     '',
   ].join('\n');
   const body = (finalStdout || '') + (finalStderr || '');
@@ -403,6 +760,16 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
       `   ⚠️  타입 검사 경고: ${total}개의 잠재적 빌드 에러가 남아있습니다.`,
     ),
   );
+  if (labelSummary.length > 0) {
+    console.log(chalk.gray('      [라벨/레버 매칭 상위]'));
+    for (const x of labelSummary.slice(0, 5)) {
+      console.log(
+        chalk.gray(
+          `      - ${x.label} → ${x.lever} (${x.count}건, auto=${x.autoFixable ? 'yes' : 'no'})`,
+        ),
+      );
+    }
+  }
   const stageLine = [];
   if (autofixSummary.totalFixed > 0) {
     stageLine.push(`결정론 ${autofixSummary.totalFixed}건 해소`);
@@ -447,6 +814,13 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
       `      ⏱  타입 검사+자동 수정 총 소요: ${(elapsedMs / 1000).toFixed(1)}s`,
     ),
   );
+  if (staticImportScan.ran && staticImportScan.missing.length > 0) {
+    console.log(
+      chalk.yellow(
+        `      ⚠️  정적 import/에셋 미해결 ${staticImportScan.missing.length}건 — ${path.join(projectRoot, 'nextify-static-import-report.txt')}`,
+      ),
+    );
+  }
   console.log('');
 
   return {
@@ -456,8 +830,10 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
     autofixed: autofixSummary.totalFixed,
     aiFixed: aiSummary.filesChanged.length,
     rolledBack: aiSummary.rolledBack.length,
+    labelSummary,
     reportPath,
     elapsedMs,
+    staticImportScan,
   };
 }
 

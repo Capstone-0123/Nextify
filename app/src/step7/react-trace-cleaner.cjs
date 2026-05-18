@@ -5,13 +5,13 @@ const fs = require('fs-extra');
 const path = require('path');
 const chalk = require('chalk');
 const { spawnSync } = require('child_process');
-const { detectPackageManager } = require('../utils/project-info.cjs');
+const { resolvePackageManagerCommand } = require('../utils/project-info.cjs');
 
 function spawnInstall(cmd, args, cwd) {
   return spawnSync(cmd, args, {
     cwd,
     stdio: 'inherit',
-    shell: process.platform === 'win32',
+    shell: false,
   });
 }
 
@@ -21,23 +21,27 @@ function spawnInstall(cmd, args, cwd) {
  * @returns {boolean} 설치 성공 여부
  */
 function tryInstallEslintConfigNext(projectRoot) {
-  const pm = detectPackageManager(projectRoot);
+  const runtime = resolvePackageManagerCommand(projectRoot);
+  const pm = runtime.pm;
+  const run = (args) => spawnInstall(runtime.cmd, [...runtime.argsPrefix, ...args], projectRoot);
 
   if (pm === 'yarn') {
-    const r = spawnInstall('yarn', ['add', '-D', 'eslint-config-next'], projectRoot);
+    const r = run(['add', '-D', 'eslint-config-next']);
     return r.status === 0;
   }
   if (pm === 'pnpm') {
-    const r = spawnInstall('pnpm', ['add', '-D', 'eslint-config-next'], projectRoot);
+    const r = run(['add', '-D', 'eslint-config-next']);
     return r.status === 0;
   }
   if (pm === 'bun') {
-    const r = spawnInstall('bun', ['add', '-d', 'eslint-config-next'], projectRoot);
+    const r = run(['add', '-d', 'eslint-config-next']);
     return r.status === 0;
   }
 
-  const first = spawnInstall('npm', ['install', '-D', 'eslint-config-next'], projectRoot);
+  const first = run(['install', '-D', 'eslint-config-next']);
   if (first.status === 0) return true;
+
+  if (pm !== 'npm') return false;
 
   console.log(
     chalk.yellow(
@@ -45,8 +49,8 @@ function tryInstallEslintConfigNext(projectRoot) {
     )
   );
   const second = spawnInstall(
-    'npm',
-    ['install', '-D', 'eslint-config-next', '--legacy-peer-deps'],
+    runtime.cmd,
+    [...runtime.argsPrefix, 'install', '-D', 'eslint-config-next', '--legacy-peer-deps'],
     projectRoot
   );
   return second.status === 0;

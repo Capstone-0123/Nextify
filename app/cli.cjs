@@ -108,6 +108,7 @@ const { runStep4 } = require('./src/step4/index.cjs');
 const { runStep5 } = require('./src/step5/index.cjs');
 const { runStep6 } = require('./src/step6/index.cjs');
 const { runStep7 } = require('./src/step7/index.cjs');
+const { runValidation } = require('./src/validation/index.cjs');
 
 const {
   detectPackageManager,
@@ -452,23 +453,47 @@ program
 // =========================================================
 program
   .command('step7')
-  .description('7단계: next/image, next/font, Dynamic Import 적용 및 React 흔적 정리')
-  .option('--no-typecheck-autofix', '결정론적 TypeScript 자동 수정을 비활성화 (기본: 활성화, 토큰 비용 0)')
-  .option('--no-typecheck-ai-fix', 'AI 기반 잔여 빌드 에러 보정을 비활성화 (기본: 활성화, GEMINI_API_KEY 필요)')
+  .description('7단계: next/image, next/font, Dynamic Import 적용 및 React 흔적 정리 (검증은 app/src/validation)')
+  .option('--skip-validation', '이 단계에서 타입 검증(validation) 호출 생략 — 이후 migrate-next validate 로 실행')
+  .option('--no-typecheck-autofix', 'validation 단계: 결정론적 TypeScript 자동 수정 비활성화')
+  .option('--no-typecheck-ai-fix', 'validation 단계: AI 잔여 빌드 에러 보정 비활성화 (GEMINI_API_KEY)')
   .option(
     '--typecheck-ai-fix-budget <n>',
-    'AI 보정 시 1회 세션에서 의뢰할 최대 파일 수 (기본 5)',
+    'validation 단계: AI 보정 최대 파일 수 (기본 5)',
     (v) => Number(v),
   )
   .action(async (options) => {
     try {
       await runStep7(process.cwd(), {
+        skipValidation: options.skipValidation,
         typecheckAutofix: options.typecheckAutofix,
         typecheckAiFix: options.typecheckAiFix,
         typecheckAiFixBudget: options.typecheckAiFixBudget,
       });
     } catch (error) {
       console.error(chalk.red('\n❌ Step 7 오류 발생:'), error);
+      process.exit(1);
+    }
+  });
+
+// =========================================================
+// Command: Validation (TypeScript / tsc 파이프라인)
+// =========================================================
+program
+  .command('validate')
+  .description('타입 검사(tsc) + 결정론적 자동 수정 + (옵션) AI 보정 — 구현은 app/src/validation')
+  .option('--no-typecheck-autofix', '결정론적 TypeScript 자동 수정 비활성화 (기본: 활성화)')
+  .option('--no-typecheck-ai-fix', 'AI 잔여 에러 보정 비활성화 (GEMINI_API_KEY 필요)')
+  .option('--typecheck-ai-fix-budget <n>', 'AI 보정 최대 파일 수 (기본 5)', (v) => Number(v))
+  .action(async (options) => {
+    try {
+      await runValidation(process.cwd(), {
+        autofix: options.typecheckAutofix,
+        aiFix: options.typecheckAiFix,
+        aiFixBudget: options.typecheckAiFixBudget,
+      });
+    } catch (error) {
+      console.error(chalk.red('\n❌ validate 오류 발생:'), error);
       process.exit(1);
     }
   });
@@ -500,6 +525,7 @@ program
 
       logSuccess('step1~step7 순차 실행 완료 (레포트/AI 리뷰 미실행).');
       logSection('필요 시 추가 실행');
+      logStep('타입 검증만 재실행: migrate-next validate');
       logStep('성능 레포트: migrate-next report');
       logStep('전체 오케스트레이터: migrate-next');
     } catch (error) {
@@ -517,7 +543,7 @@ program
   .option('--run-step7', '레포트 생성 전에 Step7 최적화를 먼저 적용')
   .option('--baseline <path>', 'Vite 원본 프로젝트 루트 경로 (메타가 없으면 필수)')
   .option('--output <path>', '생성할 마크다운 레포트 파일 경로 (기본: <projectRoot>/nextify-performance-report.md)')
-  .option('--runs <number>', 'Lighthouse 측정 횟수 (기본 5)', (v) => Number(v), 5)
+  .option('--runs <number>', 'Lighthouse 측정 횟수 (기본 3)', (v) => Number(v), 3)
   .option('--warmup-runs <number>', 'Lighthouse 워밍업 횟수 (기본 1)', (v) => Number(v), 1)
   .action(async (options) => {
     const reportStartedAt = Date.now();
@@ -525,7 +551,7 @@ program
       const projectRoot = process.cwd();
       const outputPath = options.output ? path.resolve(options.output) : path.join(projectRoot, 'nextify-performance-report.md');
       const baselineViteRoot = options.baseline ? path.resolve(options.baseline) : undefined;
-      const lighthouseRuns = Number.isFinite(options.runs) && options.runs > 0 ? Math.floor(options.runs) : 5;
+      const lighthouseRuns = Number.isFinite(options.runs) && options.runs > 0 ? Math.floor(options.runs) : 3;
       const warmupRuns =
         Number.isFinite(options.warmupRuns) && options.warmupRuns >= 0
           ? Math.floor(options.warmupRuns)

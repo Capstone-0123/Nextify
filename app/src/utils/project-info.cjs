@@ -13,6 +13,77 @@ function detectPackageManager(cwd) {
   return 'npm';
 }
 
+function readPackageManagerField(cwd) {
+  const pkgPath = path.join(cwd, 'package.json');
+  if (!fs.existsSync(pkgPath)) return null;
+  try {
+    const pkg = fs.readJsonSync(pkgPath);
+    return typeof pkg.packageManager === 'string' ? pkg.packageManager : null;
+  } catch {
+    return null;
+  }
+}
+
+function parsePackageManagerSpec(spec) {
+  if (!spec || typeof spec !== 'string') return null;
+  const m = /^([a-zA-Z0-9_-]+)@(.+)$/.exec(spec.trim());
+  if (!m) return null;
+  return { name: m[1], version: m[2] };
+}
+
+function getCorepackCommand() {
+  return process.platform === 'win32' ? 'corepack.cmd' : 'corepack';
+}
+
+/**
+ * 프로젝트의 packageManager 필드/Corepack을 고려한 실행 명령 정보.
+ * - yarn@2+/pnpm 은 corepack <pm> ... 경로 우선
+ * - 그 외는 기존 로컬 글로벌 바이너리 경로 사용
+ */
+function resolvePackageManagerCommand(cwd) {
+  const pm = detectPackageManager(cwd);
+  const spec = parsePackageManagerSpec(readPackageManagerField(cwd));
+  const byPlatform = (bin) => (process.platform === 'win32' ? `${bin}.cmd` : bin);
+
+  if (spec && spec.name === 'yarn') {
+    const major = Number((spec.version || '').split('.')[0]);
+    if (Number.isFinite(major) && major >= 2) {
+      return {
+        pm: 'yarn',
+        cmd: getCorepackCommand(),
+        argsPrefix: ['yarn'],
+        displayInstall: 'corepack yarn install',
+      };
+    }
+    return {
+      pm: 'yarn',
+      cmd: byPlatform('yarn'),
+      argsPrefix: [],
+      displayInstall: 'yarn install',
+    };
+  }
+
+  if (spec && spec.name === 'pnpm') {
+    return {
+      pm: 'pnpm',
+      cmd: getCorepackCommand(),
+      argsPrefix: ['pnpm'],
+      displayInstall: 'corepack pnpm install',
+    };
+  }
+
+  if (pm === 'yarn') {
+    return { pm: 'yarn', cmd: byPlatform('yarn'), argsPrefix: [], displayInstall: 'yarn install' };
+  }
+  if (pm === 'pnpm') {
+    return { pm: 'pnpm', cmd: byPlatform('pnpm'), argsPrefix: [], displayInstall: 'pnpm install' };
+  }
+  if (pm === 'bun') {
+    return { pm: 'bun', cmd: byPlatform('bun'), argsPrefix: [], displayInstall: 'bun install' };
+  }
+  return { pm: 'npm', cmd: byPlatform('npm'), argsPrefix: [], displayInstall: 'npm install' };
+}
+
 /**
  * 2. 언어 감지 (JS vs TS)
  * tsconfig.json 존재 여부로 판단
@@ -101,6 +172,7 @@ function getInstallCommand(pm) {
 
 module.exports = {
   detectPackageManager,
+  resolvePackageManagerCommand,
   detectLanguage,
   detectBuildTool,
   detectMonorepo,
