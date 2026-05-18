@@ -2,7 +2,7 @@
   "name": "nextify-review",
   "displayName": "Nextify Review",
   "description": "Browse Nextify migration changes as a directory tree and open diffs (view-only). Works with the nextify-cli migrate-next workflow.",
-  "version": "0.0.1",
+  "version": "0.0.5",
   "publisher": "capstone0123",
   "license": "MIT",
   "engines": {
