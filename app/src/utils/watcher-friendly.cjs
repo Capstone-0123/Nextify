@@ -21,19 +21,27 @@ const WATCHER_EXCLUDES = {
   '**/node_modules/**': true,
   '**/.next/**': true,
   '**/dist/**': true,
-  '**/.ai-migration/**': true,
+  // .ai-migration/stepN/before|files|placeholders 는 프로젝트 전체 복사본 —
+  // 이 세 폴더만 워처에서 제외해 EMFILE 를 방지합니다.
+  // session.json 이 위치한 .ai-migration/stepN/ 직속은 제외하지 않습니다.
+  '**/.ai-migration/*/before/**': true,
+  '**/.ai-migration/*/files/**': true,
+  '**/.ai-migration/*/placeholders/**': true,
 };
 
 const SEARCH_EXCLUDES = {
-  '**/.ai-migration/**': true,
+  '**/.ai-migration/*/before/**': true,
+  '**/.ai-migration/*/files/**': true,
+  '**/.ai-migration/*/placeholders/**': true,
   '**/node_modules/**': true,
   '**/.next/**': true,
   '**/dist/**': true,
 };
 
-const FILES_EXCLUDES = {
-  '**/.ai-migration': true,
-};
+// files.exclude 에 .ai-migration 을 추가하지 않습니다.
+// files.exclude 는 vscode.workspace.findFiles() 에서도 적용되기 때문에
+// 추가하면 Nextify Review 확장이 session.json 을 찾지 못합니다.
+const FILES_EXCLUDES = {};
 
 /**
  * JSON with comments에 가까운 VS Code settings.json을 안전하게 파싱.
@@ -87,7 +95,7 @@ async function ensureWatcherFriendlySettings(projectRoot) {
         chalk.yellow(
           `   ⚠️  .vscode/settings.json 파싱 실패 — 워처 제외 설정 자동 추가를 건너뜁니다.\n` +
             `      EMFILE 로그가 거슬리면 직접 다음 키를 추가하세요:\n` +
-            `      "files.watcherExclude": { "**/.ai-migration/**": true, "**/node_modules/**": true, "**/.next/**": true, "**/dist/**": true }`
+            `      "files.watcherExclude": { "**/.ai-migration/*/before/**": true, "**/.ai-migration/*/files/**": true, "**/.ai-migration/*/placeholders/**": true, "**/node_modules/**": true, "**/.next/**": true, "**/dist/**": true }`
         )
       );
       return { written: false, reason: 'parse_failed' };

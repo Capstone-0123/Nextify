@@ -224,6 +224,64 @@ function openReviewDiff(change) {
   return { opened: false, command: null, reason: 'open-command-failed' };
 }
 
+/**
+ * 확장 디렉터리를 직접 스캔해 Nextify Review 확장이 설치된 에디터 종류를 반환합니다.
+ * `<editorType>.extensions/<extensionId>-<version>` 폴더 유무로 판별합니다.
+ * CLI `--list-extensions` 가 실패하는 환경(VS Code/Cursor 동시 설치, Cursor CLI PATH 미등록 등)의 폴백입니다.
+ * @returns {{ found: boolean, editorType?: 'cursor'|'vscode'|'vscode-insiders' }}
+ */
+function findExtensionInFilesystem(extensionId) {
+  const homedir = os.homedir();
+  const idLower = extensionId.toLowerCase();
+  const candidates = [
+    { dir: path.join(homedir, '.cursor', 'extensions'), editorType: 'cursor' },
+    { dir: path.join(homedir, '.vscode', 'extensions'), editorType: 'vscode' },
+    { dir: path.join(homedir, '.vscode-insiders', 'extensions'), editorType: 'vscode-insiders' },
+  ];
+
+  for (const { dir, editorType } of candidates) {
+    if (!fs.existsSync(dir)) continue;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      continue;
+    }
+    if (entries.some((name) => name.toLowerCase().startsWith(idLower + '-'))) {
+      return { found: true, editorType };
+    }
+  }
+  return { found: false };
+}
+
+/**
+ * 에디터 타입에 맞는 CLI 후보 중 실제로 실행 가능한 첫 번째 바이너리를 반환합니다.
+ */
+function resolveEditorCommand(editorType) {
+  const candidates =
+    editorType === 'cursor'
+      ? process.platform === 'win32'
+        ? ['cursor.cmd', 'cursor']
+        : ['cursor']
+      : editorType === 'vscode-insiders'
+        ? process.platform === 'win32'
+          ? ['code-insiders.cmd', 'code-insiders']
+          : ['code-insiders']
+        : process.platform === 'win32'
+          ? ['code.cmd', 'code']
+          : ['code'];
+
+  for (const cmd of candidates) {
+    const r = spawnSync(cmd, ['--version'], {
+      shell: false,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    if (!r.error && r.status === 0) return cmd;
+  }
+  return candidates[0];
+}
+
 function getReviewExtensionStatus() {
   const commands = getEditorCommands();
   let firstEditorCommand = null;
@@ -231,9 +289,10 @@ function getReviewExtensionStatus() {
   for (const binary of commands) {
     const result = spawnSync(binary, ['--list-extensions'], {
       shell: false,
-      stdio: ['ignore', 'pipe', 'ignore'],
+      stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       encoding: 'utf8',
+      timeout: 10_000,
     });
 
     if (result?.error?.code === 'ENOENT') {
@@ -260,6 +319,19 @@ function getReviewExtensionStatus() {
         command: binary,
       };
     }
+  }
+
+  // CLI 스캔으로 찾지 못한 경우, 파일시스템을 직접 확인합니다.
+  // VS Code와 Cursor가 동시에 설치된 환경에서 code.cmd 가 먼저 성공하고
+  // cursor CLI 가 skip 되면 잘못된 command 가 반환되는 문제를 방지합니다.
+  const fsResult = findExtensionInFilesystem(REVIEW_EXTENSION_MARKET_ID);
+  if (fsResult.found) {
+    const resolvedCmd = resolveEditorCommand(fsResult.editorType);
+    return {
+      editorAvailable: true,
+      installed: true,
+      command: resolvedCmd,
+    };
   }
 
   if (firstEditorCommand) {

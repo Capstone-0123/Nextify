@@ -22,6 +22,8 @@ migrate-next --help
 
 CLI가 `.ai-migration/.../session.json` 을 만들면, 확장이 Explorer의 **Nextify Review** 패널에서 트리·diff·경로 복사를 제공합니다. **CLI와 함께 쓰는 것을 권장**합니다.
 
+`migrate-next`(인자 없음) 또는 `migrate-next step1 --review`로 코드 리뷰 단계에 들어갈 때, VS Code/Cursor CLI를 찾을 수 있으면 **확장이 없을 경우 Marketplace 설치를 물어볼 수 있습니다.** (`NEXTIFY_ASSUME_YES=1`이면 확인 없이 설치를 시도합니다.)
+
 **마켓플레이스에서 설치 (배포 후)**
 
 1. VS Code에서 Extensions (`Ctrl+Shift+X`)를 엽니다.
@@ -50,11 +52,18 @@ npm run vsix
 
 ## 사전 준비 (CLI)
 
-- **`GEMINI_API_KEY`:** `migrate-next ask`, `test-gemini` 등 API 연동에 필요합니다. **마이그레이션할 프로젝트 루트**에서 `migrate-next`를 실행할 때, 같은 폴더의 `.env`와 `.env.local`을 읽습니다 (파일끼리는 `.env.local`이 `.env`보다 우선). **이미 터미널/OS에 설정된 환경 변수는 덮어쓰지 않습니다.** 전역 설치만 쓰는 경우 보조로 `npm root -g\nextify-cli\.env.local` 에도 둘 수 있습니다.
+### Gemini 인증 경로 구분
+
+- **`GEMINI_API_KEY` + `@google/generative-ai`(API):** `migrate-next ask` 처럼 **Node 안에서 Gemini HTTP API를 직접 호출하는** 명령에 사용됩니다. **마이그레이션할 프로젝트 루트**에서 `migrate-next`를 실행할 때, 같은 폴더의 `.env`와 `.env.local`을 읽습니다 (파일끼리는 `.env.local`이 `.env`보다 우선). **이미 터미널/OS에 설정된 환경 변수는 덮어쓰지 않습니다.** 전역 설치만 쓰는 경우 보조로 `npm root -g\nextify-cli\.env.local` 에도 둘 수 있습니다.
+- **`gemini` CLI:** 기본 오케스트레이터(`migrate-next`, 인자 없음) 마지막의 **코드 리뷰 단계만** Gemini CLI 서브프로세스를 띄웁니다. CLI는 프로젝트 `.env`의 `GEMINI_API_KEY`를 자식 프로세스 환경에 합칠 수 있지만, Gemini CLI 고유의 로그인·Vertex 등 다른 인증 방식과 병존할 수 있으므로(`app/src/utils/gemini-cli-spawn-env.cjs` 참고) **`ask`가 되더라도 CLI 리뷰만 실패하는** 경우는 인증 채널이 다른지부터 확인하면 됩니다.
+
+### 기타
+
 - 기본 오케스트레이터(`migrate-next`)의 AI 리뷰는 Gemini CLI(`gemini`)를 사용합니다.
 - 기본 오케스트레이터는 리뷰 직전에 Gemini CLI 설치 여부를 확인하고, 없으면 자동 설치를 시도합니다.
 - 자동 설치 실패 시 수동 설치 후 재실행하세요: `npm install -g @google/gemini-cli` (또는 `yarn global add @google/gemini-cli`, `pnpm add -g @google/gemini-cli`)
 - 기본 오케스트레이터는 step1~7을 한 번에 실행한 뒤, 최종 **Gemini CLI 대화형 리뷰(view-only)**와 **성능 레포트 생성**까지 한 번에 진행합니다.
+- step1~7 이후 **추적된 파일 변경이 하나도 없으면** 성능 레포트와 코드 리뷰 프롬프트는 생략됩니다(`migrate-next report`로 필요 시 별도 생성).
 - 기본 레포트 파일은 `nextify-performance-report.md` 로 생성됩니다.
 - Nextify Review 패널은 트리/diff 확인 및 선택 파일의 before/after 경로 복사 기능을 제공합니다.
 
@@ -86,12 +95,38 @@ migrate-next ask -q "질문..." --stream
 # Gemini가 준 JSON을 지정 파일에만 적용(검증용)
 migrate-next ask --apply -f path1,path2 -q "지시..."
 
-# Gemini API 연결 테스트
-migrate-next test-gemini
-
 # 레포트만 별도 재생성(필요 시)
 migrate-next report
 ```
+
+## CLI 출력 형식
+
+CLI는 일관된 색상·기호 규칙으로 출력합니다.
+
+| 색상 | 기호 | 의미 |
+|------|------|------|
+| 파랑(굵음) | 헤더 | 단계·페이즈 경계(`logSection`) |
+| 초록 | `✔` | 완료·성공(`logSuccess`) |
+| 노랑 | `⚠` | 경고·우회 가능한 실패(`logWarn`) |
+| 빨강 | `✖` | 치명적 에러(`logError`) |
+| 회색 | `·` | 하위 진행 항목·부가 정보(`logStep`) |
+
+각 단계 헤더는 `─` 50개로 구분되며, 에러 메시지는 항상 `process.exit(1)` 전에 출력됩니다.
+
+---
+
+## 워크스페이스 자동 추가 (copy 모드)
+
+`migrate-next` 또는 `migrate-next step1`을 **copy 모드**로 실행하면, 생성된 복사본 폴더를 현재 VS Code / Cursor 창의 워크스페이스에 자동으로 추가합니다 (`code --reuse-window --add <folder>`). 이렇게 하면 **Nextify Review 패널이 `session.json`을 즉시 인식**하여 변경 트리를 표시합니다.
+
+자동 추가가 실패하는 경우(VS Code/Cursor CLI가 PATH에 없을 때)는 노란색 안내 메시지와 함께 아래 두 가지 수동 방법을 안내합니다.
+
+1. **파일 → 작업 영역에 폴더 추가** → 복사본 경로 선택
+2. **부모 폴더를 워크스페이스로 열고** 터미널에서 하위 폴더로 이동해 `migrate-next` 실행
+
+자동 추가를 건너뛰려면 `NEXTIFY_SKIP_WORKSPACE_ADD=1` 환경 변수를 설정하세요.
+
+---
 
 ## 확장(Nextify Review) 확인 방법
 

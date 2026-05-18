@@ -78,7 +78,11 @@ class NextifyReviewController {
     this.session = null;
     this.currentChangeId = null;
     this.lastMissingSessionKey = null;
+    this.lastNoWorkspaceKey = null;
     this.lastFocusedManifestPath = null;
+    /** @type{'no_workspace'|'no_session'|null} */
+    this.panelEmptyReason = null;
+    this.sessionCandidateCount = 0;
 
     this.isLoading = false;
     this.refreshInFlight = false;
@@ -162,18 +166,25 @@ class NextifyReviewController {
         this.session = null;
         this.currentChangeId = null;
         this.lastFocusedManifestPath = null;
+        this.panelEmptyReason = 'no_workspace';
+        this.sessionCandidateCount = 0;
+        this.notifyNoWorkspaceOnce();
         return;
       }
 
-      const manifestPath = await getLatestSessionManifestPath(workspaceRoots);
+      this.lastNoWorkspaceKey = null;
+      const { manifestPath, totalCandidates } = await pickLatestSessionManifest(workspaceRoots);
+      this.sessionCandidateCount = totalCandidates;
       if (!manifestPath || !fs.existsSync(manifestPath)) {
         this.session = null;
         this.currentChangeId = null;
         this.lastFocusedManifestPath = null;
+        this.panelEmptyReason = 'no_session';
         this.notifyMissingSessionOnce(workspaceRoots.join('|'));
         return;
       }
 
+      this.panelEmptyReason = null;
       const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
       this.session = { ...manifest, manifestPath };
       this.currentChangeId = this.session.changes[0]?.id || null;
@@ -187,6 +198,7 @@ class NextifyReviewController {
       vscode.window.showErrorMessage(`Nextify Review 세션을 읽지 못했습니다: ${error.message}`);
       this.session = null;
       this.currentChangeId = null;
+      this.panelEmptyReason = 'no_session';
     } finally {
       this.isLoading = false;
       this.refreshInFlight = false;
@@ -233,8 +245,19 @@ class NextifyReviewController {
     }
     this.lastMissingSessionKey = marker;
     vscode.window.setStatusBarMessage(
-      'Nextify Review: 활성 세션이 없습니다. `migrate-next` 실행 후 패널을 확인하세요.',
+      'Nextify Review: 활성 세션이 없습니다. 해당 프로젝트 루트에서 migrate-next 실행 후 패널을 새로고침하세요.',
       4000,
+    );
+  }
+
+  notifyNoWorkspaceOnce() {
+    if (this.lastNoWorkspaceKey === 'no-workspace') {
+      return;
+    }
+    this.lastNoWorkspaceKey = 'no-workspace';
+    vscode.window.setStatusBarMessage(
+      'Nextify Review: 열린 워크스페이스 폴더가 없습니다. 폴더를 연 뒤 다시 확인하세요.',
+      5000,
     );
   }
 
@@ -328,22 +351,37 @@ class NextifyReviewController {
     const pendingCount = Array.isArray(changes) ? changes.length : 0;
 
     const sessionMeta = this.isLoading
-      ? 'Loading session...'
+      ? '세션 불러오는 중…'
       : this.session
-        ? `Step ${escapeHtml(String(this.session.step).replace('step', ''))} · ${pendingCount} changed (view-only)`
-        : 'No active .ai-migration session';
+        ? `Step ${escapeHtml(String(this.session.step).replace('step', ''))} · ${pendingCount}개 변경(view-only)`
+        : this.panelEmptyReason === 'no_workspace'
+          ? '열린 워크스페이스 폴더가 없습니다'
+          : '활성 .ai-migration 세션이 없습니다';
 
     const treeRoot = buildChangeTreeRoot(changes);
     const treeHtml = pendingCount
       ? renderTreeContentHtml(treeRoot, 0, current?.id)
       : '';
 
+    let emptyInner;
+    if (this.panelEmptyReason === 'no_workspace') {
+      emptyInner =
+        '워크스페이스에 폴더를 연 뒤(파일 → 폴더 열기), 프로젝트 루트에서 <code>migrate-next</code> 또는 CLI로 생성된 <code>.ai-migration/.../session.json</code>이 보이도록 하세요.';
+    } else {
+      emptyInner =
+        '이 폴더에서 <code>.ai-migration/.../session.json</code>을 찾지 못했습니다. 해당 프로젝트 루트에서 <code>migrate-next</code>를 실행한 뒤 새로고침하세요.';
+    }
+
     const items = this.isLoading
-      ? '<div class="empty">Loading session...</div>'
+      ? '<div class="empty">세션 불러오는 중…</div>'
       : pendingCount
         ? `<div class="tree-root" role="tree">${treeHtml}</div>`
-        : '<div class="empty">`migrate-next` 실행 후 Nextify Review 패널에서 세션을 확인하세요.</div>';
+        : `<div class="empty">${emptyInner}</div>`;
 
+    const multiSessionHint =
+      !this.isLoading && this.session && this.sessionCandidateCount > 1
+        ? '같은 창에서 <code>session.json</code> 후보가 여러 개면 <strong>step 번호가 가장 큰</strong> 파일을 사용합니다. '
+        : '';
     const disabled = this.isLoading ? 'disabled' : '';
     const openCurrentDisabled = this.isLoading || !hasSession || !current ? 'disabled' : '';
     const copyPathDisabled = this.isLoading || !hasSession ? 'disabled' : '';
@@ -487,7 +525,7 @@ class NextifyReviewController {
     <button type="button" data-command="copyAfterPath" ${copySelectedPathDisabled}>Copy AFTER path</button>
   </div>
   <div class="summary">${sessionMeta}</div>
-  <div class="hint">폴더를 펼쳐 파일을 선택한 다음 path 복사 버튼을 누르세요. Gemini CLI에는 <code>@복사한경로</code> 형태로 붙여 넣으면 됩니다.</div>
+  <div class="hint">${multiSessionHint}폴더를 펼쳐 파일을 선택한 다음 path 복사 버튼을 누르세요. Gemini CLI에는 <code>@복사한경로</code> 형태로 붙여 넣으면 됩니다.</div>
   ${items}
   <script>
     const vscode = acquireVsCodeApi();
@@ -518,13 +556,18 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-async function getLatestSessionManifestPath(workspaceRoots) {
+async function pickLatestSessionManifest(workspaceRoots) {
   const roots = Array.isArray(workspaceRoots) ? workspaceRoots : [];
-  if (roots.length === 0) return null;
+  if (roots.length === 0) {
+    return { manifestPath: null, totalCandidates: 0 };
+  }
 
-  const uris = await vscode.workspace.findFiles('**/.ai-migration/**/session.json');
+  // null 을 두 번째 인수로 전달하면 files.exclude 설정을 무시합니다.
+  // 이전 버전 watcher-friendly.cjs 가 .ai-migration 을 files.exclude 에 추가한
+  // 프로젝트에서도 session.json 을 정상적으로 발견할 수 있습니다.
+  const uris = await vscode.workspace.findFiles('**/.ai-migration/**/session.json', null);
   if (!uris || uris.length === 0) {
-    return null;
+    return { manifestPath: null, totalCandidates: 0 };
   }
 
   let latest = null;
@@ -546,7 +589,7 @@ async function getLatestSessionManifestPath(workspaceRoots) {
       // ignore invalid candidate
     }
   }
-  return latest;
+  return { manifestPath: latest, totalCandidates: uris.length };
 }
 
 function extractStepNumberFromManifestPath(manifestPath) {
