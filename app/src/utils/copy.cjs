@@ -3,8 +3,14 @@ const fs = require('fs-extra');
 const path = require('path');
 const ora = require('ora');
 
-async function cloneProject(source, destination) {
-  const spinner = ora('프로젝트를 복제하는 중...').start();
+async function cloneProject(source, destination, options = {}) {
+  const {
+    startMessage = '프로젝트를 복제하는 중...',
+    successMessage = `프로젝트 복제 완료: ${destination}`,
+    failMessage = '프로젝트 복제 실패',
+    silent = false,
+  } = options;
+  const spinner = silent ? null : ora(startMessage).start();
 
   try {
     await fs.copy(source, destination, {
@@ -32,9 +38,9 @@ async function cloneProject(source, destination) {
       await fs.copy(sourceGitignore, destGitignore, { overwrite: true });
     }
     
-    spinner.succeed(`프로젝트 복제 완료: ${destination}`);
+    if (spinner) spinner.succeed(successMessage);
   } catch (e) {
-    spinner.fail('프로젝트 복제 실패');
+    if (spinner) spinner.fail(failMessage);
     throw e;
   }
 }

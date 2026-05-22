@@ -30,6 +30,7 @@ const {
   writeStaticImportReport,
 } = require('./static-import-scan.cjs');
 const { sweepAfterAiApply } = require('../utils/post-ai-sweep.cjs');
+const { stripImportExtensions } = require('../utils/strip-import-extensions.cjs');
 
 const REPORT_FILE_NAME = 'nextify-typecheck-report.txt';
 const TSCONFIG_FILE_NAME = 'tsconfig.json';
@@ -175,6 +176,13 @@ function buildPackageManagerTscCommand(projectRoot) {
   }
   // npm 또는 lockfile 없음
   return { cmd: ext('npx'), prefix: ['-y', 'tsc'] };
+}
+
+function getBuildCommand(projectRoot) {
+  if (fs.existsSync(path.join(projectRoot, 'yarn.lock'))) return 'yarn build';
+  if (fs.existsSync(path.join(projectRoot, 'pnpm-lock.yaml'))) return 'pnpm build';
+  if (fs.existsSync(path.join(projectRoot, 'bun.lockb'))) return 'bun run build';
+  return 'npm run build';
 }
 
 /**
@@ -397,6 +405,23 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
     return { ran: false, reason: 'no_tsconfig' };
   }
 
+  // ── 0) TypeScript 검증 전 import 경로 보정 ───────────────────────────
+  // Vite 코드에 남은 './File.tsx' 형태는 Next.js/tsc에서 TS5097/TS2867을 만들 수 있습니다.
+  try {
+    const stripResult = await stripImportExtensions(projectRoot);
+    if (stripResult.totalReplacements > 0) {
+      console.log(
+        chalk.gray(
+          `   TypeScript 검증 전 import 경로를 정리했습니다. (${stripResult.totalReplacements}건, ${stripResult.changedFiles.length}개 파일)`,
+        ),
+      );
+    }
+  } catch (e) {
+    console.log(
+      chalk.gray(`   ⚠️  TypeScript 검증 전 import 경로 정리 중 오류가 발생했습니다. 마이그레이션은 계속 진행합니다: ${e?.message || e}`),
+    );
+  }
+
   // ── 0) 결정론적 src/ 전체 sweep (typecheck 직전 안전망) ─────────────
   // step5/7 의 여러 Gemini 호출에서 sweep 가 누락된 파일이 있을 수 있고,
   // 호출 순서로 인해 dead 가 된 후 sweep 가 한 번도 안 도는 경우(예: layout.tsx
@@ -422,43 +447,31 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
       const r = await sweepAfterAiApply(projectRoot, allRel);
       if (r.removedTargets.length > 0) {
         console.log(
-          chalk.cyan(
-            `   typecheck 직전 src/ 결정론 sweep: ${r.removedTargets.length}건 정리 (${r.changedFiles.length}개 파일)`,
+          chalk.gray(
+            `   타입 검사 전, 마이그레이션 과정에서 남은 불필요한 임시 코드를 정리했습니다. (${r.removedTargets.length}건, ${r.changedFiles.length}개 파일)`,
           ),
         );
       }
     }
   } catch (e) {
     console.log(
-      chalk.gray(`   ⚠️  typecheck 직전 sweep 중 오류(무시): ${e?.message || e}`),
+      chalk.gray(`   ⚠️  타입 검사 전 임시 코드 정리 중 오류가 발생했습니다. 마이그레이션은 계속 진행합니다: ${e?.message || e}`),
     );
   }
 
   // ── 1차 tsc ──────────────────────────────────────────────────────────
-  console.log(chalk.gray('   ⏳ TypeScript 타입 검사 중 (tsc --noEmit) ...'));
+  console.log(chalk.gray('   TypeScript 타입 검사 중...'));
   const t0 = Date.now();
   const first = runTscAndParse(projectRoot);
   if (!first.ok) {
-    console.log(
-      chalk.gray(`   ⚠️  타입 검사를 건너뜁니다: ${first.message || first.reason}`),
-    );
-    // 진단: 어떤 명령으로 시도했는지·이유 요약을 노출해 사용자가
-    // 환경(yarn berry/PnP 등) 문제를 바로 파악할 수 있게 한다.
-    const hint = describeTscInvocation(projectRoot);
-    if (hint) {
-      console.log(chalk.gray(`      ↳ 실행 방식: ${hint}`));
-    }
-    if (first.stderr) {
-      const head = String(first.stderr).split(/\r?\n/).filter(Boolean).slice(0, 3);
-      for (const line of head) {
-        console.log(chalk.gray(`      ↳ stderr: ${line}`));
-      }
-    }
+    console.log(chalk.yellow('   TypeScript 검증을 실행하지 못했습니다.'));
+    console.log(chalk.gray('   마이그레이션 결과는 유지됩니다.'));
+    console.log(chalk.gray(`   의존성 설치 후 \`${getBuildCommand(projectRoot)}\`로 직접 확인하세요.`));
     return { ran: false, reason: first.reason };
   }
 
   if (first.exitCode === 0 && first.errors.length === 0) {
-    console.log(chalk.green('   ✅ 타입 검사 통과: 별다른 unused/type 에러가 없습니다.'));
+    console.log(chalk.green('   TypeScript 검증 완료: 문제 없음'));
     try {
       staticImportScan = await runStaticImportScan(projectRoot);
       if (staticImportScan.ran && staticImportScan.missing.length > 0) {
@@ -525,7 +538,7 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
       autofixSummary = await autofixErrors(projectRoot, firstSplit.project);
       if (autofixSummary.totalFixed > 0) {
         console.log(
-          chalk.cyan(
+          chalk.white(
             `   패턴 기반 자동 수정: ${autofixSummary.totalFixed}건 (${autofixSummary.fixedFiles.length}개 파일)`,
           ),
         );
@@ -605,7 +618,7 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
       );
     } else {
       console.log(
-        chalk.cyan(
+        chalk.white(
           `   🤖 AI 보정 시도: 프로젝트 잔여 ${secondSplit.project.length}건을 파일당 1회씩, 최대 ${aiFixBudget}개 파일 의뢰`,
         ),
       );
@@ -669,7 +682,7 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
           const aiDelta = beforeAi.length - finalErrors.length;
           if (aiSummary.filesChanged.length > 0) {
             console.log(
-              chalk.cyan(
+              chalk.white(
                 `   Gemini 수정 결과: ${aiSummary.filesChanged.length}개 파일 변경, ${aiDelta >= 0 ? aiDelta : 0}건 해소`,
               ),
             );
@@ -684,10 +697,10 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
   // ── 5) 최종 리포트 ──────────────────────────────────────────────────
   if (finalErrors.length === 0 && finalExit === 0) {
     const summary = [
-      `   ✅ 타입 검사 통과 (총 ${(elapsedMs / 1000).toFixed(1)}s)`,
+      `   TypeScript 검증 완료: 문제 없음 (총 ${(elapsedMs / 1000).toFixed(1)}s)`,
     ];
     if (autofixSummary.totalFixed > 0) {
-      summary.push(`      • 패턴 기반 자동 수정: ${autofixSummary.totalFixed}건`);
+      summary.push(`      • 자동 수정으로 일부 타입 오류를 정리했습니다. (${autofixSummary.totalFixed}건)`);
     }
     if (aiSummary.filesChanged.length > 0) {
       summary.push(`      • Gemini 수정: ${aiSummary.filesChanged.length}개 파일`);
@@ -757,9 +770,10 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
   console.log('');
   console.log(
     chalk.yellow.bold(
-      `   ⚠️  타입 검사 경고: ${total}개의 잠재적 빌드 에러가 남아있습니다.`,
+      '   TypeScript 검증 완료: 추가 확인 필요',
     ),
   );
+  console.log(chalk.gray(`      남은 항목: ${total}건`));
   if (labelSummary.length > 0) {
     console.log(chalk.gray('      [라벨/레버 매칭 상위]'));
     for (const x of labelSummary.slice(0, 5)) {
@@ -803,9 +817,9 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
   }
 
   console.log('');
-  console.log(chalk.cyan(`      📄 자세한 내용: ${reportPath}`));
+  console.log(chalk.white(`      자세한 내용은 ${REPORT_FILE_NAME}에서 확인하세요.`));
   console.log(
-    chalk.cyan(
+    chalk.gray(
       `      🛠  수동 점검: 프로젝트 루트에서 \`npx tsc --noEmit\` 을 다시 실행해 위치를 확인하세요.`,
     ),
   );

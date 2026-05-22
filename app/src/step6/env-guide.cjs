@@ -19,7 +19,8 @@ async function guideEnvMigration(projectRoot) {
   const envFiles = await findEnvFiles(projectRoot);
   const viteEnvVars = await findViteEnvVariables(projectRoot);
 
-  console.log(chalk.white('환경 변수 설정'));
+  console.log(chalk.white('\n마이그레이션 후 확인할 항목'));
+  console.log(chalk.white('\n환경 변수 확인'));
 
   // ① 파일명 변경 안내
   console.log(chalk.white('  ① 환경 변수 파일명 확인'));
@@ -55,12 +56,12 @@ async function guideEnvMigration(projectRoot) {
     if (hasEnvLocal) {
       console.log(chalk.green('    ✔ .gitignore에 .env.local이 이미 포함되어 있습니다.'));
     } else {
-      console.log(chalk.white('    .env.local이 Git에 올라가지 않도록 .gitignore에 추가하세요:'));
+      console.log(chalk.white('    필요하면 .env.local이 Git에 올라가지 않도록 .gitignore에 추가하세요:'));
       console.log(chalk.gray('      .env.local'));
       console.log(chalk.gray('      .env*.local'));
     }
   } else {
-    console.log(chalk.white('    .gitignore 파일을 만들고 아래 내용을 추가하세요:'));
+    console.log(chalk.white('    필요하면 .gitignore 파일을 만들고 아래 내용을 추가하세요:'));
     console.log(chalk.gray('      .env.local'));
     console.log(chalk.gray('      .env*.local'));
   }
@@ -187,11 +188,12 @@ async function guideDependencyReset(projectRoot) {
   const lockFile = getLockFileName(pm);
   const installCmd = getInstallCommand(pm);
 
-  console.log(chalk.white('의존성 재설치'));
+  console.log(chalk.white('\n의존성 재설치'));
+  console.log(chalk.white('  아래 순서대로 의존성을 다시 설치하세요.'));
 
   // ① 기존 모듈 제거
   console.log(chalk.white('  ① 기존 node_modules 삭제'));
-  console.log(chalk.gray('    Vite 환경의 패키지가 남아 있어 충돌할 수 있습니다. 삭제 후 재설치하세요.'));
+  console.log(chalk.gray('    Vite 환경의 패키지가 남아 있어 충돌할 수 있습니다. 먼저 삭제하세요.'));
   console.log(chalk.gray(`    · macOS / Linux:  rm -rf node_modules ${lockFile}`));
   console.log(chalk.gray(`    · Windows (PowerShell):  Remove-Item -Recurse -Force node_modules, ${lockFile}`));
 

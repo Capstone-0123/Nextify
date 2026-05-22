@@ -241,7 +241,7 @@ async function maybeMigrateInlineBackgroundImagesWithAi(projectRoot, srcDir, fin
 
   await stopAndOfferGeminiApply({
     projectRoot,
-    discoveryLine: `JSX style.backgroundImage( url / getImageUrl ) 패턴이 ${uniq.length}개 파일에서 감지되었습니다. next/image + fill + priority 로 바꾸면 LCP가 좋아집니다.`,
+    discoveryLine: `배경 이미지 최적화 후보 ${uniq.length}개가 발견되었습니다.`,
     discoverySources: uniq.slice(0, 15),
     instructionForAi: `Next.js App Router step7 LCP 작업입니다.
 

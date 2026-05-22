@@ -23,7 +23,7 @@ function normalizeRelPathsForDisplay(paths) {
 /**
  * 경로를 한 줄에 하나씩 출력. 개수가 많으면 상한까지만 보여 주고 나머지는 요약.
  * @param {(s: string) => string} style chalk.gray / chalk.green 등
- * @param {string} leadLine 제목(개수는 함수가 붙임). 예: "  발견 위치", "\n✅ Gemini 적용 완료"
+ * @param {string} leadLine 제목(개수는 함수가 붙임). 예: "  발견 위치", "\n✔ Gemini 적용 완료"
  * @param {string[]} paths
  */
 function printRelPathsBlock(style, leadLine, paths, indent = '') {

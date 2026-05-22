@@ -441,9 +441,15 @@ async function ensureDependenciesInstalled(projectRoot) {
   const nodeModulesPath = path.join(projectRoot, 'node_modules');
   if (await fs.pathExists(nodeModulesPath)) return;
 
-  console.log(chalk.gray(`    → 의존성을 설치하는 중…`));
   const runtime = resolvePackageManagerCommand(projectRoot);
-  await runCommand(runtime.cmd, [...runtime.argsPrefix, 'install'], { cwd: projectRoot });
+  throw new Error(
+    `의존성이 설치되어 있지 않아 성능 레포트를 생성할 수 없습니다.\n` +
+      `아래 명령어로 패키지를 설치한 뒤 다시 실행하세요:\n` +
+      `  cd "${projectRoot}"\n` +
+      `  ${runtime.displayInstall}\n` +
+      `다시 실행:\n` +
+      `  migrate-next report`,
+  );
 }
 
 async function runBuild(projectRoot, kind) {
@@ -712,7 +718,7 @@ async function runLighthouseSeries(url, { runs = DEFAULT_LIGHTHOUSE_RUNS, warmup
     const runIndex = i + 1;
     console.log(
       chalk.gray(
-        `    ${isWarmup ? '준비 중' : `측정 중 (${runIndex - warmups}/${measuredRuns})`}…`
+        `    ${isWarmup ? '준비 중' : `측정 중 (${runIndex - warmups}/${measuredRuns})`}.`
       )
     );
     // eslint-disable-next-line no-await-in-loop
@@ -780,7 +786,7 @@ async function stopServerProcess(server) {
 }
 
 async function measureTarget({ label, projectRoot, kind, lighthouseRuns, warmupRuns }) {
-  console.log(chalk.gray(`\n  → ${label} 성능 측정 중…`));
+  console.log(chalk.gray(`\n  → ${label} 성능 측정 중.`));
   await runBuild(projectRoot, kind);
 
   const port = await getFreePort(kind === 'vite' ? 4173 : 3000);
@@ -1020,8 +1026,7 @@ const STEP_DESCRIPTIONS = [
   { step: 3, title: '라우팅 페이지 변환 (page.tsx/layout.tsx 생성)' },
   { step: 4, title: '스타일/리소스/공개 자산 이전' },
   { step: 5, title: "'use client' 처리 · Zustand 등 전역 상태 마이그레이션" },
-  { step: 6, title: '환경 변수 / 의존성 검토 가이드' },
-  { step: 7, title: 'next/image · next/font · 동적 import · 타입 보정' },
+  { step: 6, title: 'Next.js 심화 변환 (next/image · next/font · 동적 import · 타입 보정)' },
 ];
 
 function renderStepsSummaryTable({ finalStepNumber }) {
@@ -1428,8 +1433,8 @@ ${header}
 ## 비교 대상
 
 - Vite + React (원본)
-- Next.js (1~6단계, 성능 최적화 미적용)
-- Next.js (7단계 적용, 성능 최적화 적용)
+- Next.js (1~5단계, 기본 마이그레이션)
+- Next.js (1~6단계, Next.js 심화 변환 적용 시)
 
 ## 측정 지표
 
@@ -1439,7 +1444,7 @@ ${header}
 - FCP/LCP/SEO 표준편차(작을수록 안정적)
 - Total JS payload size (폴더 용량)
 
-## 변환 요약 (Step 1 ~ Step 7)
+## 변환 요약
 
 ${stepsTable}
 
@@ -1494,13 +1499,13 @@ async function readNextifyMeta(projectRoot) {
 }
 
 /**
- * pre-step7 스냅샷의 next.config.mjs 에 "측정 전용 빌드 완화" 옵션을 주입합니다.
+ * 기본 마이그레이션 스냅샷의 next.config.mjs 에 "측정 전용 빌드 완화" 옵션을 주입합니다.
  *
  * 이유:
- * - step7 의 마지막 단계는 "TypeScript 타입 검사 + AI 자동 수정" 입니다.
- *   이 보정은 메인 폴더(step1~7)에만 적용되고, pre-step7 스냅샷에는 잔존 타입
+ * - 심화 변환의 마지막 단계는 "TypeScript 타입 검사 + AI 자동 수정" 입니다.
+ *   이 보정은 메인 폴더(step1~6)에만 적용되고, 기본 마이그레이션 스냅샷에는 잔존 타입
  *   에러가 남습니다 (예: 사용 안 되는 React Router 코드의 children prop 누락).
- * - 그 결과 step1~6 baseline 측정 시 `next build` 가 type check 단계에서 실패하여
+ * - 그 결과 step1~5 baseline 측정 시 `next build` 가 type check 단계에서 실패하여
  *   Lighthouse 측정 자체가 불가능해집니다.
  * - 측정 목적상 type/eslint 정합성은 무관하므로 (런타임 perf 만 보면 됨) 빌드
  *   시점의 type/eslint 검사만 우회합니다. 멱등 — 이미 적용돼 있으면 skip.
@@ -1508,7 +1513,7 @@ async function readNextifyMeta(projectRoot) {
 async function injectMeasurementBuildOverrides(snapshotRoot) {
   const configPath = path.join(snapshotRoot, 'next.config.mjs');
   if (!(await fs.pathExists(configPath))) {
-    const fresh = `// [Nextify] pre-step7 측정 전용 빌드 완화 옵션\n` +
+    const fresh = `// [Nextify] 기본 마이그레이션 측정 전용 빌드 완화 옵션\n` +
       `/* __nextifyMeasurementOverridesApplied */\n` +
       `const nextConfig = {\n` +
       `  typescript: { ignoreBuildErrors: true },\n` +
@@ -1556,36 +1561,46 @@ async function injectMeasurementBuildOverrides(snapshotRoot) {
 
   console.warn(
     chalk.yellow(
-      `   ⚠️  pre-step7 스냅샷의 next.config.mjs 에 측정 완화 옵션을 자동 주입하지 못했습니다. ` +
-        `step1~6 baseline 빌드가 type 에러로 실패할 수 있습니다.`,
+      `   ⚠️  기본 마이그레이션 스냅샷의 next.config.mjs 에 측정 완화 옵션을 자동 주입하지 못했습니다. ` +
+        `step1~5 baseline 빌드가 type 에러로 실패할 수 있습니다.`,
     ),
   );
 }
 
-async function createPreStep7Snapshot(projectRoot) {
+async function createBaseMigrationSnapshot(projectRoot) {
   // IMPORTANT: 스냅샷을 프로젝트 "밖"에 둬야 fs-extra가 "자기 하위로 복사"를 막지 않습니다.
   const resolvedProjectRoot = path.resolve(projectRoot);
   const parentDir = path.dirname(resolvedProjectRoot);
   const projectName = path.basename(resolvedProjectRoot);
 
-  const snapshotRoot = path.join(parentDir, `${projectName}__nextify_snapshots`, 'pre-step7');
+  const snapshotRoot = path.join(parentDir, `${projectName}__nextify_snapshots`, 'post-step5');
   if (await fs.pathExists(snapshotRoot)) {
     await injectMeasurementBuildOverrides(snapshotRoot);
+    await ensureNextifyMeta(projectRoot, {
+      baseMigrationSnapshotRoot: snapshotRoot,
+    });
     return snapshotRoot;
   }
   await fs.ensureDir(path.dirname(snapshotRoot));
-  await cloneProject(projectRoot, snapshotRoot);
+  await cloneProject(projectRoot, snapshotRoot, {
+    silent: true,
+  });
   await injectMeasurementBuildOverrides(snapshotRoot);
   await ensureNextifyMeta(projectRoot, {
-    preStep7SnapshotRoot: snapshotRoot,
+    baseMigrationSnapshotRoot: snapshotRoot,
   });
   return snapshotRoot;
+}
+
+async function createPreStep7Snapshot(projectRoot) {
+  return createBaseMigrationSnapshot(projectRoot);
 }
 
 async function generatePerformanceReport({
   projectRoot,
   baselineViteRoot,
   preStep7Root,
+  baseMigrationRoot,
   outputMarkdownPath,
   lighthouseRuns,
   warmupRuns,
@@ -1598,19 +1613,27 @@ async function generatePerformanceReport({
   const viteRootResolved = baselineViteRoot || baselineFromMeta;
   if (!viteRootResolved) {
     throw new Error(
-      'Vite 원본 경로를 찾지 못했습니다. step1을 copy 모드로 실행했는지 확인하거나, step7 실행 시 --baseline <viteRoot> 옵션을 주세요.'
+      'Vite 원본 경로를 찾지 못했습니다. step1을 copy 모드로 실행했는지 확인하거나, report 실행 시 --baseline <viteRoot> 옵션을 주세요.'
     );
   }
 
-  const preRootResolved = preStep7Root || (await createPreStep7Snapshot(projectRoot));
+  const baseRootResolved =
+    baseMigrationRoot ||
+    preStep7Root ||
+    meta?.baseMigrationSnapshotRoot ||
+    meta?.preStep7SnapshotRoot ||
+    (await createBaseMigrationSnapshot(projectRoot));
+  const hasAdvancedMigration = Boolean(meta?.advancedCompleted || meta?.advanced?.completedAt);
 
   const targets = [];
   const failures = [];
   const measurePlans = [
     { label: 'Vite+React (baseline)', projectRoot: viteRootResolved, kind: 'vite' },
-    { label: 'Next.js (step1~6)', projectRoot: preRootResolved, kind: 'next' },
-    { label: 'Next.js (step1~7)', projectRoot, kind: 'next' },
+    { label: 'Next.js (step1~5)', projectRoot: baseRootResolved, kind: 'next' },
   ];
+  if (hasAdvancedMigration) {
+    measurePlans.push({ label: 'Next.js (step1~6 심화 변환)', projectRoot, kind: 'next' });
+  }
 
   for (const plan of measurePlans) {
     try {
@@ -1672,7 +1695,9 @@ async function generatePerformanceReport({
       outputMarkdownPath,
       generatedAt: new Date().toISOString(),
       baselineViteRoot: viteRootResolved,
-      preStep7Root: preRootResolved,
+      baseMigrationRoot: baseRootResolved,
+      preStep7Root: baseRootResolved,
+      advancedIncluded: hasAdvancedMigration,
       successfulTargets: targets.length,
       failedTargets: failures.length,
     },
@@ -1683,11 +1708,12 @@ async function generatePerformanceReport({
     return;
   }
 
-  console.log(chalk.green(`\n✅ 성능 레포트 생성 완료: ${outputMarkdownPath}\n`));
+  console.log(chalk.green(`\n✔ 성능 레포트 생성 완료: ${outputMarkdownPath}\n`));
 }
 
 module.exports = {
   generatePerformanceReport,
+  createBaseMigrationSnapshot,
   createPreStep7Snapshot,
   ensureNextifyMeta,
 };

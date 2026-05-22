@@ -263,13 +263,7 @@ async function optimizeDynamicImport(projectRoot) {
     if (fs.existsSync(srcDir)) {
       const tsxFiles = await collectTsxRelPaths(projectRoot, srcDir);
       if (tsxFiles.length > 0) {
-        const { changedFiles, removedTargets } = await sweepAfterAiApply(projectRoot, tsxFiles);
-        if (changedFiles.length > 0) {
-          const ssrFixes = removedTargets.filter((t) => t.startsWith('ssr:false@'));
-          if (ssrFixes.length > 0) {
-            console.log(`   🧹 Server Component 에서 dynamic({ ssr: false }) 의 ssr:false ${ssrFixes.length}건 제거됨`);
-          }
-        }
+        await sweepAfterAiApply(projectRoot, tsxFiles);
       }
     }
   } catch (err) {
