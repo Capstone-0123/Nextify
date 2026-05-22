@@ -1,4 +1,4 @@
-// src/step7/dynamic-import-migrator.cjs
+// src/step6/dynamic-import-migrator.cjs
 // Dynamic Import 적용
 
 const fs = require('fs-extra');

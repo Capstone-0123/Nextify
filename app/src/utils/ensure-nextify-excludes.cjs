@@ -5,7 +5,7 @@
 //
 // 대상 디렉토리:
 //   - `.ai-migration/`        : `--review` 모드의 IDE diff 검토 세션 / 단계별 스냅샷
-//   - `__nextify_snapshots/`  : `pre-step7` 스냅샷 등 성능 비교용 사본
+//   - `__nextify_snapshots/`  : 성능 비교용 사본
 //
 // 두 디렉토리 모두 *부분 변환된 코드* 를 들고 있어, 사용자 프로젝트의
 // `tsc` / `next build` 가 같이 들여다보면 syntax / 미사용변수 등으로

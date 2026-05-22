@@ -1,4 +1,4 @@
-// src/step6/env-guide.cjs
+// src/guides/env-guide.cjs
 // 환경 변수 설정 & node_modules 갱신 가이드 모듈
 
 const path = require('path');

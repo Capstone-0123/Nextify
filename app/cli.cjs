@@ -114,7 +114,7 @@ const { runStep4 } = require('./src/step4/index.cjs');
 const { runStep5 } = require('./src/step5/index.cjs');
 const { runStep6 } = require('./src/step6/index.cjs');
 const { runValidation } = require('./src/validation/index.cjs');
-const { runEnvAndDependencyGuide, guideDependencyReset } = require('./src/step6/env-guide.cjs');
+const { runEnvAndDependencyGuide, guideDependencyReset } = require('./src/guides/env-guide.cjs');
 
 const {
   detectPackageManager,
@@ -144,7 +144,7 @@ const { printRelPathsBlock } = require('./src/utils/path-list-print.cjs');
 const {
   createBaseMigrationSnapshot,
   ensureNextifyMeta,
-} = require('./src/step7/performance-report.cjs');
+} = require('./src/report/performance-report.cjs');
 const fs = require('fs-extra');
 const pkg = require('./package.json');
 
@@ -578,7 +578,7 @@ program
         await runAdvancedMigrationWithSession(projectRoot);
       }
 
-      const { generatePerformanceReport } = require('./src/step7/performance-report.cjs');
+      const { generatePerformanceReport } = require('./src/report/performance-report.cjs');
       await generatePerformanceReport({
         projectRoot,
         baselineViteRoot,
@@ -721,11 +721,10 @@ program
       }
 
       logSection('코드 리뷰 및 diff 확인');
-      logStep(`세션 파일: ${sessionPath}`);
-      logInfo('변경 전후 diff 창을 열고 Gemini CLI 리뷰를 시작합니다.');
-      logInfo('리뷰는 view-only이며, 파일은 자동 수정되지 않습니다.');
-      logInfo('진행 중 중단하려면 Ctrl+C를 누르세요.');
-      logInfo('@파일경로를 붙여 넣어 특정 파일을 Gemini에 참조시킬 수 있습니다.');
+      logStep('변경 전후 diff 창을 열고 Gemini CLI 리뷰를 시작합니다.');
+      logStep('리뷰는 view-only이며, 리뷰 결과를 참고해 필요한 변경 사항을 직접 반영하세요.');
+      logStep('진행 중 중단하려면 Ctrl+C를 누르세요.');
+      logStep('@파일경로를 붙여 넣어 특정 파일을 Gemini에 참조시킬 수 있습니다.');
       logStep('확장이 보이지 않으면 Marketplace에서 `capstone0123.nextify-review`를 설치하세요.');
       logStep('Gemini CLI가 없다면 `npm install -g @google/gemini-cli` 후 다시 실행하세요.');
 
