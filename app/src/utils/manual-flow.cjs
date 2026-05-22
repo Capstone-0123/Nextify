@@ -68,7 +68,7 @@ async function stopAndOfferGeminiApply(opts) {
     }
   }
 
-  console.log(chalk.yellow(`    🔍 ${discoveryLine}`));
+  console.log(chalk.white(`    🔍 ${discoveryLine}`));
   if (Array.isArray(discoverySources) && discoverySources.length > 0) {
     const uniq = [...new Set(discoverySources.map((s) => String(s).trim()).filter(Boolean))];
     if (uniq.length > 0) {
@@ -102,7 +102,7 @@ async function stopAndOfferGeminiApply(opts) {
     });
     spinner.stop();
     if (written.length > 0) {
-      printRelPathsBlock(chalk.green, '✅ Gemini 적용 완료', written, '    ');
+      printRelPathsBlock(chalk.green, '✔ Gemini 적용 완료', written, '    ');
     } else {
       console.log(chalk.gray('    Gemini가 수정할 내용을 찾지 못했습니다 — 이미 올바른 형태일 수 있습니다.'));
     }

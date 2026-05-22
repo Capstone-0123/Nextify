@@ -522,10 +522,6 @@ async function applyWithAutoBatching({
         const { written: w, rejected } = await applyAiFilesToDisk(projectRoot, patches, allowedRelPaths);
         written.push(...w);
         if (rejected.length > 0) {
-          // eslint-disable-next-line no-console
-          console.log(
-            `   🛡️  AI 패치 ${rejected.length}건을 syntax 회귀로 거부 (디스크는 원본 유지):`,
-          );
           for (const r of rejected) {
             // eslint-disable-next-line no-console
             console.log(`      - ${r.path} (syntax diag ${r.before} → ${r.after})`);
@@ -579,13 +575,7 @@ async function runAskApply(opts) {
   // 안전망 자체의 실패는 마이그레이션을 막지 않습니다.
   // ──────────────────────────────────────────────────────────────────
   try {
-    const { removedTargets } = await sweepAfterAiApply(projectRoot, written);
-    if (removedTargets.length > 0) {
-      // eslint-disable-next-line no-console
-      console.log(
-        `   🧹 사용처 없는 dead-guard ${removedTargets.length}개를 자동 정리했습니다.`
-      );
-    }
+    await sweepAfterAiApply(projectRoot, written);
   } catch (sweepErr) {
     // eslint-disable-next-line no-console
     console.log(

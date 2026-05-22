@@ -75,7 +75,9 @@ async function createStepReviewSession(projectRoot, stepName, executeStep) {
   await fs.ensureDir(filesRoot);
   await fs.ensureDir(placeholdersRoot);
   await fs.remove(previewRoot);
-  await cloneProject(projectRoot, previewRoot);
+  await cloneProject(projectRoot, previewRoot, {
+    silent: true,
+  });
 
   const previousAssumeYes = process.env.NEXTIFY_ASSUME_YES;
   process.env.NEXTIFY_ASSUME_YES = '1';
@@ -527,7 +529,9 @@ async function createSnapshotReviewSession(projectRoot, stepName, executeStep) {
   // "Cannot copy ... to a subdirectory of itself" 에러가 발생할 수 있으므로
   // 먼저 OS temp에 복제한 뒤 sessionRoot로 이동합니다.
   await fs.remove(beforeTempRoot);
-  await cloneProject(projectRoot, beforeTempRoot);
+  await cloneProject(projectRoot, beforeTempRoot, {
+    silent: true,
+  });
   await fs.remove(beforeRoot);
   await fs.move(beforeTempRoot, beforeRoot, { overwrite: true });
 

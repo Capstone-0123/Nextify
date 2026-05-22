@@ -9,19 +9,19 @@ const chalk = require('chalk');
  * Step 5 메인 실행 함수
  */
 async function runStep5(projectRoot) {
-  console.log(chalk.gray('────────────────────────────────────────────────────────────'));
-  console.log(chalk.blue.bold('[5단계] 서버·클라이언트 호환성 작업을 시작합니다…'));
+  console.log(chalk.gray('──────────────────────────────────────────────────────────────────────────────────────────────────────'));
+  console.log(chalk.blue.bold('[5단계] 서버·클라이언트 호환성 작업을 시작합니다.'));
 
   try {
-    console.log('  → 클라이언트 전용 컴포넌트를 판별해 "use client" 지시문을 추가하는 중…');
+    console.log('  → 클라이언트 전용 컴포넌트를 판별해 "use client" 지시문을 추가하는 중.');
     await migrateUseClient(projectRoot);
     console.log('  ✔ "use client" 추가 완료\n');
 
-    console.log('  → 브라우저 전용 API 사용 코드를 탐색하는 중…');
+    console.log('  → 브라우저 전용 API 사용 코드를 탐색하는 중.');
     await migrateBrowserAPIs(projectRoot);
     console.log('  ✔ 브라우저 API 호환 처리 완료\n');
 
-    console.log('  → Zustand 스토어를 분석해 SSR 안전 구조로 변환하는 중…');
+    console.log('  → Zustand 스토어를 분석해 SSR 안전 구조로 변환하는 중.');
     const result = await migrateZustandStores(projectRoot);
     console.log('  ✔ Zustand 스토어 변환 완료');
 
