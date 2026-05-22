@@ -2,7 +2,7 @@
 //
 // step4/asset-migrator 가 `import X from '../../assets/...svg'` 를
 // `const X = '/assets/....svg';` 로 변환한 뒤, 다른 마이그레이터
-// (예: step7/next-image-migrator) 가 `<img src={X}>` 를
+// (예: step6/next-image-migrator) 가 `<img src={X}>` 를
 // `<Image src="/assets/....svg" />` 같이 *리터럴 문자열*로 인라이닝하면
 // 결과적으로 X 가 사용처 0 인 죽은 변수로 남아 `next build` 의
 // type-check 가 TS6133 ('X' is declared but its value is never read.)

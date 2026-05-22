@@ -15,7 +15,7 @@ const REVIEW_ROOT_DIR = '.ai-migration';
 const DEFAULT_LIGHTHOUSE_RUNS = 3;
 const DEFAULT_LIGHTHOUSE_WARMUP_RUNS = 1;
 
-// 마이그레이션 도구(app/) 루트. 이 파일은 app/src/step7/performance-report.cjs 이므로 두 단계 위가 app/.
+// 마이그레이션 도구(app/) 루트. 이 파일은 app/src/report/performance-report.cjs 이므로 두 단계 위가 app/.
 const MIGRATOR_APP_ROOT = path.resolve(__dirname, '..', '..');
 // lighthouse v12는 Node 18.18 이상을 요구합니다.
 const LIGHTHOUSE_MIN_NODE_MAJOR = 18;
@@ -1592,14 +1592,14 @@ async function createBaseMigrationSnapshot(projectRoot) {
   return snapshotRoot;
 }
 
-async function createPreStep7Snapshot(projectRoot) {
+async function createPreStep6Snapshot(projectRoot) {
   return createBaseMigrationSnapshot(projectRoot);
 }
 
 async function generatePerformanceReport({
   projectRoot,
   baselineViteRoot,
-  preStep7Root,
+  preStep6Root,
   baseMigrationRoot,
   outputMarkdownPath,
   lighthouseRuns,
@@ -1619,9 +1619,9 @@ async function generatePerformanceReport({
 
   const baseRootResolved =
     baseMigrationRoot ||
-    preStep7Root ||
+    preStep6Root ||
     meta?.baseMigrationSnapshotRoot ||
-    meta?.preStep7SnapshotRoot ||
+    meta?.preStep6SnapshotRoot ||
     (await createBaseMigrationSnapshot(projectRoot));
   const hasAdvancedMigration = Boolean(meta?.advancedCompleted || meta?.advanced?.completedAt);
 
@@ -1696,7 +1696,7 @@ async function generatePerformanceReport({
       generatedAt: new Date().toISOString(),
       baselineViteRoot: viteRootResolved,
       baseMigrationRoot: baseRootResolved,
-      preStep7Root: baseRootResolved,
+      preStep6Root: baseRootResolved,
       advancedIncluded: hasAdvancedMigration,
       successfulTargets: targets.length,
       failedTargets: failures.length,
@@ -1714,7 +1714,7 @@ async function generatePerformanceReport({
 module.exports = {
   generatePerformanceReport,
   createBaseMigrationSnapshot,
-  createPreStep7Snapshot,
+  createPreStep6Snapshot,
   ensureNextifyMeta,
 };
 

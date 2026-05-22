@@ -1,7 +1,7 @@
 'use strict';
 
 // app/src/validation/typecheck-report.cjs
-// Step 7 마지막에 마이그레이션된 프로젝트에서 `tsc --noEmit` 을 실행해
+// 마이그레이션 단계 이후 프로젝트에서 `tsc --noEmit` 을 실행해
 // 잠재적 빌드 에러를 처리하는 통합 흐름:
 //   1) tsc 1차 → 에러 수집
 //   2) 결정론적 autofix (typecheck-autofix.cjs)  — 토큰 비용 0

@@ -51,7 +51,7 @@ function loadNextifyProjectConfig(projectRoot) {
     return out;
   }
 
-  for (const name of ['nextify.config.json', 'step7.config.json']) {
+  for (const name of ['nextify.config.json', 'step6.config.json']) {
     const p = path.join(dir, name);
     if (!fs.existsSync(p)) continue;
     let j;

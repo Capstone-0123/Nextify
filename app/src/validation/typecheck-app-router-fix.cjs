@@ -1,6 +1,6 @@
 'use strict';
 
-// Step7 typecheck 결정론 보조: App Router 와 맞지 않는 react-router 잔재를 고친다.
+// TypeScript 검증 결정론 보조: App Router 와 맞지 않는 react-router 잔재를 고친다.
 // - useRouter() 로 받은 인스턴스(이름이 router 가 아니어도)에 동일 규칙 적용
 // - router.push/replace({ pathname, query }) → 문자열 href + URLSearchParams
 // - *.push(url, { replace | state }) → replace 호출 + sessionStorage(state)

@@ -1,4 +1,4 @@
-// src/step7/next-image-migrator.cjs
+// src/step6/next-image-migrator.cjs
 // next/image 적용
 
 const fs = require('fs-extra');
@@ -243,7 +243,7 @@ async function maybeMigrateInlineBackgroundImagesWithAi(projectRoot, srcDir, fin
     projectRoot,
     discoveryLine: `배경 이미지 최적화 후보 ${uniq.length}개가 발견되었습니다.`,
     discoverySources: uniq.slice(0, 15),
-    instructionForAi: `Next.js App Router step7 LCP 작업입니다.
+    instructionForAi: `Next.js App Router step6 LCP 작업입니다.
 
 [목표]
 - style={{ backgroundImage: \`url(...)\` }} 등으로 깔린 큰 원격 이미지는 LCP 후보로 부적절합니다.
@@ -741,7 +741,7 @@ async function applyNextImage(projectRoot) {
       projectRoot,
       discoveryLine: `CSS url() 안에 외부 HTTPS 이미지가 ${uniqCss.length}개 파일에서 감지되었습니다. next/image로 옮기면 LCP가 크게 개선됩니다.`,
       discoverySources: uniqCss.slice(0, 15),
-      instructionForAi: `Next.js App Router 성능(step7) 작업입니다.
+      instructionForAi: `Next.js App Router 성능(step6) 작업입니다.
 
 [목표]
 - CSS background / background-image 의 url("https://...") 로 불러오는 큰 이미지(히어로/배너 등)는 Lighthouse LCP 후보가 되기 어렵습니다.

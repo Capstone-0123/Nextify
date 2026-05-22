@@ -1,4 +1,4 @@
-// src/step7/next-font-migrator.cjs
+// src/step6/next-font-migrator.cjs
 // next/font 적용
 
 const fs = require('fs-extra');

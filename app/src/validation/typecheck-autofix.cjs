@@ -1,7 +1,7 @@
 'use strict';
 
 // app/src/validation/typecheck-autofix.cjs
-// Step7 끝의 typecheck 결과를 받아 결정론적(LLM 호출 없는) 자동 수정을 수행.
+// TypeScript 검증 결과를 받아 결정론적(LLM 호출 없는) 자동 수정을 수행.
 // - 토큰 비용 0
 // - 화이트리스트 코드만 수정 (오작 위험을 최소화)
 // - idempotent: 이미 처리된 코드를 다시 건드리지 않음
