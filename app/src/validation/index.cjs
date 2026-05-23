@@ -1,7 +1,7 @@
 'use strict';
 
 // app/src/validation/index.cjs
-// Step7 밖으로 분리한 타입 검사 + 결정론/AI 보정 + 리포트 진입점.
+// 마이그레이션 단계 밖으로 분리한 타입 검사 + 결정론/AI 보정 + 리포트 진입점.
 
 const { runFinalTypecheckReport } = require('./typecheck-report.cjs');
 const {

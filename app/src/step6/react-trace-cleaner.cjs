@@ -1,4 +1,4 @@
-// src/step7/react-trace-cleaner.cjs
+// src/step6/react-trace-cleaner.cjs
 // 남겨둔 React 흔적 정리
 
 const fs = require('fs-extra');

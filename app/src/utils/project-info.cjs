@@ -97,8 +97,22 @@ function detectLanguage(cwd) {
 
 /**
  * 3. 빌드 도구 감지 (Vite vs CRA vs Other)
- * package.json의 의존성을 확인
+ * package.json 의존성, Vite 설정 파일, scripts를 함께 확인
  */
+function hasViteConfig(cwd) {
+  return ['vite.config.ts', 'vite.config.js', 'vite.config.mjs', 'vite.config.mts'].some((file) =>
+    fs.existsSync(path.join(cwd, file)),
+  );
+}
+
+function hasViteScript(pkg) {
+  const scripts = pkg?.scripts || {};
+  return Object.values(scripts).some((script) => {
+    if (typeof script !== 'string') return false;
+    return /(^|\s|&&|\|\||;)(cross-env\s+[^&;|]*\s+)?vite(\s|$)/.test(script);
+  });
+}
+
 function detectBuildTool(cwd) {
   const pkgPath = path.join(cwd, 'package.json');
 
@@ -111,6 +125,8 @@ function detectBuildTool(cwd) {
     const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
 
     if (allDeps['vite']) return 'vite';
+    if (hasViteConfig(cwd)) return 'vite';
+    if (hasViteScript(pkg)) return 'vite';
     if (allDeps['react-scripts']) return 'cra'; // Create React App
     return 'other';
   } catch (e) {
