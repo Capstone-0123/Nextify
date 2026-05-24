@@ -1,7 +1,5 @@
 const fs = require('fs-extra');
 const path = require('path');
-const os = require('os');
-const crypto = require('crypto');
 const { generateTextStream, getNextifyScopeRules } = require('./gemini-client.cjs');
 const { buildGeminiCliSpawnEnv, getGeminiCliReviewAutoArgs } = require('./gemini-cli-spawn-env.cjs');
 const ora = require('ora');
@@ -86,10 +84,25 @@ function buildShortInteractiveSeedPointerPrompt(seedAbsPath) {
   ].join(' ');
 }
 
+function resolveInteractiveSeedFile(sessionPath) {
+  const projectRoot = resolveProjectRootFromSessionPath(sessionPath) || process.cwd();
+  return path.join(projectRoot, '.nextify', 'gemini-review-seed.txt');
+}
+
+function resolveProjectRootFromSessionPath(sessionPath) {
+  if (!sessionPath) return null;
+  const resolved = path.resolve(sessionPath);
+  const normalized = resolved.replace(/\\/g, '/');
+  const marker = '/.ai-migration/';
+  const idx = normalized.toLowerCase().lastIndexOf(marker);
+  if (idx < 0) return null;
+  return resolved.slice(0, idx);
+}
+
 /**
  * @param {object} session
  * @param {string} sessionPath
- * @returns {Promise<string>} --prompt-interactive에 넣을 문자열(전체 시드 또는 짧은 포인터)
+ * @returns {Promise<{ prompt: string, seedFile: string|null }>} --prompt-interactive에 넣을 문자열과 임시 시드 파일
  */
 async function prepareInteractiveSeedForCli(session, sessionPath) {
   const full = buildInteractiveSeedPrompt(session, sessionPath);
@@ -99,17 +112,15 @@ async function prepareInteractiveSeedForCli(session, sessionPath) {
     process.platform === 'win32' && singleLine.length > WIN_MAX_SINGLE_LINE_PROMPT;
 
   if (!forceFile && !winTooLong) {
-    return full;
+    return { prompt: full, seedFile: null };
   }
 
-  const seedFile = path.join(
-    os.tmpdir(),
-    `nextify-gemini-interactive-seed-${crypto.randomUUID()}.txt`,
-  );
+  const seedFile = resolveInteractiveSeedFile(sessionPath);
+  await fs.ensureDir(path.dirname(seedFile));
   await fs.writeFile(seedFile, full, 'utf8');
   // eslint-disable-next-line no-console
   // 내부 처리 과정으로 사용자에게 노출하지 않음
-  return buildShortInteractiveSeedPointerPrompt(seedFile);
+  return { prompt: buildShortInteractiveSeedPointerPrompt(seedFile), seedFile };
 }
 
 function parseCsvList(value) {
@@ -290,6 +301,7 @@ async function runAiReviewSessionCliStream(opts) {
 
   let prompt = null;
   let interactiveSeedPrompt = null;
+  let interactiveSeedFile = null;
   if (normalizedMode === 'stream') {
     const stage1Spinner = ora('Loading review context...').start();
     try {
@@ -298,7 +310,9 @@ async function runAiReviewSessionCliStream(opts) {
       stage1Spinner.stop();
     }
   } else if (normalizedMode === 'interactive-seeded') {
-    interactiveSeedPrompt = await prepareInteractiveSeedForCli(session, sessionPath);
+    const seed = await prepareInteractiveSeedForCli(session, sessionPath);
+    interactiveSeedPrompt = seed.prompt;
+    interactiveSeedFile = seed.seedFile;
   }
 
   const primaryModel = model || process.env.NEXTIFY_GEMINI_CLI_MODEL || 'gemini-2.5-flash-lite';
@@ -541,17 +555,23 @@ async function runAiReviewSessionCliStream(opts) {
     throw lastErr || new Error('Gemini CLI review failed after retries.');
   }
 
-  let last;
-  for (const modelName of modelsToTry) {
-    if (signal?.aborted) break;
-    // eslint-disable-next-line no-await-in-loop
-    last = await attemptWithModel(modelName);
-    if (last?.usageLimit) {
-      continue;
+  try {
+    let last;
+    for (const modelName of modelsToTry) {
+      if (signal?.aborted) break;
+      // eslint-disable-next-line no-await-in-loop
+      last = await attemptWithModel(modelName);
+      if (last?.usageLimit) {
+        continue;
+      }
+      return last;
     }
     return last;
+  } finally {
+    if (interactiveSeedFile) {
+      await fs.remove(interactiveSeedFile).catch(() => {});
+    }
   }
-  return last;
 }
 
 /**

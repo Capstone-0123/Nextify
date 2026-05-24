@@ -306,13 +306,6 @@ program
         });
         process.chdir(targetPath);
         logStep(`작업 경로: ${targetPath}`);
-
-        const workspaceAdd = addWorkspaceFolderToEditor(targetPath);
-        if (workspaceAdd.ok) {
-          logStep(`VS Code/Cursor 워크스페이스에 복사본 폴더를 추가했습니다. (${workspaceAdd.command})`);
-        } else {
-          logWarn('VS Code/Cursor 워크스페이스에 복사본 폴더를 자동 추가하지 못했습니다. 패널이 보이지 않으면 폴더를 직접 추가해 주세요.');
-        }
       }
 
       if (mode === 'review') {
@@ -710,8 +703,11 @@ program
 
       let sessionPath = options.session ? path.resolve(options.session) : null;
       if (sessionPath && !(await fs.pathExists(sessionPath))) {
-        logError(`지정한 session.json을 찾을 수 없습니다: ${sessionPath}`);
-        process.exit(1);
+        const archivePath = getArchivedReviewSessionPath(sessionPath);
+        if (!(await fs.pathExists(archivePath))) {
+          logError(`지정한 session.json을 찾을 수 없습니다: ${sessionPath}`);
+          process.exit(1);
+        }
       }
 
       if (!sessionPath) {
@@ -737,6 +733,7 @@ program
         await runReviewSessionFlow({
           sessionPath,
           workingDirectory: cwd,
+          workspaceFolder: getProjectRootFromSessionPath(sessionPath) || cwd,
         });
       } finally {
         await closeReviewSession(sessionPath);
@@ -869,13 +866,32 @@ function getArchivedReviewSessionPath(sessionPath) {
   return path.join(path.dirname(sessionPath), 'session.review.json');
 }
 
+function getProjectRootFromSessionPath(sessionPath) {
+  const resolved = path.resolve(String(sessionPath || ''));
+  const normalized = resolved.replace(/\\/g, '/');
+  const marker = `/${REVIEW_ROOT_DIR}/`;
+  const idx = normalized.toLowerCase().lastIndexOf(marker.toLowerCase());
+  if (idx < 0) {
+    return null;
+  }
+  return resolved.slice(0, idx);
+}
+
 async function setReviewSessionActive(sessionPath, active) {
-  if (!sessionPath || !(await fs.pathExists(sessionPath))) {
+  if (!sessionPath) {
     return null;
   }
 
   const archivePath = getArchivedReviewSessionPath(sessionPath);
-  let manifest = await fs.readJson(sessionPath);
+  let manifest = null;
+  if (await fs.pathExists(sessionPath)) {
+    manifest = await fs.readJson(sessionPath);
+  } else if (active === true && (await fs.pathExists(archivePath))) {
+    manifest = await fs.readJson(archivePath);
+  } else {
+    return null;
+  }
+
   if (active === true && (!Array.isArray(manifest.changes) || manifest.changes.length === 0)) {
     const archivedPath = manifest.archivedManifestPath || archivePath;
     if (await fs.pathExists(archivedPath)) {
@@ -953,6 +969,28 @@ async function closeReviewSession(sessionPath) {
   } catch (error) {
     logWarn(`리뷰 세션 종료 중 session.json 상태 업데이트 실패: ${error?.message || error}`);
   }
+}
+
+async function saveInactiveReviewArchive(sessionPath, manifest) {
+  if (!sessionPath || !manifest || !Array.isArray(manifest.changes) || manifest.changes.length === 0) {
+    return null;
+  }
+
+  const archivePath = getArchivedReviewSessionPath(sessionPath);
+  const now = new Date().toISOString();
+  await fs.writeJson(
+    archivePath,
+    {
+      ...manifest,
+      active: false,
+      status: 'closed',
+      activatedAt: null,
+      closedAt: now,
+    },
+    { spaces: 2 },
+  );
+  await fs.remove(sessionPath);
+  return archivePath;
 }
 
 async function printBaseMigrationFinalGuide(projectRoot, mode = 'copy') {
@@ -1034,7 +1072,8 @@ async function findLatestStepSession(projectRoot) {
     if (!m) continue;
     const stepNum = Number(m[1]);
     const candidate = path.join(reviewRoot, entry.name, 'session.json');
-    if (!(await fs.pathExists(candidate))) continue;
+    const archiveCandidate = getArchivedReviewSessionPath(candidate);
+    if (!(await fs.pathExists(candidate)) && !(await fs.pathExists(archiveCandidate))) continue;
     if (stepNum > bestStep) {
       bestStep = stepNum;
       bestPath = candidate;
@@ -1171,13 +1210,6 @@ async function runDefaultOrchestrator() {
     });
     process.chdir(targetPath);
     logStep(`작업 경로: ${targetPath}`);
-
-    const workspaceAdd = addWorkspaceFolderToEditor(targetPath);
-    if (workspaceAdd.ok) {
-      logStep(`VS Code/Cursor 워크스페이스에 복사본 폴더를 추가했습니다. (${workspaceAdd.command})`);
-    } else {
-      logWarn('VS Code/Cursor 워크스페이스에 복사본 폴더를 자동 추가하지 못했습니다. 패널이 보이지 않으면 폴더를 직접 추가해 주세요.');
-    }
   }
 
   // 이전 실행에서 남아있는 step 아티팩트를 정리합니다.
@@ -1192,32 +1224,37 @@ async function runDefaultOrchestrator() {
     ['step5', runStep5],
   ];
 
-  const finalReviewSession = await createSnapshotReviewSession(targetPath, 'step5', async (projectRoot) => {
-    for (const [stepName, stepRunner] of stepEntries) {
-      const partNum = stepName.replace('step', '');
-      logSection(`Part ${partNum} (${stepName})`);
-      await stepRunner(projectRoot);
-    }
+  const finalReviewSession = await createSnapshotReviewSession(
+    targetPath,
+    'step5',
+    async (projectRoot) => {
+      for (const [stepName, stepRunner] of stepEntries) {
+        const partNum = stepName.replace('step', '');
+        logSection(`Part ${partNum} (${stepName})`);
+        await stepRunner(projectRoot);
+      }
 
-    logSection('TypeScript 검증');
-    await runValidation(projectRoot);
+      logSection('TypeScript 검증');
+      await runValidation(projectRoot);
 
-    try {
-      const snapshotPath = await createBaseMigrationSnapshot(projectRoot);
-      await ensureNextifyMeta(projectRoot, {
-        baseMigrationCompleted: true,
-        baseMigrationCompletedAt: new Date().toISOString(),
-        baseMigrationSnapshotRoot: snapshotPath,
-        advancedCompleted: false,
-      });
-      logSuccess('성능 레포트 비교용 데이터가 생성되었습니다.');
-      logStep('생성된 폴더: __nextify_snapshots');
-      logStep('이 폴더는 migrate-next report에서 사용됩니다.');
-    } catch (snapshotErr) {
-      logWarn(`비교용 복사본 생성 실패: ${snapshotErr?.message || snapshotErr}`);
-      logStep('성능 레포트에서 기본 마이그레이션 비교 대상이 현재 상태로 대체될 수 있습니다.');
-    }
-  }, { writeManifest: false });
+      try {
+        const snapshotPath = await createBaseMigrationSnapshot(projectRoot);
+        await ensureNextifyMeta(projectRoot, {
+          baseMigrationCompleted: true,
+          baseMigrationCompletedAt: new Date().toISOString(),
+          baseMigrationSnapshotRoot: snapshotPath,
+          advancedCompleted: false,
+        });
+        logSuccess('성능 레포트 비교용 데이터가 생성되었습니다.');
+        logStep('생성된 폴더: __nextify_snapshots');
+        logStep('이 폴더는 migrate-next report에서 사용됩니다.');
+      } catch (snapshotErr) {
+        logWarn(`비교용 복사본 생성 실패: ${snapshotErr?.message || snapshotErr}`);
+        logStep('성능 레포트에서 기본 마이그레이션 비교 대상이 현재 상태로 대체될 수 있습니다.');
+      }
+    },
+    { writeManifest: false, active: false },
+  );
 
   const { manifest, manifestPath } = finalReviewSession;
   const finalStepLabel = 'step1~step5';
@@ -1229,50 +1266,11 @@ async function runDefaultOrchestrator() {
   }
 
   const typeSummary = summarizeChangeTypes(manifest.changes);
+  await saveInactiveReviewArchive(manifestPath, manifest);
   logSuccess(`${finalStepLabel} 완료 (변경 ${manifest.changes.length}개)`);
   logStep(`created ${typeSummary.create}  modified ${typeSummary.modify}  deleted ${typeSummary.delete}`);
   logSuccess('기본 마이그레이션 완료.');
   await printBaseMigrationFinalGuide(targetPath, mode);
-
-  const { runReview } = await inquirer.prompt([
-    {
-      type: 'confirm',
-      name: 'runReview',
-      message: '코드 리뷰를 진행하시겠습니까?',
-      default: false,
-    },
-  ]);
-
-  if (!runReview) {
-    logInfo('코드 리뷰를 선택하지 않아 session.json은 생성하지 않았습니다.');
-    return;
-  }
-
-  await fs.writeJson(
-    manifestPath,
-    {
-      ...manifest,
-      active: true,
-      status: 'active',
-      activatedAt: new Date().toISOString(),
-      closedAt: null,
-    },
-    { spaces: 2 },
-  );
-
-  logSection('코드 리뷰 및 diff 확인');
-  logStep(`리뷰 세션 파일: ${manifestPath}`);
-  logStep('Nextify Review 패널에서 변경 목록을 확인한 뒤 필요한 diff를 직접 여세요.');
-  try {
-    await runReviewSessionFlow({
-      sessionPath: manifestPath,
-      workingDirectory: targetPath,
-      workspaceFolder: mode === 'copy' ? targetPath : null,
-    });
-  } finally {
-    await closeReviewSession(manifestPath);
-  }
-  logSuccess('코드 리뷰 완료.');
 }
 
 // Only run default orchestrator when user calls `migrate-next` with no subcommand.
