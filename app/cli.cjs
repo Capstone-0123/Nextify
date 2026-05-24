@@ -562,16 +562,7 @@ program
   .option('-f, --files <list>', '쉼표로 구분한 프로젝트 루트 기준 상대 경로 (--apply 시 필수)')
   .action(async (options) => {
     try {
-      // API 키 확인
-      if (!process.env.GEMINI_API_KEY) {
-        console.error(chalk.red('\n❌ GEMINI_API_KEY 환경 변수가 설정되지 않았습니다.'));
-        console.log(chalk.yellow('\n설정 방법:'));
-        console.log(chalk.white('  1. Google AI Studio에서 API 키 발급: https://makersuite.google.com/app/apikey'));
-        console.log(chalk.white('  2. 환경 변수 설정:'));
-        console.log(chalk.cyan('     Windows: set GEMINI_API_KEY=your_api_key'));
-        console.log(chalk.cyan('     Mac/Linux: export GEMINI_API_KEY=your_api_key'));
-        process.exit(1);
-      }
+      await ensureGeminiApiKey();
 
       if (options.apply && options.stream) {
         console.error(chalk.red('\n❌ --apply 와 --stream 은 함께 쓸 수 없습니다.\n'));

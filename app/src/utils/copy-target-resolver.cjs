@@ -148,10 +148,7 @@ async function resolveCopyTargetPath(opts) {
     }
 
     // 3) 충돌 — 사용자에게 선택지 제공
-    const isDir = stat.isDirectory();
-    console.log('');
     logError(`복사본 경로가 이미 존재합니다: ${targetPath}`);
-    logStep(isDir ? '폴더에 파일이 들어 있습니다.' : '같은 이름의 파일이 있습니다.');
 
     const interactive = !!process.stdin.isTTY && process.env.NEXTIFY_ASSUME_YES !== '1';
     if (!interactive) {
@@ -160,14 +157,14 @@ async function resolveCopyTargetPath(opts) {
 
     const choices = [
       {
-        name: '다른 이름으로 다시 입력 (추천 — 작업 중 다른 마이그레이션 결과를 덮지 않음)',
+        name: '다른 이름으로 다시 입력 (추천 — 이전 마이그레이션 결과를 유지합니다)',
         value: 'rename',
       },
+      {
+        name: '기존 폴더를 삭제하고 다시 생성',
+        value: 'overwrite',
+      },
     ];
-    if (isDir) {
-      choices.push({ name: '기존 폴더의 모든 내용을 삭제하고 덮어쓰기', value: 'overwrite' });
-    }
-    choices.push({ name: '취소', value: 'cancel' });
 
     const { resolution } = await inquirer.prompt([
       {
@@ -178,24 +175,7 @@ async function resolveCopyTargetPath(opts) {
       },
     ]);
 
-    if (resolution === 'cancel') {
-      logStep('사용자 취소: 마이그레이션을 중단합니다.');
-      process.exit(0);
-    }
-
     if (resolution === 'overwrite') {
-      const { confirmDelete } = await inquirer.prompt([
-        {
-          type: 'confirm',
-          name: 'confirmDelete',
-          message: chalk.red(`'${targetPath}' 의 모든 내용을 정말 삭제할까요?`),
-          default: false,
-        },
-      ]);
-      if (!confirmDelete) {
-        promptDefault = defaultRenameSuggestion(targetPath, attempt++);
-        continue;
-      }
       try {
         await fs.remove(targetPath);
       } catch (e) {
