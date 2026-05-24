@@ -126,6 +126,8 @@ const {
 } = require('./src/utils/project-info.cjs');
 const { spawnSync } = require('child_process');
 const { cloneProject } = require('./src/utils/copy.cjs');
+const { resolveCopyTargetPath } = require('./src/utils/copy-target-resolver.cjs');
+const { ensureGeminiApiKey } = require('./src/utils/gemini-precheck.cjs');
 const {
   REVIEW_ROOT_DIR,
   REVIEW_EXTENSION_MARKET_ID,
@@ -213,32 +215,13 @@ program
       let mode;
       let targetPath = cwd;
 
-      // CLI 옵션으로 모드 결정
       if (options.review) {
         mode = 'review';
       } else if (options.output) {
         mode = 'copy';
-        // 입력값 정리 (공백 제거)
-        const cleanedPath = options.output.trim();
-
-        // Windows 절대 경로 판단 (C:\, D:\ 등) 또는 Unix 절대 경로 (/)
-        const isAbsolutePath = path.isAbsolute(cleanedPath) || /^[A-Za-z]:[\\/]/.test(cleanedPath);
-
-        if (isAbsolutePath) {
-          // 절대 경로면 그대로 사용
-          targetPath = path.resolve(cleanedPath);
-        } else if (cleanedPath.includes('/') || cleanedPath.includes('\\')) {
-          // 상대 경로 (./foo, ../bar 등)면 현재 디렉토리 기준
-          targetPath = path.resolve(cwd, cleanedPath);
-        } else {
-          // 폴더명만 입력한 경우 부모 디렉토리에 생성
-          const parentDir = path.dirname(cwd);
-          targetPath = path.join(parentDir, cleanedPath);
-        }
       } else if (options.inplace) {
         mode = 'inplace';
       } else {
-        // 옵션 없으면 대화형으로 선택
         const answer = await inquirer.prompt([
           {
             type: 'list',
@@ -253,39 +236,11 @@ program
         mode = answer.mode;
       }
 
-      if (mode === 'copy' && !options.output) {
-        const parentDir = path.dirname(cwd);
-        const currentDirName = path.basename(cwd);
-        const defaultNewPath = path.join(parentDir, `${currentDirName}-nextified`);
-
-        const { outputPath } = await inquirer.prompt([
-          {
-            type: 'input',
-            name: 'outputPath',
-            message: '복사본을 생성할 경로 (폴더명 또는 전체 경로):',
-            default: defaultNewPath,
-          },
-        ]);
-
-        // 입력값 정리 (공백 제거)
-        const cleanedPath = outputPath.trim();
-
-        // Windows 절대 경로 판단 (C:\, D:\ 등) 또는 Unix 절대 경로 (/)
-        const isAbsolutePath = path.isAbsolute(cleanedPath) || /^[A-Za-z]:[\\/]/.test(cleanedPath);
-
-        if (isAbsolutePath) {
-          // 절대 경로면 그대로 사용
-          targetPath = path.resolve(cleanedPath);
-        } else if (cleanedPath.includes('/') || cleanedPath.includes('\\')) {
-          // 상대 경로 (./foo, ../bar 등)면 현재 디렉토리 기준
-          targetPath = path.resolve(cwd, cleanedPath);
-        } else {
-          // 폴더명만 입력한 경우 부모 디렉토리에 생성
-          targetPath = path.join(parentDir, cleanedPath);
-        }
-      }
-
       if (mode === 'copy') {
+        targetPath = await resolveCopyTargetPath({
+          cwd,
+          predefinedPath: options.output ? options.output.trim() : null,
+        });
         await cloneProject(cwd, targetPath, {
           startMessage: '작업용 프로젝트를 복사하는 중...',
           successMessage: `작업용 프로젝트 복사 완료: ${targetPath}`,
@@ -512,6 +467,8 @@ program
   .action(async () => {
     try {
       const projectRoot = process.cwd();
+      // step5~7 는 Gemini API 를 사용하므로 시작 전에 키 보유를 확정한다.
+      await ensureGeminiApiKey({ projectRoot });
       const stepEntries = [
         ['step1', runStep1],
         ['step2', runStep2],
@@ -1059,6 +1016,10 @@ async function runDefaultOrchestrator() {
     process.exit(1);
   }
 
+  // 마이그레이션 시작 전에 Gemini 키 보유 여부를 먼저 확인한다.
+  // (step5~7 와 최종 리뷰가 키에 의존하므로, 작업 도중 멈추지 않도록 사전 차단)
+  await ensureGeminiApiKey({ projectRoot: cwd });
+
   // 2) mode selection
   const answer = await inquirer.prompt([
     {
@@ -1076,29 +1037,7 @@ async function runDefaultOrchestrator() {
   let targetPath = cwd;
 
   if (mode === 'copy') {
-    const parentDir = path.dirname(cwd);
-    const currentDirName = path.basename(cwd);
-    const defaultNewPath = path.join(parentDir, `${currentDirName}-nextified`);
-
-    const { outputPath } = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'outputPath',
-        message: '복사본을 생성할 경로 (폴더명 또는 전체 경로):',
-        default: defaultNewPath,
-      },
-    ]);
-
-    const cleanedPath = outputPath.trim();
-    const isAbsolutePath = path.isAbsolute(cleanedPath) || /^[A-Za-z]:[\\/]/.test(cleanedPath);
-
-    if (isAbsolutePath) {
-      targetPath = path.resolve(cleanedPath);
-    } else if (cleanedPath.includes('/') || cleanedPath.includes('\\')) {
-      targetPath = path.resolve(cwd, cleanedPath);
-    } else {
-      targetPath = path.join(parentDir, cleanedPath);
-    }
+    targetPath = await resolveCopyTargetPath({ cwd });
 
     await cloneProject(cwd, targetPath, {
       startMessage: '작업용 프로젝트를 복사하는 중...',
