@@ -442,14 +442,23 @@ async function ensureDependenciesInstalled(projectRoot) {
   if (await fs.pathExists(nodeModulesPath)) return;
 
   const runtime = resolvePackageManagerCommand(projectRoot);
-  throw new Error(
-    `의존성이 설치되어 있지 않아 성능 레포트를 생성할 수 없습니다.\n` +
-      `아래 명령어로 패키지를 설치한 뒤 다시 실행하세요:\n` +
-      `  cd "${projectRoot}"\n` +
-      `  ${runtime.displayInstall}\n` +
-      `다시 실행:\n` +
-      `  migrate-next report`,
+  console.log(
+    chalk.yellow(
+      `\n⚠️  [레포트] ${projectRoot} 의존성이 설치되어 있지 않아 ${runtime.displayInstall} 을 자동 실행합니다...`,
+    ),
   );
+  try {
+    await runCommand(runtime.cmd, [...runtime.argsPrefix, 'install'], { cwd: projectRoot });
+    console.log(chalk.green(`   ✔ [레포트] 의존성 설치 완료: ${projectRoot}\n`));
+  } catch (installErr) {
+    throw new Error(
+      `성능 레포트 측정 대상의 의존성 자동 설치에 실패했습니다.\n` +
+        `다음 명령을 직접 실행한 뒤 다시 시도하세요.\n` +
+        `  cd "${projectRoot}"\n` +
+        `  ${runtime.displayInstall}\n` +
+        `원본 오류: ${installErr?.message || String(installErr)}`,
+    );
+  }
 }
 
 async function runBuild(projectRoot, kind) {

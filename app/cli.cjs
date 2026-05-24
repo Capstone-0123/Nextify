@@ -106,6 +106,12 @@ function logError(msg)     { console.error(chalk.red('✖ ' + msg)); }
 function logInfo(msg)      { console.log(chalk.white('  · ' + msg)); }
 function logStep(msg)      { console.log(chalk.gray('  · ' + msg)); }
 
+function formatProjectRelativePath(projectRoot, filePath) {
+  const rel = path.relative(projectRoot, filePath);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return filePath;
+  return rel;
+}
+
 // 모듈 경로 변경 (step 폴더의 index.cjs )
 const { runStep1 } = require('./src/step1/index.cjs');
 const { runStep2 } = require('./src/step2/index.cjs');
@@ -319,7 +325,8 @@ program
         logWarn('Step 1은 리뷰 대기 상태에서 멈췄습니다.');
         logStep('왼쪽: 원본 파일 / 오른쪽: .ai-migration 안의 migrated 파일');
         logStep('Nextify Review 패널은 view-only입니다(diff·경로 복사). 변경을 적용하려면 직접 편집·반영하세요.');
-        logStep(`세션 파일: ${reviewSession.manifestPath}`);
+        logSuccess('변경 내용 검토 파일을 저장했습니다.');
+        logStep(`저장 위치: ${formatProjectRelativePath(cwd, reviewSession.manifestPath)}`);
         return;
       }
 
@@ -946,7 +953,8 @@ async function runAdvancedMigrationWithSession(projectRoot, options = {}) {
 
   const changeCount = Array.isArray(session?.manifest?.changes) ? session.manifest.changes.length : 0;
   if (changeCount > 0) {
-    logStep(`심화 변환 리뷰 세션 생성: ${session.manifestPath}`);
+    logSuccess('심화 변환 검토 파일을 저장했습니다.');
+    logStep(`저장 위치: ${formatProjectRelativePath(projectRoot, session.manifestPath)}`);
   }
   return session;
 }
