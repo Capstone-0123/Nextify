@@ -188,6 +188,7 @@ class NextifyReviewController {
         this.currentChangeId = null;
         this.lastFocusedManifestPath = null;
         this.panelEmptyReason = 'no_session';
+        await this.closeReviewDiffTabs();
         this.notifyMissingSessionOnce(workspaceRoots.join('|'));
         return;
       }
@@ -207,6 +208,7 @@ class NextifyReviewController {
       this.session = null;
       this.currentChangeId = null;
       this.panelEmptyReason = 'no_session';
+      await this.closeReviewDiffTabs();
     } finally {
       this.isLoading = false;
       this.refreshInFlight = false;
@@ -243,6 +245,20 @@ class NextifyReviewController {
       if (!options.quiet) {
         vscode.window.showWarningMessage(`Nextify Review 패널 포커스 실패: ${error.message}`);
       }
+    }
+  }
+
+  async closeReviewDiffTabs() {
+    const tabsToClose = [];
+    for (const group of vscode.window.tabGroups?.all || []) {
+      for (const tab of group.tabs || []) {
+        if (/^Nextify .* Review:/.test(String(tab.label || ''))) {
+          tabsToClose.push(tab);
+        }
+      }
+    }
+    if (tabsToClose.length > 0) {
+      await vscode.window.tabGroups?.close(tabsToClose, true);
     }
   }
 
@@ -604,8 +620,15 @@ async function pickLatestSessionManifest(workspaceRoots) {
   let latest = null;
   let latestMtimeMs = -1;
   let latestStepNum = -1;
+  let activeCandidates = 0;
   for (const uri of uris) {
     try {
+      const manifest = JSON.parse(fs.readFileSync(uri.fsPath, 'utf8'));
+      if (manifest?.active !== true) {
+        continue;
+      }
+      activeCandidates += 1;
+
       const st = fs.statSync(uri.fsPath);
       const stepNum = extractStepNumberFromManifestPath(uri.fsPath);
       const isBetterStep = stepNum > latestStepNum;
@@ -620,7 +643,7 @@ async function pickLatestSessionManifest(workspaceRoots) {
       // ignore invalid candidate
     }
   }
-  return { manifestPath: latest, totalCandidates: uris.length };
+  return { manifestPath: latest, totalCandidates: activeCandidates };
 }
 
 function extractStepNumberFromManifestPath(manifestPath) {

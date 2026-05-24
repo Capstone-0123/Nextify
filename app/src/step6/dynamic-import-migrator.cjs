@@ -227,7 +227,7 @@ async function migrateHeavyDefaultPackageImports(projectRoot) {
 //=========================================================
 async function optimizeDynamicImport(projectRoot) {
   const srcDir = path.join(projectRoot, 'src');
-  
+
   // src/ 디렉터리가 존재하지 않으면 종료
   if (!fs.existsSync(srcDir)) {
     return;
@@ -375,7 +375,7 @@ async function migrateConditionalRenderingComponents(projectRoot) {
     // 4. 해당 import 문 제거
     // 5. 제거한 자리에 import dynamic from "next/dynamic" 추가
     const hasDynamicImport = /import\s+dynamic\s+from\s+["']next\/dynamic["']/.test(content);
-    
+
     for (const imp of importsToConvert) {
       // import 문 제거
       content = content.replace(imp.fullMatch, '');
@@ -398,7 +398,7 @@ async function migrateConditionalRenderingComponents(projectRoot) {
     for (const imp of importsToConvert) {
       // const ComponentIdentifier = dynamic(() => import("ComponentImportPath")) 형태로 추가
       const dynamicImportLine = `const ${imp.componentIdentifier} = dynamic(() => import("${imp.importPath}"));\n`;
-      
+
       // 첫 번째 import 문 다음에 추가
       const firstImportMatch = content.match(/^import\s+[^;]+;?\s*\n/m);
       if (firstImportMatch) {
@@ -458,7 +458,7 @@ async function migrateBrowserAPIComponents(projectRoot) {
     // 2. 컴포넌트 내부 코드에서 브라우저 API 사용 여부 확인
     const browserAPIs = ['window', 'document', 'navigator', 'localStorage', 'sessionStorage'];
     const browserAPIPattern = new RegExp(`\\b(${browserAPIs.join('|')})\\.`, 'g');
-    
+
     if (!browserAPIPattern.test(content)) {
       return; // 브라우저 API 사용이 없으면 종료
     }
@@ -503,7 +503,7 @@ async function migrateBrowserAPIComponents(projectRoot) {
     const allFiles = await findTsFiles(srcDir);
     for (const otherFilePath of allFiles) {
       if (otherFilePath === filePath) continue;
-      
+
       const otherContent = await fs.readFile(otherFilePath, 'utf-8');
       for (const componentName of componentsWithBrowserAPI) {
         const importPattern = buildImportPattern(componentName);
@@ -638,7 +638,7 @@ async function migrateEventHandlerLibraries(projectRoot) {
     while ((match = importPattern.exec(content)) !== null) {
       const libraryIdentifier = match[1];
       const libraryImportPath = match[2];
-      
+
       // node_modules에서 가져오는 외부 라이브러리인지 확인
       if (libraryImportPath.startsWith('.') || libraryImportPath.startsWith('@/')) {
         continue; // 로컬 파일이면 건너뛰기
@@ -718,10 +718,10 @@ async function migrateEventHandlerLibraries(projectRoot) {
               newHandler = newHandler.replace(/(?:const\s+)?(\w+)\s*=\s*(?:async\s*)?\(/, 'const $1 = async (');
               newHandler = newHandler.replace(/(?:async\s+)?function\s+(\w+)\s*\(/, 'async function $1 (');
             }
-            
+
             // 이벤트 핸들러 시작 부분에 dynamic import 추가
             const dynamicImportLine = `const ${imp.libraryIdentifier} = (await import("${imp.libraryImportPath}")).default;\n`;
-            
+
             // 함수 본문 시작 부분 찾기
             const bodyStartIndex = newHandler.indexOf('{');
             if (bodyStartIndex !== -1) {
@@ -729,7 +729,7 @@ async function migrateEventHandlerLibraries(projectRoot) {
                 '\n' + dynamicImportLine +
                 newHandler.slice(bodyStartIndex + 1);
             }
-            
+
             return newHandler;
           }
           return handlerMatch;
@@ -821,7 +821,7 @@ async function migrateReactLazy(projectRoot) {
     // 5. dynamic import 형태로 변경
     for (const lazy of lazyComponents) {
       const dynamicImportLine = `const ${lazy.componentIdentifier} = dynamic(() => import("${lazy.importPath}"));\n`;
-      
+
       const firstImportMatch = content.match(/^import\s+[^;]+;?\s*\n/m);
       if (firstImportMatch) {
         const insertIndex = firstImportMatch.index + firstImportMatch[0].length;
@@ -925,7 +925,7 @@ async function migrateLargeUIComponents(projectRoot) {
     // 6. dynamic import 형태로 변경
     for (const imp of importsToConvert) {
       const dynamicImportLine = `const ${imp.componentIdentifier} = dynamic(() => import("${imp.importPath}"));\n`;
-      
+
       const firstImportMatch = content.match(/^import\s+[^;]+;?\s*\n/m);
       if (firstImportMatch) {
         const insertIndex = firstImportMatch.index + firstImportMatch[0].length;
@@ -952,4 +952,3 @@ async function migrateLargeUIComponents(projectRoot) {
 module.exports = {
   optimizeDynamicImport,
 };
-
