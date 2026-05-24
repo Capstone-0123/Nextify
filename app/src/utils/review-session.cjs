@@ -90,6 +90,10 @@ async function createStepReviewSession(projectRoot, stepName, executeStep) {
       version: 1,
       step: stepName,
       createdAt: new Date().toISOString(),
+      active: true,
+      status: 'active',
+      activatedAt: new Date().toISOString(),
+      closedAt: null,
       reviewRoot: sessionRoot,
       filesRoot,
       placeholdersRoot,
@@ -510,7 +514,8 @@ async function buildSnapshotChangeList(projectRoot, snapshotRoot, placeholdersRo
   return changes;
 }
 
-async function createSnapshotReviewSession(projectRoot, stepName, executeStep) {
+async function createSnapshotReviewSession(projectRoot, stepName, executeStep, options = {}) {
+  const writeManifest = options.writeManifest !== false;
   const sessionRoot = path.join(projectRoot, REVIEW_ROOT_DIR, stepName);
   const beforeRoot = path.join(sessionRoot, 'before');
   const placeholdersRoot = path.join(sessionRoot, 'placeholders');
@@ -563,13 +568,19 @@ async function createSnapshotReviewSession(projectRoot, stepName, executeStep) {
       version: 1,
       step: stepName,
       createdAt: new Date().toISOString(),
+      active: options.active === true,
+      status: options.active === true ? 'active' : 'closed',
+      activatedAt: options.active === true ? new Date().toISOString() : null,
+      closedAt: options.active === true ? null : new Date().toISOString(),
       reviewRoot: sessionRoot,
       beforeRoot,
       placeholdersRoot,
       changes,
     };
 
-    await fs.writeJson(manifestPath, manifest, { spaces: 2 });
+    if (writeManifest) {
+      await fs.writeJson(manifestPath, manifest, { spaces: 2 });
+    }
 
     return {
       manifest,
