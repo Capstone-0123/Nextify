@@ -994,111 +994,94 @@ function formatLocalIsoLike(date) {
   return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}${sign}${tzh}:${tzm}`;
 }
 
-function buildReportHeader({ now, toolVersion, toolCommit, project, elapsedMs }) {
-  const nodeV = process.version;
-  const npmV = detectNpmVersion();
-  const osLabel = describeOs();
-  const elapsedLabel = formatDurationMs(elapsedMs);
+function pickProjectDisplayName(project) {
+  // package.json 의 name 이 비어있거나 공백만 있을 때, 또는 displayName 이
+  // 비어있을 때를 모두 falsy 로 취급해서 폴더 basename 까지 fallback 한다.
+  const candidates = [
+    project?.displayName,
+    project?.name,
+    project?.root ? path.basename(path.resolve(project.root)) : '',
+  ];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim().length > 0) return c.trim();
+  }
+  return '이름 없음';
+}
 
-  const lines = [];
-  lines.push(`생성 시각: ${formatLocalIsoLike(now)}`);
-  lines.push(
+function buildReportHeader({ now, toolVersion, toolCommit, project, elapsedMs }) {
+  const reportProjectName = pickProjectDisplayName(project);
+  const reportLines = [];
+  reportLines.push(`생성 시각: ${formatLocalIsoLike(now)}`);
+  reportLines.push(
     `도구 버전: nextify-cli ${toolVersion}${toolCommit ? ` (commit ${toolCommit})` : ''}`,
   );
-  if (project && project.name) {
-    lines.push(
-      `대상 프로젝트: ${project.name}${project.commit ? ` (commit ${project.commit})` : ''}`,
-    );
+  reportLines.push(
+    `대상 프로젝트: ${reportProjectName}${project?.commit ? ` (commit ${project.commit})` : ''}`,
+  );
+  if (project?.root) {
+    reportLines.push(`프로젝트 경로: \`${project.root}\``);
   }
-  const envParts = [`Node ${nodeV}`];
-  if (npmV) envParts.push(`npm ${npmV}`);
-  envParts.push(osLabel);
-  lines.push(`실행 환경: ${envParts.join(' / ')}`);
-  if (elapsedLabel) {
-    lines.push(`총 실행 시간: ${elapsedLabel}`);
+  const reportEnvParts = [`Node ${process.version}`];
+  const reportNpmVersion = detectNpmVersion();
+  if (reportNpmVersion) reportEnvParts.push(`npm ${reportNpmVersion}`);
+  reportEnvParts.push(describeOs());
+  reportLines.push(`실행 환경: ${reportEnvParts.join(' / ')}`);
+  const reportElapsedLabel = formatDurationMs(elapsedMs);
+  if (reportElapsedLabel) {
+    reportLines.push(`총 실행 시간: ${reportElapsedLabel}`);
   }
-  return lines.join('  \n');
+  return reportLines.join('  \n');
 }
 
 const STEP_DESCRIPTIONS = [
-  { step: 1, title: 'Vite 환경 → Next 환경 (설정/스크립트/엔트리)' },
-  { step: 2, title: '라우팅 구조 변환 (React Router → App Router)' },
-  { step: 3, title: '라우팅 페이지 변환 (page.tsx/layout.tsx 생성)' },
-  { step: 4, title: '스타일/리소스/공개 자산 이전' },
-  { step: 5, title: "'use client' 처리 · Zustand 등 전역 상태 마이그레이션" },
-  { step: 6, title: 'Next.js 심화 변환 (next/image · next/font · 동적 import · 타입 보정)' },
+  {
+    step: 1,
+    title: '프로젝트 환경 전환',
+    description:
+      '`package.json` 의존성·스크립트, `vite.config.ts`, `tsconfig.json`, `.gitignore` 를 Next.js 기준으로 정리하고 `next.config.mjs` 를 생성합니다.',
+  },
+  {
+    step: 2,
+    title: 'App Router 기본 구조 생성',
+    description:
+      '`index.html` 의 head/body 를 `src/app/layout.tsx` 로 옮기고, 전역 Provider 트리(QueryClient, ThemeProvider 등)를 `src/app/providers.tsx` 로 분리합니다.',
+  },
+  {
+    step: 3,
+    title: 'React Router → App Router 변환',
+    description:
+      '`<Routes>/<Route>` 트리를 `app/<seg>/page.tsx`·`layout.tsx` 로 분해하고, `<Link to>`→`next/link href`, `<Outlet/>`→`{children}`, `useNavigate`→`useRouter`, `useParams`/`react-helmet` 도 App Router 규칙으로 옮깁니다.',
+  },
+  {
+    step: 4,
+    title: '스타일과 정적 리소스 이전',
+    description:
+      '전역 CSS 를 `app/globals.css` 로, `src/assets/` 를 `public/assets/` 로 이전하고 import 를 정렬합니다. Tailwind / styled-components 설정도 Next.js 기준으로 조정합니다.',
+  },
+  {
+    step: 5,
+    title: '클라이언트 경계와 상태 관리 보정',
+    description:
+      '훅·이벤트 핸들러·브라우저 API 사용 컴포넌트에 `"use client"` 를 부착하고, 모듈 톱레벨 브라우저 API 접근에 SSR 가드를 추가합니다. Zustand 스토어는 SSR-safe 패턴으로 정렬합니다.',
+  },
+  {
+    step: 6,
+    title: 'Next.js 최적화와 검증',
+    description:
+      '`<img>`→`next/image`, 폰트→`next/font`, 클라이언트 데이터 패칭의 서버 컴포넌트 이전, `dynamic` import 적용, `"use client"` 최소화, 잔여 React/Vite 흔적 정리, `tsc --noEmit` 검증을 수행합니다.',
+  },
 ];
 
 function renderStepsSummaryTable({ finalStepNumber }) {
-  const lines = [];
-  lines.push('| Step | 내용 | 결과 |');
-  lines.push('|------|------|------|');
+  const lines = ['| Step | 처리 내용 | 결과 |', '| --- | --- | :---: |'];
   for (const s of STEP_DESCRIPTIONS) {
     let status;
-    if (finalStepNumber == null) {
-      status = '✅ Pass';
-    } else if (s.step <= finalStepNumber) {
-      status = '✅ Pass';
-    } else {
-      status = '⏭️ Skipped';
-    }
-    lines.push(`| Step ${s.step} | ${s.title} | ${status} |`);
+    if (finalStepNumber == null) status = '확인됨';
+    else if (s.step <= finalStepNumber) status = '적용됨';
+    else status = '미실행';
+    lines.push(`| Step ${s.step}: ${s.title} | ${s.description} | ${status} |`);
   }
   return lines.join('\n');
-}
-
-function categorizeFile(relPath) {
-  if (!relPath) return null;
-  const p = String(relPath).replace(/\\/g, '/').toLowerCase();
-  const base = p.split('/').pop() || '';
-
-  // Config (먼저 검사 — config 파일이 styles/utils 분류와 충돌 안 하도록)
-  if (
-    base.startsWith('next.config.') ||
-    base.startsWith('tsconfig') ||
-    base === 'package.json' ||
-    base === 'package-lock.json' ||
-    base === '.eslintrc' || base.startsWith('.eslintrc.') ||
-    base === '.prettierrc' || base.startsWith('.prettierrc.') ||
-    base === '.gitignore' ||
-    base === 'postcss.config.js' || base === 'postcss.config.mjs' ||
-    base === 'tailwind.config.js' || base === 'tailwind.config.ts' ||
-    base === 'vite.config.ts' || base === 'vite.config.js'
-  ) {
-    return 'config';
-  }
-
-  // Routes (app router)
-  if (
-    p.startsWith('app/') ||
-    p.startsWith('src/app/') ||
-    p.startsWith('pages/') ||
-    p.startsWith('src/pages/')
-  ) {
-    return 'routes';
-  }
-
-  // Styles
-  if (/\.(css|scss|sass|less|styl)$/.test(base)) {
-    return 'styles';
-  }
-
-  // Components
-  if (p.includes('/components/') || p.startsWith('components/')) {
-    return 'components';
-  }
-
-  // Utils / Types
-  if (
-    p.includes('/utils/') || p.startsWith('utils/') ||
-    p.includes('/types/') || p.startsWith('types/') ||
-    p.includes('/lib/') || p.startsWith('lib/') ||
-    p.includes('/hooks/') || p.startsWith('hooks/')
-  ) {
-    return 'utils';
-  }
-
-  return null;
 }
 
 function isClientComponent(filePath) {
@@ -1146,13 +1129,6 @@ function computeChangeStats(manifest, projectRoot) {
     renamed: 0,
     plusLOC: 0,
     minusLOC: 0,
-    byCategory: {
-      routes: { created: 0, modified: 0, deleted: 0 },
-      components: { created: 0, modified: 0, deleted: 0 },
-      config: { created: 0, modified: 0, deleted: 0 },
-      styles: { created: 0, modified: 0, deleted: 0 },
-      utils: { created: 0, modified: 0, deleted: 0 },
-    },
     useClientCount: 0,
     totalComponentCount: 0,
     newRouteFileCount: 0,
@@ -1164,7 +1140,7 @@ function computeChangeStats(manifest, projectRoot) {
     return empty;
   }
 
-  const stats = { ...empty, available: true, byCategory: JSON.parse(JSON.stringify(empty.byCategory)) };
+  const stats = { ...empty, available: true };
   const seenAfterPaths = new Set();
 
   for (const change of manifest.changes) {
@@ -1212,13 +1188,6 @@ function computeChangeStats(manifest, projectRoot) {
       const diff = afterLines - beforeLines;
       if (diff > 0) stats.plusLOC += diff;
       else stats.minusLOC += -diff;
-    }
-
-    const cat = categorizeFile(rel);
-    if (cat && stats.byCategory[cat]) {
-      if (type === 'create') stats.byCategory[cat].created++;
-      else if (type === 'modify') stats.byCategory[cat].modified++;
-      else if (type === 'delete') stats.byCategory[cat].deleted++;
     }
 
     if (rel && (type === 'create' || type === 'modify')) {
@@ -1319,8 +1288,6 @@ function findLatestSessionManifest(projectRoot) {
 
 function renderChangeStatsTable(stats) {
   const fmtNum = (n) => Number(n || 0).toLocaleString('en-US');
-  const netFiles = (stats.created || 0) - (stats.deleted || 0);
-  const netSign = netFiles >= 0 ? '+' : '−';
   return [
     '| 항목 | 개수 |',
     '| --- | ---: |',
@@ -1328,43 +1295,42 @@ function renderChangeStatsTable(stats) {
     `| Modified | ${fmtNum(stats.modified)} |`,
     `| Deleted | ${fmtNum(stats.deleted)} |`,
     `| Renamed/Moved | ${fmtNum(stats.renamed)} |`,
-    `| +LOC | ${fmtNum(stats.plusLOC)} |`,
-    `| −LOC | ${fmtNum(stats.minusLOC)} |`,
-    `| Net files (Created − Deleted) | ${netSign}${fmtNum(Math.abs(netFiles))} |`,
+    `| +LOC (Lines of Code · 추가된 코드 줄 수) | ${fmtNum(stats.plusLOC)} |`,
+    `| −LOC (Lines of Code · 삭제된 코드 줄 수) | ${fmtNum(stats.minusLOC)} |`,
   ].join('\n');
 }
 
-function renderCategoryTable(byCategory) {
-  const rows = [
-    { key: 'routes', label: 'Routes (`app/`)' },
-    { key: 'components', label: 'Components' },
-    { key: 'config', label: 'Config (`next.config.*`, `tsconfig.*` 등)' },
-    { key: 'styles', label: 'Styles' },
-    { key: 'utils', label: 'Utils / Types' },
-  ];
-  const lines = ['| 카테고리 | Created | Modified | Deleted |', '| --- | ---: | ---: | ---: |'];
-  for (const r of rows) {
-    const v = byCategory[r.key] || { created: 0, modified: 0, deleted: 0 };
-    lines.push(`| ${r.label} | ${v.created} | ${v.modified} | ${v.deleted} |`);
-  }
-  return lines.join('\n');
-}
-
-function renderAdditionalStats(stats) {
-  const lines = [];
+function renderImpactScopeSection(stats) {
+  // "변환 영향 범위" 는 결정론적으로 측정 가능한 마이그레이션 영향 지표만 모아서
+  // 별도의 ## 섹션으로 보여준다. (use client 비율, 신규 라우트 파일, 변경 파일 비율)
+  const rows = [];
   if (stats.totalComponentCount > 0 || stats.useClientCount > 0) {
-    lines.push(`> \`use client\` 표시된 컴포넌트: ${stats.useClientCount} / ${stats.totalComponentCount}  `);
+    const ratio = stats.totalComponentCount > 0
+      ? ((stats.useClientCount / stats.totalComponentCount) * 100).toFixed(1)
+      : '0.0';
+    rows.push(
+      `| \`use client\` 표시 컴포넌트 | ${stats.useClientCount} / ${stats.totalComponentCount} (${ratio}%) | 클라이언트 렌더링 경계로 분류된 컴포넌트 비율 |`,
+    );
   }
   if (stats.newRouteFileCount > 0) {
-    lines.push(`> 새로 생성된 라우트 파일: ${stats.newRouteFileCount}  `);
+    rows.push(
+      `| 신규 App Router 파일 | ${stats.newRouteFileCount} | 새로 생성된 \`page.tsx\` / \`layout.tsx\` 파일 수 |`,
+    );
   }
   if (stats.totalProjectFiles && stats.changedFiles) {
     const ratio = (stats.changedFiles / stats.totalProjectFiles) * 100;
-    lines.push(
-      `> 변경 파일 비율: ${stats.changedFiles} / ${stats.totalProjectFiles} (${ratio.toFixed(1)}%)`,
+    rows.push(
+      `| 변경 파일 비율 | ${stats.changedFiles} / ${stats.totalProjectFiles} (${ratio.toFixed(1)}%) | 전체 프로젝트 파일 중 마이그레이션이 손댄 파일 비율 |`,
     );
   }
-  return lines.join('\n');
+  if (rows.length === 0) return '';
+  return [
+    '## 변환 영향 범위',
+    '',
+    '| 지표 | 값 | 설명 |',
+    '| --- | ---: | --- |',
+    ...rows,
+  ].join('\n');
 }
 
 function renderMarkdownReport({
@@ -1415,58 +1381,63 @@ function renderMarkdownReport({
   const changeStatsBlock = hasChangeStats
     ? `## 변경 파일 통계
 
-${renderChangeStatsTable(changeStats)}
-
-### 카테고리별 변경
-
-${renderCategoryTable(changeStats.byCategory)}
-${renderAdditionalStats(changeStats) ? `\n${renderAdditionalStats(changeStats)}\n` : ''}`
+${renderChangeStatsTable(changeStats)}`
     : `## 변경 파일 통계
 
-> session.json 을 찾지 못해 변경 통계를 표시할 수 없습니다. (\`.ai-migration/stepN/session.json\` 필요)
-`;
+> session.json을 찾지 못해 변경 파일 통계를 표시할 수 없습니다. \`.ai-migration/stepN/session.json\` 을 확인하세요.`;
 
-  return `# Nextify Migration Report
+  const impactSection = hasChangeStats ? renderImpactScopeSection(changeStats) : '';
 
-${header}
+  // "성능 측정 결과" 하나의 ## 아래에 비교 대상 / 측정 지표 / 결과 요약 / 실패 항목 /
+  // 측정 상세 보기를 모두 ### 으로 묶어, 측정 컨텍스트와 결과가 한눈에 이어지게 한다.
+  const measurementBlock = `## 성능 측정 결과
 
-## 비교 대상
+### 비교 대상
 
-- Vite + React (원본)
-- Next.js (1~5단계, 기본 마이그레이션)
-- Next.js (1~6단계, Next.js 심화 변환 적용 시)
+| 구분 | 레포트 표시명 | 설명 |
+| --- | --- | --- |
+| 원본 | Vite+React | 마이그레이션 전 원본 React/Vite 프로젝트 |
+| 기본 변환 | Next.js (step1~5) | step1~5 까지만 적용한 기본 App Router 마이그레이션 결과 |
+| 최적화 포함 | Next.js (step1~6) | step6 의 Next.js 최적화와 cleanup 까지 적용한 최종 결과 |
 
-## 측정 지표
+### 측정 지표
 
-- FCP (First Contentful Paint, median)
-- LCP (Largest Contentful Paint, median)
-- SEO Score (Lighthouse, median)
-- FCP/LCP/SEO 표준편차(작을수록 안정적)
-- Total JS payload size (폴더 용량)
+| 지표 | 설명 |
+| --- | --- |
+| FCP | First Contentful Paint 중앙값 |
+| LCP | Largest Contentful Paint 중앙값 |
+| SEO | Lighthouse SEO 점수 중앙값 |
+| 안정성 | 반복 측정의 표준편차와 범위 |
+| Total JS payload size | 빌드 결과의 JavaScript payload 총량 |
 
-## 변환 요약
+### 결과 요약
 
-${stepsTable}
-
-${changeStatsBlock}
-## 결과 요약 (${targets.length}-way, successful targets)
-
-| Target | FCP (median) | FCP σ | LCP (median) | LCP σ | SEO (median) | SEO σ | Total JS payload size |
+| Target | FCP (median) | FCP 안정성 | LCP (median) | LCP 안정성 | SEO (median) | SEO 안정성 | Total JS payload size |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 ${summaryRows}
 
-## 실패 항목
+### 실패 항목
 
 ${failureSection}
 
----
+### 측정 상세 보기
 
 <details>
-<summary><b>📊 측정 상세 보기</b></summary>
+<summary><b>반복 측정 결과 펼치기</b></summary>
 
 ${detailSection}
-</details>
-`;
+</details>`;
+
+  const sections = [
+    `# Nextify Migration Report`,
+    header,
+    measurementBlock,
+    `## 변환 요약 (step1 - step 6)\n\n${stepsTable}`,
+    changeStatsBlock,
+  ];
+  if (impactSection) sections.push(impactSection);
+
+  return sections.join('\n\n') + '\n';
 }
 
 async function ensureNextifyMeta(projectRoot, metaPatch) {
@@ -1628,11 +1599,11 @@ async function generatePerformanceReport({
   const targets = [];
   const failures = [];
   const measurePlans = [
-    { label: 'Vite+React (baseline)', projectRoot: viteRootResolved, kind: 'vite' },
+    { label: 'Vite+React', projectRoot: viteRootResolved, kind: 'vite' },
     { label: 'Next.js (step1~5)', projectRoot: baseRootResolved, kind: 'next' },
   ];
   if (hasAdvancedMigration) {
-    measurePlans.push({ label: 'Next.js (step1~6 심화 변환)', projectRoot, kind: 'next' });
+    measurePlans.push({ label: 'Next.js (step1~6)', projectRoot, kind: 'next' });
   }
 
   for (const plan of measurePlans) {
@@ -1668,13 +1639,22 @@ async function generatePerformanceReport({
   try {
     const pkgPath = path.join(projectRoot, 'package.json');
     const pkg = safeReadJsonSync(pkgPath);
-    if (pkg && pkg.name) {
-      project = { name: pkg.name, commit: getGitShortHash(projectRoot) };
-    } else {
-      project = { name: path.basename(projectRoot), commit: getGitShortHash(projectRoot) };
-    }
+    const folderName = path.basename(path.resolve(projectRoot));
+    const pkgName = typeof pkg?.name === 'string' && pkg.name.trim() ? pkg.name.trim() : '';
+    const pkgDisplay = typeof pkg?.displayName === 'string' && pkg.displayName.trim() ? pkg.displayName.trim() : '';
+    project = {
+      name: pkgName || folderName,
+      displayName: pkgDisplay || pkgName || folderName,
+      root: projectRoot,
+      commit: getGitShortHash(projectRoot),
+    };
   } catch {
-    project = { name: path.basename(projectRoot), commit: null };
+    project = {
+      name: path.basename(path.resolve(projectRoot)),
+      displayName: path.basename(path.resolve(projectRoot)),
+      root: projectRoot,
+      commit: null,
+    };
   }
 
   const md = renderMarkdownReport({
