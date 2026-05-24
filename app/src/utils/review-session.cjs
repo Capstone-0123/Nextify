@@ -64,6 +64,22 @@ function getEditorCommands() {
   return order.flatMap((k) => groups[k]);
 }
 
+function isWindowsCommandScript(command) {
+  if (process.platform !== 'win32') return false;
+  const ext = path.extname(String(command || '').replace(/^"|"$/g, '')).toLowerCase();
+  return ext === '.cmd' || ext === '.bat';
+}
+
+function runEditorCommand(command, args = [], options = {}) {
+  const shell = isWindowsCommandScript(command) ? true : options.shell || false;
+  return spawnSync(command, args, {
+    stdio: 'ignore',
+    windowsHide: true,
+    ...options,
+    shell,
+  });
+}
+
 async function createStepReviewSession(projectRoot, stepName, executeStep) {
   const sessionRoot = path.join(projectRoot, REVIEW_ROOT_DIR, stepName);
   const previewRoot = path.join(os.tmpdir(), `nextify-preview-${stepName}-${crypto.randomUUID()}`);
@@ -254,7 +270,7 @@ function openReviewDiff(change) {
   const commands = getEditorCommands();
 
   for (const binary of commands) {
-    const result = spawnSync(binary, ['--reuse-window', '--diff', beforePath, afterPath], {
+    const result = runEditorCommand(binary, ['--reuse-window', '--diff', beforePath, afterPath], {
       shell: false,
       stdio: 'ignore',
       windowsHide: true,
@@ -319,7 +335,7 @@ function resolveEditorCommand(editorType) {
           : ['code'];
 
   for (const cmd of candidates) {
-    const r = spawnSync(cmd, ['--version'], {
+    const r = runEditorCommand(cmd, ['--version'], {
       shell: false,
       stdio: 'ignore',
       windowsHide: true,
@@ -334,7 +350,7 @@ function getReviewExtensionStatus() {
   let firstEditorCommand = null;
 
   for (const binary of commands) {
-    const result = spawnSync(binary, ['--list-extensions'], {
+    const result = runEditorCommand(binary, ['--list-extensions'], {
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -404,7 +420,7 @@ function focusReviewPanel(extensionStatus = null) {
     return { opened: false, command: status?.command || null, reason: status?.reason || 'extension-not-installed' };
   }
 
-  const result = spawnSync(status.command, ['--reuse-window', '--command', 'nextifyReview.focusPanel'], {
+  const result = runEditorCommand(status.command, ['--reuse-window', '--command', 'nextifyReview.focusPanel'], {
     shell: false,
     stdio: 'ignore',
     windowsHide: true,
@@ -424,7 +440,7 @@ function installReviewExtension(commandHint) {
     return { installed: false, command: null, reason: 'no-command' };
   }
 
-  const result = spawnSync(commandHint, ['--install-extension', REVIEW_EXTENSION_MARKET_ID, '--force'], {
+  const result = runEditorCommand(commandHint, ['--install-extension', REVIEW_EXTENSION_MARKET_ID, '--force'], {
     shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
@@ -604,6 +620,7 @@ module.exports = {
   createSnapshotReviewSession,
   openReviewDiff,
   getEditorCommands,
+  runEditorCommand,
   getReviewExtensionStatus,
   focusReviewPanel,
   installReviewExtension,
