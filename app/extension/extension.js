@@ -1,5 +1,6 @@
 const vscode = require('vscode');
 const fs = require('fs');
+const path = require('path');
 
 const TYPE_PAST_TENSE = {
   create: 'created',
@@ -96,6 +97,8 @@ class NextifyReviewController {
     this.refreshInFlight = false;
     this.refreshPending = false;
     this.refreshTimer = null;
+    this.pollTimer = null;
+    this.lastWorkspaceAddAttempt = null;
 
     this.scheduleRefresh = this.scheduleRefresh.bind(this);
   }
@@ -125,6 +128,18 @@ class NextifyReviewController {
     watcher.onDidChange(() => this.scheduleRefresh());
     watcher.onDidDelete(() => this.scheduleRefresh());
     context.subscriptions.push(watcher);
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeWorkspaceFolders(() => this.scheduleRefresh(100)),
+    );
+    this.pollTimer = setInterval(() => this.scheduleRefresh(0), 3000);
+    context.subscriptions.push({
+      dispose: () => {
+        if (this.pollTimer) {
+          clearInterval(this.pollTimer);
+          this.pollTimer = null;
+        }
+      },
+    });
 
     this.refreshSession();
   }
@@ -198,6 +213,7 @@ class NextifyReviewController {
       this.session = { ...manifest, manifestPath };
       this.currentChangeId = this.session.changes[0]?.id || null;
       this.lastMissingSessionKey = null;
+      this.ensureManifestWorkspaceFolder(manifestPath, workspaceRoots);
 
       if (this.lastFocusedManifestPath !== manifestPath) {
         this.lastFocusedManifestPath = manifestPath;
@@ -260,6 +276,25 @@ class NextifyReviewController {
     if (tabsToClose.length > 0) {
       await vscode.window.tabGroups?.close(tabsToClose, true);
     }
+  }
+
+  ensureManifestWorkspaceFolder(manifestPath, workspaceRoots) {
+    const projectRoot = getProjectRootFromManifestPath(manifestPath);
+    if (!projectRoot || isPathInsideAnyRoot(projectRoot, workspaceRoots)) {
+      return;
+    }
+
+    const key = normalizeFsPath(projectRoot);
+    if (this.lastWorkspaceAddAttempt === key) {
+      return;
+    }
+    this.lastWorkspaceAddAttempt = key;
+
+    const currentFolders = vscode.workspace.workspaceFolders || [];
+    vscode.workspace.updateWorkspaceFolders(currentFolders.length, 0, {
+      uri: vscode.Uri.file(projectRoot),
+      name: path.basename(projectRoot),
+    });
   }
 
   notifyMissingSessionOnce(markerValue) {
@@ -612,8 +647,8 @@ async function pickLatestSessionManifest(workspaceRoots) {
   // null 을 두 번째 인수로 전달하면 files.exclude 설정을 무시합니다.
   // 이전 버전 watcher-friendly.cjs 가 .ai-migration 을 files.exclude 에 추가한
   // 프로젝트에서도 session.json 을 정상적으로 발견할 수 있습니다.
-  const uris = await vscode.workspace.findFiles('**/.ai-migration/**/session.json', null);
-  if (!uris || uris.length === 0) {
+  const manifestPaths = await collectSessionManifestPaths(roots);
+  if (manifestPaths.length === 0) {
     return { manifestPath: null, totalCandidates: 0 };
   }
 
@@ -621,29 +656,113 @@ async function pickLatestSessionManifest(workspaceRoots) {
   let latestMtimeMs = -1;
   let latestStepNum = -1;
   let activeCandidates = 0;
-  for (const uri of uris) {
+  for (const manifestPath of manifestPaths) {
     try {
-      const manifest = JSON.parse(fs.readFileSync(uri.fsPath, 'utf8'));
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
       if (manifest?.active !== true) {
         continue;
       }
       activeCandidates += 1;
 
-      const st = fs.statSync(uri.fsPath);
-      const stepNum = extractStepNumberFromManifestPath(uri.fsPath);
+      const st = fs.statSync(manifestPath);
+      const stepNum = extractStepNumberFromManifestPath(manifestPath);
       const isBetterStep = stepNum > latestStepNum;
       const isSameStepAndNewer = stepNum === latestStepNum && st.mtimeMs > latestMtimeMs;
 
       if (isBetterStep || isSameStepAndNewer) {
         latestStepNum = stepNum;
         latestMtimeMs = st.mtimeMs;
-        latest = uri.fsPath;
+        latest = manifestPath;
       }
     } catch {
       // ignore invalid candidate
     }
   }
   return { manifestPath: latest, totalCandidates: activeCandidates };
+}
+
+async function collectSessionManifestPaths(workspaceRoots) {
+  const paths = new Set();
+
+  const uris = await vscode.workspace.findFiles('**/.ai-migration/**/session.json', null);
+  for (const uri of uris || []) {
+    paths.add(uri.fsPath);
+  }
+
+  for (const root of getSiblingNextifiedRoots(workspaceRoots)) {
+    for (const manifestPath of findSessionManifestsUnderRoot(root)) {
+      paths.add(manifestPath);
+    }
+  }
+
+  return [...paths];
+}
+
+function getSiblingNextifiedRoots(workspaceRoots) {
+  const roots = new Set();
+  for (const root of workspaceRoots || []) {
+    const parent = path.dirname(root);
+    const baseName = path.basename(root);
+    const expectedPrefix = `${baseName}-nextified`;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(parent, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name === expectedPrefix || entry.name.startsWith(`${expectedPrefix}-`)) {
+        roots.add(path.join(parent, entry.name));
+      }
+    }
+  }
+  return [...roots];
+}
+
+function findSessionManifestsUnderRoot(root) {
+  const reviewRoot = path.join(root, '.ai-migration');
+  let stepDirs = [];
+  try {
+    stepDirs = fs.readdirSync(reviewRoot, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const manifests = [];
+  for (const entry of stepDirs) {
+    if (!entry.isDirectory()) continue;
+    const manifestPath = path.join(reviewRoot, entry.name, 'session.json');
+    if (fs.existsSync(manifestPath)) {
+      manifests.push(manifestPath);
+    }
+  }
+  return manifests;
+}
+
+function getProjectRootFromManifestPath(manifestPath) {
+  const resolved = path.resolve(String(manifestPath || ''));
+  const normalized = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  const marker = `${path.sep}.ai-migration${path.sep}`;
+  const idx = normalized.toLowerCase().lastIndexOf(marker.toLowerCase());
+  if (idx < 0) {
+    return null;
+  }
+  return resolved.slice(0, idx);
+}
+
+function isPathInsideAnyRoot(targetPath, roots) {
+  const target = normalizeFsPath(targetPath);
+  return (roots || []).some((root) => {
+    const normalizedRoot = normalizeFsPath(root);
+    return target === normalizedRoot || target.startsWith(`${normalizedRoot}${path.sep}`);
+  });
+}
+
+function normalizeFsPath(value) {
+  const resolved = path.resolve(String(value || ''));
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
 function extractStepNumberFromManifestPath(manifestPath) {

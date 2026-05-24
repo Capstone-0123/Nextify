@@ -141,7 +141,6 @@ const {
   detectAppType,
   getInstallCommand,
 } = require('./src/utils/project-info.cjs');
-const { spawnSync } = require('child_process');
 const { cloneProject } = require('./src/utils/copy.cjs');
 const {
   REVIEW_ROOT_DIR,
@@ -149,6 +148,7 @@ const {
   createStepReviewSession,
   createSnapshotReviewSession,
   getEditorCommands,
+  runEditorCommand,
   getReviewExtensionStatus,
   focusReviewPanel,
   installReviewExtension,
@@ -306,6 +306,13 @@ program
         });
         process.chdir(targetPath);
         logStep(`작업 경로: ${targetPath}`);
+
+        const workspaceAdd = addWorkspaceFolderToEditor(targetPath);
+        if (workspaceAdd.ok) {
+          logStep(`VS Code/Cursor 워크스페이스에 복사본 폴더를 추가했습니다. (${workspaceAdd.command})`);
+        } else {
+          logWarn('VS Code/Cursor 워크스페이스에 복사본 폴더를 자동 추가하지 못했습니다. 패널이 보이지 않으면 폴더를 직접 추가해 주세요.');
+        }
       }
 
       if (mode === 'review') {
@@ -748,7 +755,7 @@ program
 function addWorkspaceFolderToEditor(workspaceFolder) {
   const abs = path.resolve(workspaceFolder);
   for (const binary of getEditorCommands()) {
-    const result = spawnSync(binary, ['--reuse-window', '--add', abs], {
+    const result = runEditorCommand(binary, ['--reuse-window', '--add', abs], {
       shell: false,
       stdio: 'ignore',
       windowsHide: true,
@@ -924,7 +931,7 @@ function refreshReviewPanel(extensionStatus = null) {
     return { refreshed: false, command: null, reason: 'editor-not-found' };
   }
 
-  const result = spawnSync(status.command, ['--reuse-window', '--command', 'nextifyReview.refreshSession'], {
+  const result = runEditorCommand(status.command, ['--reuse-window', '--command', 'nextifyReview.refreshSession'], {
     shell: false,
     stdio: 'ignore',
     windowsHide: true,
@@ -1164,6 +1171,13 @@ async function runDefaultOrchestrator() {
     });
     process.chdir(targetPath);
     logStep(`작업 경로: ${targetPath}`);
+
+    const workspaceAdd = addWorkspaceFolderToEditor(targetPath);
+    if (workspaceAdd.ok) {
+      logStep(`VS Code/Cursor 워크스페이스에 복사본 폴더를 추가했습니다. (${workspaceAdd.command})`);
+    } else {
+      logWarn('VS Code/Cursor 워크스페이스에 복사본 폴더를 자동 추가하지 못했습니다. 패널이 보이지 않으면 폴더를 직접 추가해 주세요.');
+    }
   }
 
   // 이전 실행에서 남아있는 step 아티팩트를 정리합니다.
