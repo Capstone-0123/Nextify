@@ -37,8 +37,7 @@ dotenv.config({ path: path.join(__dirname, '.env.local') });
   if (!match) return; // 알 수 없으면 통과
   const major = Number(match[1]);
   const minor = Number(match[2]);
-  const tooOld =
-    major < REQUIRED_MAJOR || (major === REQUIRED_MAJOR && minor < REQUIRED_MINOR);
+  const tooOld = major < REQUIRED_MAJOR || (major === REQUIRED_MAJOR && minor < REQUIRED_MINOR);
   if (!tooOld) return;
 
   // chalk가 아직 require되지 않았을 수 있으니 ANSI escape를 직접 사용 (의존성 무관 안전)
@@ -93,18 +92,36 @@ const inquirer = require('inquirer');
 //   logError   : 빨강 ✖  (치명적 에러, process.exit 전)
 //   logStep    : 회색 ·  (하위 진행 항목·부가 정보)
 // =========================================================
-const SEP = chalk.gray('──────────────────────────────────────────────────────────────────────────────────────────────────────');
+const SEP = chalk.gray(
+  '──────────────────────────────────────────────────────────────────────────────────────────────────────',
+);
 function logSection(title) {
   console.log('\n' + chalk.blue.bold(title));
   if (!/^Part \d+ \(/.test(title)) {
     console.log(SEP);
   }
 }
-function logSuccess(msg)   { console.log(chalk.green('✔ ' + msg)); }
-function logWarn(msg)      { console.log(chalk.yellow('⚠ ' + msg)); }
-function logError(msg)     { console.error(chalk.red('✖ ' + msg)); }
-function logInfo(msg)      { console.log(chalk.white('  · ' + msg)); }
-function logStep(msg)      { console.log(chalk.gray('  · ' + msg)); }
+function logSuccess(msg) {
+  console.log(chalk.green('✔ ' + msg));
+}
+function logWarn(msg) {
+  console.log(chalk.yellow('⚠ ' + msg));
+}
+function logError(msg) {
+  console.error(chalk.red('✖ ' + msg));
+}
+function logInfo(msg) {
+  console.log(chalk.white('  · ' + msg));
+}
+function logStep(msg) {
+  console.log(chalk.gray('  · ' + msg));
+}
+
+function formatProjectRelativePath(projectRoot, filePath) {
+  const rel = path.relative(projectRoot, filePath);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return filePath;
+  return rel;
+}
 
 // 모듈 경로 변경 (step 폴더의 index.cjs )
 const { runStep1 } = require('./src/step1/index.cjs');
@@ -124,7 +141,6 @@ const {
   detectAppType,
   getInstallCommand,
 } = require('./src/utils/project-info.cjs');
-const { spawnSync } = require('child_process');
 const { cloneProject } = require('./src/utils/copy.cjs');
 const { resolveCopyTargetPath } = require('./src/utils/copy-target-resolver.cjs');
 const { ensureGeminiApiKey } = require('./src/utils/gemini-precheck.cjs');
@@ -133,8 +149,8 @@ const {
   REVIEW_EXTENSION_MARKET_ID,
   createStepReviewSession,
   createSnapshotReviewSession,
-  openReviewDiff,
   getEditorCommands,
+  runEditorCommand,
   getReviewExtensionStatus,
   focusReviewPanel,
   installReviewExtension,
@@ -143,10 +159,7 @@ const { generateText, createMigrationPrompt, generateTextStream } = require('./s
 const { runAskApply } = require('./src/utils/ai-file-apply.cjs');
 const { runAiReviewSessionStream } = require('./src/utils/ai-review-session.cjs');
 const { printRelPathsBlock } = require('./src/utils/path-list-print.cjs');
-const {
-  createBaseMigrationSnapshot,
-  ensureNextifyMeta,
-} = require('./src/report/performance-report.cjs');
+const { createBaseMigrationSnapshot, ensureNextifyMeta } = require('./src/report/performance-report.cjs');
 const fs = require('fs-extra');
 const pkg = require('./package.json');
 
@@ -261,20 +274,16 @@ program
 
         logSuccess(`Step 1 preview 생성 완료 (${reviewSession.manifest.changes.length}개 변경)`);
 
-        await promptAndEnsureNextifyReviewExtension();
-
-        const openResult = openFirstReviewableDiff(reviewSession.manifest);
-
-        if (openResult.opened) {
-          logStep(`첫 번째 diff를 ${openResult.command}에서 열었습니다.`);
-        } else {
-          logWarn('자동으로 diff를 열지 못했습니다. Nextify Review 패널이나 session.json을 통해 수동으로 열어주세요.');
+        const extensionStatus = await promptAndEnsureNextifyReviewExtension();
+        if (extensionStatus.installed && extensionStatus.command) {
+          focusReviewPanel(extensionStatus);
         }
 
         logWarn('Step 1은 리뷰 대기 상태에서 멈췄습니다.');
         logStep('왼쪽: 원본 파일 / 오른쪽: .ai-migration 안의 migrated 파일');
         logStep('Nextify Review 패널은 view-only입니다(diff·경로 복사). 변경을 적용하려면 직접 편집·반영하세요.');
-        logStep(`세션 파일: ${reviewSession.manifestPath}`);
+        logSuccess('변경 내용 검토 파일을 저장했습니다.');
+        logStep(`저장 위치: ${formatProjectRelativePath(cwd, reviewSession.manifestPath)}`);
         return;
       }
 
@@ -407,11 +416,7 @@ program
   .option('--skip-validation', '이 단계에서 타입 검증(validation) 호출 생략')
   .option('--no-typecheck-autofix', 'validation 단계: 결정론적 TypeScript 자동 수정 비활성화')
   .option('--no-typecheck-ai-fix', 'validation 단계: AI 잔여 빌드 에러 보정 비활성화 (GEMINI_API_KEY)')
-  .option(
-    '--typecheck-ai-fix-budget <n>',
-    'validation 단계: AI 보정 최대 파일 수 (기본 5)',
-    (v) => Number(v),
-  )
+  .option('--typecheck-ai-fix-budget <n>', 'validation 단계: AI 보정 최대 파일 수 (기본 5)', (v) => Number(v))
   .action(async (options) => {
     try {
       const projectRoot = process.cwd();
@@ -437,11 +442,7 @@ program
   .option('--skip-validation', '이 단계에서 타입 검증(validation) 호출 생략')
   .option('--no-typecheck-autofix', 'validation 단계: 결정론적 TypeScript 자동 수정 비활성화')
   .option('--no-typecheck-ai-fix', 'validation 단계: AI 잔여 빌드 에러 보정 비활성화 (GEMINI_API_KEY)')
-  .option(
-    '--typecheck-ai-fix-budget <n>',
-    'validation 단계: AI 보정 최대 파일 수 (기본 5)',
-    (v) => Number(v),
-  )
+  .option('--typecheck-ai-fix-budget <n>', 'validation 단계: AI 보정 최대 파일 수 (기본 5)', (v) => Number(v))
   .action(async (options) => {
     try {
       const projectRoot = process.cwd();
@@ -523,13 +524,13 @@ program
     const reportStartedAt = Date.now();
     try {
       const projectRoot = process.cwd();
-      const outputPath = options.output ? path.resolve(options.output) : path.join(projectRoot, 'nextify-performance-report.md');
+      const outputPath = options.output
+        ? path.resolve(options.output)
+        : path.join(projectRoot, 'nextify-performance-report.md');
       const baselineViteRoot = options.baseline ? path.resolve(options.baseline) : undefined;
       const lighthouseRuns = Number.isFinite(options.runs) && options.runs > 0 ? Math.floor(options.runs) : 3;
       const warmupRuns =
-        Number.isFinite(options.warmupRuns) && options.warmupRuns >= 0
-          ? Math.floor(options.warmupRuns)
-          : 1;
+        Number.isFinite(options.warmupRuns) && options.warmupRuns >= 0 ? Math.floor(options.warmupRuns) : 1;
 
       if (options.runAdvanced) {
         await runAdvancedMigrationWithSession(projectRoot);
@@ -637,25 +638,24 @@ program
     }
   });
 
-
 // =========================================================
 // Command: Review (Gemini CLI review using an existing session.json)
 // =========================================================
 program
   .command('review')
   .description('기존 마이그레이션 세션(session.json)으로 Gemini CLI 코드 리뷰만 단독 실행')
-  .option(
-    '--session <path>',
-    'session.json 경로 (생략 시 .ai-migration/stepN/session.json 자동 탐색, N이 큰 것 우선)',
-  )
+  .option('--session <path>', 'session.json 경로 (생략 시 .ai-migration/stepN/session.json 자동 탐색, N이 큰 것 우선)')
   .action(async (options) => {
     try {
       const cwd = process.cwd();
 
       let sessionPath = options.session ? path.resolve(options.session) : null;
       if (sessionPath && !(await fs.pathExists(sessionPath))) {
-        logError(`지정한 session.json을 찾을 수 없습니다: ${sessionPath}`);
-        process.exit(1);
+        const archivePath = getArchivedReviewSessionPath(sessionPath);
+        if (!(await fs.pathExists(archivePath))) {
+          logError(`지정한 session.json을 찾을 수 없습니다: ${sessionPath}`);
+          process.exit(1);
+        }
       }
 
       if (!sessionPath) {
@@ -676,38 +676,15 @@ program
       logStep('확장이 보이지 않으면 Marketplace에서 `capstone0123.nextify-review`를 설치하세요.');
       logStep('Gemini CLI가 없다면 `npm install -g @google/gemini-cli` 후 다시 실행하세요.');
 
-      const sessionManifest = await fs.readJson(sessionPath);
-      await promptAndEnsureNextifyReviewExtension();
-      openFirstReviewableDiff(sessionManifest);
-
-      const aiAbort = new AbortController();
-      const onSigint = () => {
-        if (!aiAbort.signal.aborted) {
-          process.stdout.write('\n');
-          logWarn('Ctrl+C 감지: 현재 Gemini CLI 리뷰를 중단합니다.');
-          aiAbort.abort();
-        }
-      };
-
-      process.on('SIGINT', onSigint);
+      await setReviewSessionActive(sessionPath, true);
       try {
-        await runAiReviewSessionStream({
+        await runReviewSessionFlow({
           sessionPath,
-          signal: aiAbort.signal,
-          transport: 'cli',
-          mode: 'interactive-seeded',
-          model: process.env.NEXTIFY_GEMINI_CLI_MODEL || 'gemini-2.5-flash-lite',
           workingDirectory: cwd,
-          onChunk: (t) => process.stdout.write(t),
+          workspaceFolder: getProjectRootFromSessionPath(sessionPath) || cwd,
         });
-      } catch (err) {
-        if (err?.code === 'ENOENT') {
-          logError('Gemini CLI를 찾을 수 없습니다.');
-          logWarn('Gemini CLI를 설치하고 `gemini` 명령이 PATH에서 실행되는지 확인하세요. (예: `npm install -g @google/gemini-cli`)');
-        }
-        throw err;
       } finally {
-        process.off('SIGINT', onSigint);
+        await closeReviewSession(sessionPath);
       }
 
       logSuccess('코드 리뷰 완료.');
@@ -717,65 +694,13 @@ program
     }
   });
 
-
 // =========================================================
 // Default command: `migrate-next` (no subcommand)
 // =========================================================
-function openFirstReviewableDiff(manifest) {
-  const changes = Array.isArray(manifest?.changes) ? manifest.changes : [];
-  for (const change of changes) {
-    const result = openReviewDiff(change);
-    if (result?.opened) {
-      return { ...result, change };
-    }
-  }
-  return { opened: false, command: null, change: null };
-}
-
-/**
- * 워크스페이스에 폴더를 추가하면서 첫 번째 reviewable diff 를 한 번의 CLI 호출로 엽니다.
- * `code --reuse-window --add <folder> --diff <before> <after>` 형태로 실행해
- * 에디터 창이 하나만 열리도록 합니다.
- */
-function openDiffAndAddWorkspace(manifest, workspaceFolder) {
-  const changes = Array.isArray(manifest?.changes) ? manifest.changes : [];
+function addWorkspaceFolderToEditor(workspaceFolder) {
   const abs = path.resolve(workspaceFolder);
-
-  for (const change of changes) {
-    const beforePath = change?.diffBeforePath || change?.beforePath;
-    const afterPath = change?.diffAfterPath || change?.afterPath;
-    if (!beforePath || !afterPath) continue;
-    if (!fs.existsSync(beforePath) || !fs.existsSync(afterPath)) continue;
-
-    for (const binary of getEditorCommands()) {
-      const result = spawnSync(binary, ['--reuse-window', '--add', abs, '--diff', beforePath, afterPath], {
-        shell: false,
-        stdio: 'ignore',
-        windowsHide: true,
-      });
-      if (!result.error && result.status === 0) {
-        return { opened: true, command: binary, change };
-      }
-      if (result?.error?.code === 'ENOENT') continue;
-    }
-    return { opened: false, command: null, change };
-  }
-  return { opened: false, command: null, change: null };
-}
-
-/**
- * 현재 IDE 창 워크스페이스에 폴더를 추가해 Nextify Review 확장이 `.ai-migration` 아래의 session.json 을 찾을 수 있게 합니다.
- * NEXTIFY_SKIP_WORKSPACE_ADD=1 이면 건너뜁니다.
- * @returns {{ ok: boolean, command?: string, skipped?: boolean }}
- */
-function tryAddFolderToCurrentWorkspace(folderAbsPath) {
-  if (/^(1|true|yes)$/i.test(String(process.env.NEXTIFY_SKIP_WORKSPACE_ADD || ''))) {
-    return { ok: false, skipped: true };
-  }
-
-  const abs = path.resolve(folderAbsPath);
   for (const binary of getEditorCommands()) {
-    const result = spawnSync(binary, ['--reuse-window', '--add', abs], {
+    const result = runEditorCommand(binary, ['--reuse-window', '--add', abs], {
       shell: false,
       stdio: 'ignore',
       windowsHide: true,
@@ -783,12 +708,13 @@ function tryAddFolderToCurrentWorkspace(folderAbsPath) {
     if (!result.error && result.status === 0) {
       return { ok: true, command: binary };
     }
+    if (result?.error?.code === 'ENOENT') continue;
   }
-  return { ok: false };
+  return { ok: false, command: null };
 }
 
 /**
- * Nextify Review 확장 설치 여부를 확인하고, 필요 시 설치 후 패널에 포커스합니다.
+ * Nextify Review 확장 설치 여부를 확인하고, 필요 시 설치를 물어봅니다.
  * `NEXTIFY_ASSUME_YES=1`이면 확인 없이 설치를 시도합니다.
  */
 async function promptAndEnsureNextifyReviewExtension() {
@@ -796,13 +722,13 @@ async function promptAndEnsureNextifyReviewExtension() {
   let status = getReviewExtensionStatus();
 
   if (status.installed && status.command) {
-    return;
+    return status;
   }
 
   if (!status.editorAvailable || !status.command) {
     logWarn('VS Code/Cursor CLI를 찾지 못해 Nextify Review 확장 자동 설치를 건너뜁니다.');
     logStep(`Marketplace에서 수동 설치: ${marketplaceUrl}`);
-    return;
+    return status;
   }
 
   let shouldInstall = /^(1|true|yes)$/i.test(String(process.env.NEXTIFY_ASSUME_YES || ''));
@@ -820,17 +746,14 @@ async function promptAndEnsureNextifyReviewExtension() {
 
   if (!shouldInstall) {
     logStep(`패널 사용 시 Marketplace에서 설치: ${marketplaceUrl}`);
-    return;
+    return status;
   }
 
   const installResult = installReviewExtension(status.command);
   if (installResult.installed) {
     logSuccess(`Nextify Review 확장 설치를 실행했습니다. (${installResult.command})`);
     status = getReviewExtensionStatus();
-    if (status.installed && status.command) {
-      focusReviewPanel(status);
-    }
-    return;
+    return status;
   }
 
   logWarn('확장 자동 설치 요청에 실패했습니다. Marketplace에서 설치해 주세요.');
@@ -838,6 +761,184 @@ async function promptAndEnsureNextifyReviewExtension() {
   if (installResult.stderr) {
     logStep(`(${installResult.stderr.trim()})`);
   }
+  return status;
+}
+
+async function runReviewSessionFlow({ sessionPath, workingDirectory, workspaceFolder = null }) {
+  const extensionStatus = await promptAndEnsureNextifyReviewExtension();
+
+  if (workspaceFolder) {
+    addWorkspaceFolderToEditor(workspaceFolder);
+  }
+
+  refreshReviewPanel(extensionStatus);
+
+  if (extensionStatus.installed && extensionStatus.command) {
+    focusReviewPanel(extensionStatus);
+  }
+
+  const aiAbort = new AbortController();
+  const onSigint = () => {
+    if (!aiAbort.signal.aborted) {
+      process.stdout.write('\n');
+      logWarn('Ctrl+C 감지: 현재 Gemini CLI 리뷰를 중단합니다.');
+      aiAbort.abort();
+    }
+  };
+
+  process.on('SIGINT', onSigint);
+  try {
+    await runAiReviewSessionStream({
+      sessionPath,
+      signal: aiAbort.signal,
+      transport: 'cli',
+      mode: 'interactive-seeded',
+      model: process.env.NEXTIFY_GEMINI_CLI_MODEL || 'gemini-2.5-flash-lite',
+      workingDirectory,
+      onChunk: (t) => process.stdout.write(t),
+    });
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      logError('Gemini CLI를 찾을 수 없습니다.');
+      logWarn(
+        'Gemini CLI를 설치하고 `gemini` 명령이 PATH에서 실행되는지 확인하세요. (예: `npm install -g @google/gemini-cli`)',
+      );
+    }
+    throw err;
+  } finally {
+    process.off('SIGINT', onSigint);
+  }
+}
+
+function getArchivedReviewSessionPath(sessionPath) {
+  return path.join(path.dirname(sessionPath), 'session.review.json');
+}
+
+function getProjectRootFromSessionPath(sessionPath) {
+  const resolved = path.resolve(String(sessionPath || ''));
+  const normalized = resolved.replace(/\\/g, '/');
+  const marker = `/${REVIEW_ROOT_DIR}/`;
+  const idx = normalized.toLowerCase().lastIndexOf(marker.toLowerCase());
+  if (idx < 0) {
+    return null;
+  }
+  return resolved.slice(0, idx);
+}
+
+async function setReviewSessionActive(sessionPath, active) {
+  if (!sessionPath) {
+    return null;
+  }
+
+  const archivePath = getArchivedReviewSessionPath(sessionPath);
+  let manifest = null;
+  if (await fs.pathExists(sessionPath)) {
+    manifest = await fs.readJson(sessionPath);
+  } else if (active === true && (await fs.pathExists(archivePath))) {
+    manifest = await fs.readJson(archivePath);
+  } else {
+    return null;
+  }
+
+  if (active === true && (!Array.isArray(manifest.changes) || manifest.changes.length === 0)) {
+    const archivedPath = manifest.archivedManifestPath || archivePath;
+    if (await fs.pathExists(archivedPath)) {
+      manifest = await fs.readJson(archivedPath);
+    }
+  }
+
+  const now = new Date().toISOString();
+  if (active === true) {
+    const nextManifest = {
+      ...manifest,
+      active: true,
+      status: 'active',
+      activatedAt: now,
+      closedAt: null,
+    };
+    await fs.writeJson(sessionPath, nextManifest, { spaces: 2 });
+    return nextManifest;
+  }
+
+  const fullManifest = {
+    ...manifest,
+    active: false,
+    status: 'closed',
+    activatedAt: manifest.activatedAt || null,
+    closedAt: now,
+  };
+  await fs.writeJson(archivePath, fullManifest, { spaces: 2 });
+
+  const closedManifest = {
+    version: manifest.version || 1,
+    step: manifest.step,
+    createdAt: manifest.createdAt,
+    active: false,
+    status: 'closed',
+    activatedAt: manifest.activatedAt || null,
+    closedAt: now,
+    reviewRoot: manifest.reviewRoot,
+    beforeRoot: manifest.beforeRoot,
+    placeholdersRoot: manifest.placeholdersRoot,
+    filesRoot: manifest.filesRoot,
+    changeCount: Array.isArray(manifest.changes) ? manifest.changes.length : manifest.changeCount || 0,
+    archivedManifestPath: archivePath,
+    changes: [],
+  };
+  await fs.writeJson(sessionPath, closedManifest, { spaces: 2 });
+  return closedManifest;
+}
+
+function refreshReviewPanel(extensionStatus = null) {
+  const status = extensionStatus || getReviewExtensionStatus();
+  if (!status?.command) {
+    return { refreshed: false, command: null, reason: 'editor-not-found' };
+  }
+
+  const result = runEditorCommand(status.command, ['--reuse-window', '--command', 'nextifyReview.refreshSession'], {
+    shell: false,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  if (!result.error && result.status === 0) {
+    return { refreshed: true, command: status.command };
+  }
+  return { refreshed: false, command: status.command, reason: 'refresh-command-failed' };
+}
+
+async function closeReviewSession(sessionPath) {
+  if (!sessionPath) return;
+  try {
+    if (await fs.pathExists(sessionPath)) {
+      await setReviewSessionActive(sessionPath, false);
+      refreshReviewPanel();
+      logStep('리뷰 세션을 닫았습니다. session.json은 보존되며 Nextify Review 패널만 비활성화됩니다.');
+    }
+  } catch (error) {
+    logWarn(`리뷰 세션 종료 중 session.json 상태 업데이트 실패: ${error?.message || error}`);
+  }
+}
+
+async function saveInactiveReviewArchive(sessionPath, manifest) {
+  if (!sessionPath || !manifest || !Array.isArray(manifest.changes) || manifest.changes.length === 0) {
+    return null;
+  }
+
+  const archivePath = getArchivedReviewSessionPath(sessionPath);
+  const now = new Date().toISOString();
+  await fs.writeJson(
+    archivePath,
+    {
+      ...manifest,
+      active: false,
+      status: 'closed',
+      activatedAt: null,
+      closedAt: now,
+    },
+    { spaces: 2 },
+  );
+  await fs.remove(sessionPath);
+  return archivePath;
 }
 
 async function printBaseMigrationFinalGuide(projectRoot, mode = 'copy') {
@@ -894,7 +995,8 @@ async function runAdvancedMigrationWithSession(projectRoot, options = {}) {
 
   const changeCount = Array.isArray(session?.manifest?.changes) ? session.manifest.changes.length : 0;
   if (changeCount > 0) {
-    logStep(`심화 변환 리뷰 세션 생성: ${session.manifestPath}`);
+    logSuccess('심화 변환 검토 파일을 저장했습니다.');
+    logStep(`저장 위치: ${formatProjectRelativePath(projectRoot, session.manifestPath)}`);
   }
   return session;
 }
@@ -918,7 +1020,8 @@ async function findLatestStepSession(projectRoot) {
     if (!m) continue;
     const stepNum = Number(m[1]);
     const candidate = path.join(reviewRoot, entry.name, 'session.json');
-    if (!(await fs.pathExists(candidate))) continue;
+    const archiveCandidate = getArchivedReviewSessionPath(candidate);
+    if (!(await fs.pathExists(candidate)) && !(await fs.pathExists(archiveCandidate))) continue;
     if (stepNum > bestStep) {
       bestStep = stepNum;
       bestPath = candidate;
@@ -1037,8 +1140,6 @@ async function runDefaultOrchestrator() {
     });
     process.chdir(targetPath);
     logStep(`작업 경로: ${targetPath}`);
-
-    tryAddFolderToCurrentWorkspace(targetPath);
   }
 
   // 이전 실행에서 남아있는 step 아티팩트를 정리합니다.
@@ -1053,32 +1154,37 @@ async function runDefaultOrchestrator() {
     ['step5', runStep5],
   ];
 
-  const finalReviewSession = await createSnapshotReviewSession(targetPath, 'step5', async (projectRoot) => {
-    for (const [stepName, stepRunner] of stepEntries) {
-      const partNum = stepName.replace('step', '');
-      logSection(`Part ${partNum} (${stepName})`);
-      await stepRunner(projectRoot);
-    }
+  const finalReviewSession = await createSnapshotReviewSession(
+    targetPath,
+    'step5',
+    async (projectRoot) => {
+      for (const [stepName, stepRunner] of stepEntries) {
+        const partNum = stepName.replace('step', '');
+        logSection(`Part ${partNum} (${stepName})`);
+        await stepRunner(projectRoot);
+      }
 
-    logSection('TypeScript 검증');
-    await runValidation(projectRoot);
+      logSection('TypeScript 검증');
+      await runValidation(projectRoot);
 
-    try {
-      const snapshotPath = await createBaseMigrationSnapshot(projectRoot);
-      await ensureNextifyMeta(projectRoot, {
-        baseMigrationCompleted: true,
-        baseMigrationCompletedAt: new Date().toISOString(),
-        baseMigrationSnapshotRoot: snapshotPath,
-        advancedCompleted: false,
-      });
-      logSuccess('성능 레포트 비교용 데이터가 생성되었습니다.');
-      logStep('생성된 폴더: __nextify_snapshots');
-      logStep('이 폴더는 migrate-next report에서 사용됩니다.');
-    } catch (snapshotErr) {
-      logWarn(`비교용 복사본 생성 실패: ${snapshotErr?.message || snapshotErr}`);
-      logStep('성능 레포트에서 기본 마이그레이션 비교 대상이 현재 상태로 대체될 수 있습니다.');
-    }
-  });
+      try {
+        const snapshotPath = await createBaseMigrationSnapshot(projectRoot);
+        await ensureNextifyMeta(projectRoot, {
+          baseMigrationCompleted: true,
+          baseMigrationCompletedAt: new Date().toISOString(),
+          baseMigrationSnapshotRoot: snapshotPath,
+          advancedCompleted: false,
+        });
+        logSuccess('성능 레포트 비교용 데이터가 생성되었습니다.');
+        logStep('생성된 폴더: __nextify_snapshots');
+        logStep('이 폴더는 migrate-next report에서 사용됩니다.');
+      } catch (snapshotErr) {
+        logWarn(`비교용 복사본 생성 실패: ${snapshotErr?.message || snapshotErr}`);
+        logStep('성능 레포트에서 기본 마이그레이션 비교 대상이 현재 상태로 대체될 수 있습니다.');
+      }
+    },
+    { writeManifest: false, active: false },
+  );
 
   const { manifest, manifestPath } = finalReviewSession;
   const finalStepLabel = 'step1~step5';
@@ -1090,6 +1196,7 @@ async function runDefaultOrchestrator() {
   }
 
   const typeSummary = summarizeChangeTypes(manifest.changes);
+  await saveInactiveReviewArchive(manifestPath, manifest);
   logSuccess(`${finalStepLabel} 완료 (변경 ${manifest.changes.length}개)`);
   logStep(`created ${typeSummary.create}  modified ${typeSummary.modify}  deleted ${typeSummary.delete}`);
   logSuccess('기본 마이그레이션 완료.');

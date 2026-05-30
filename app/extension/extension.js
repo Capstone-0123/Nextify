@@ -125,6 +125,9 @@ class NextifyReviewController {
     watcher.onDidChange(() => this.scheduleRefresh());
     watcher.onDidDelete(() => this.scheduleRefresh());
     context.subscriptions.push(watcher);
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeWorkspaceFolders(() => this.scheduleRefresh(100)),
+    );
 
     this.refreshSession();
   }
@@ -188,6 +191,7 @@ class NextifyReviewController {
         this.currentChangeId = null;
         this.lastFocusedManifestPath = null;
         this.panelEmptyReason = 'no_session';
+        await this.closeReviewDiffTabs();
         this.notifyMissingSessionOnce(workspaceRoots.join('|'));
         return;
       }
@@ -207,6 +211,7 @@ class NextifyReviewController {
       this.session = null;
       this.currentChangeId = null;
       this.panelEmptyReason = 'no_session';
+      await this.closeReviewDiffTabs();
     } finally {
       this.isLoading = false;
       this.refreshInFlight = false;
@@ -243,6 +248,20 @@ class NextifyReviewController {
       if (!options.quiet) {
         vscode.window.showWarningMessage(`Nextify Review 패널 포커스 실패: ${error.message}`);
       }
+    }
+  }
+
+  async closeReviewDiffTabs() {
+    const tabsToClose = [];
+    for (const group of vscode.window.tabGroups?.all || []) {
+      for (const tab of group.tabs || []) {
+        if (/^Nextify .* Review:/.test(String(tab.label || ''))) {
+          tabsToClose.push(tab);
+        }
+      }
+    }
+    if (tabsToClose.length > 0) {
+      await vscode.window.tabGroups?.close(tabsToClose, true);
     }
   }
 
@@ -291,8 +310,6 @@ class NextifyReviewController {
       vscode.Uri.file(afterPath),
       `Nextify ${this.session?.step || 'review'} Review: ${change.relativePath}`,
     );
-
-    this.render();
   }
 
   async copySessionPath() {
@@ -562,6 +579,15 @@ class NextifyReviewController {
     const vscode = acquireVsCodeApi();
     document.querySelectorAll('button[data-command]').forEach((button) => {
       button.addEventListener('click', () => {
+        if (button.dataset.command === 'openChange') {
+          document.querySelectorAll('.tree-file.active').forEach((node) => {
+            node.classList.remove('active');
+          });
+          const row = button.closest('.tree-file');
+          if (row) {
+            row.classList.add('active');
+          }
+        }
         vscode.postMessage({
           type: button.dataset.command,
           changeId: button.dataset.changeId,
@@ -604,23 +630,31 @@ async function pickLatestSessionManifest(workspaceRoots) {
   let latest = null;
   let latestMtimeMs = -1;
   let latestStepNum = -1;
+  let activeCandidates = 0;
   for (const uri of uris) {
     try {
-      const st = fs.statSync(uri.fsPath);
-      const stepNum = extractStepNumberFromManifestPath(uri.fsPath);
+      const manifestPath = uri.fsPath;
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      if (manifest?.active !== true) {
+        continue;
+      }
+      activeCandidates += 1;
+
+      const st = fs.statSync(manifestPath);
+      const stepNum = extractStepNumberFromManifestPath(manifestPath);
       const isBetterStep = stepNum > latestStepNum;
       const isSameStepAndNewer = stepNum === latestStepNum && st.mtimeMs > latestMtimeMs;
 
       if (isBetterStep || isSameStepAndNewer) {
         latestStepNum = stepNum;
         latestMtimeMs = st.mtimeMs;
-        latest = uri.fsPath;
+        latest = manifestPath;
       }
     } catch {
       // ignore invalid candidate
     }
   }
-  return { manifestPath: latest, totalCandidates: uris.length };
+  return { manifestPath: latest, totalCandidates: activeCandidates };
 }
 
 function extractStepNumberFromManifestPath(manifestPath) {
