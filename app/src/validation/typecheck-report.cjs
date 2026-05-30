@@ -31,6 +31,7 @@ const {
 } = require('./static-import-scan.cjs');
 const { sweepAfterAiApply } = require('../utils/post-ai-sweep.cjs');
 const { stripImportExtensions } = require('../utils/strip-import-extensions.cjs');
+const { resolvePackageManagerCommand } = require('../utils/project-info.cjs');
 
 const REPORT_FILE_NAME = 'nextify-typecheck-report.txt';
 const TSCONFIG_FILE_NAME = 'tsconfig.json';
@@ -185,6 +186,90 @@ function getBuildCommand(projectRoot) {
   return 'npm run build';
 }
 
+function isTruthyEnv(value) {
+  return /^(1|true|yes)$/i.test(String(value || '').trim());
+}
+
+function tailText(text, maxLines = 8) {
+  const lines = String(text || '').trim().split(/\r?\n/).filter(Boolean);
+  return lines.slice(-maxLines).join('\n');
+}
+
+function isWindowsCommandScript(cmd) {
+  return process.platform === 'win32' && /\.(cmd|bat)$/i.test(String(cmd || ''));
+}
+
+function spawnSyncCli(cmd, args, options) {
+  return spawnSync(cmd, args, {
+    ...options,
+    shell: isWindowsCommandScript(cmd) ? true : options.shell,
+  });
+}
+
+function buildInstallCommand(projectRoot) {
+  const pm = resolvePackageManagerCommand(projectRoot);
+  return {
+    cmd: pm.cmd,
+    args: [...pm.argsPrefix, 'install'],
+    display: pm.displayInstall,
+  };
+}
+
+function ensureTypecheckDependencies(projectRoot) {
+  if (resolveLocalTscBinary(projectRoot)) {
+    return { ok: true, installed: false, reason: 'local_tsc_exists' };
+  }
+  if (isTruthyEnv(process.env.NEXTIFY_SKIP_INSTALL)) {
+    console.log(
+      chalk.gray('   NEXTIFY_SKIP_INSTALL=1 설정으로 의존성 자동 설치를 건너뜁니다.'),
+    );
+    return { ok: true, installed: false, reason: 'install_skipped' };
+  }
+  if (!fs.existsSync(path.join(projectRoot, 'package.json'))) {
+    return { ok: false, reason: 'no_package_json', message: 'package.json을 찾을 수 없습니다.' };
+  }
+
+  const install = buildInstallCommand(projectRoot);
+  console.log(chalk.gray('   TypeScript 검증 전 의존성 설치 상태를 확인했습니다.'));
+  console.log(chalk.gray(`   로컬 tsc가 없어 \`${install.display}\` 명령을 먼저 실행합니다.`));
+
+  const result = spawnSyncCli(install.cmd, install.args, {
+    cwd: projectRoot,
+    encoding: 'utf-8',
+    shell: false,
+    timeout: 600_000,
+    env: { ...process.env, FORCE_COLOR: '0' },
+  });
+
+  if (result.error) {
+    return {
+      ok: false,
+      reason: 'install_spawn_error',
+      message: result.error.message,
+      stderr: result.stderr || '',
+    };
+  }
+  if (typeof result.status === 'number' && result.status !== 0) {
+    return {
+      ok: false,
+      reason: 'install_failed',
+      message: `${install.display} 종료 코드 ${result.status}`,
+      stderr: result.stderr || result.stdout || '',
+    };
+  }
+  if (!resolveLocalTscBinary(projectRoot)) {
+    return {
+      ok: false,
+      reason: 'tsc_missing_after_install',
+      message: '의존성 설치 후에도 node_modules/.bin/tsc를 찾을 수 없습니다.',
+      stderr: result.stderr || result.stdout || '',
+    };
+  }
+
+  console.log(chalk.green('   의존성 설치 완료: TypeScript 검증을 계속 진행합니다.'));
+  return { ok: true, installed: true, reason: 'installed' };
+}
+
 /**
  * tsc 실행. 표준 출력을 캡처하고 종료 코드를 반환.
  * - 우선순위 1: 프로젝트 로컬 tsc 바이너리(node_modules/.bin/tsc) 직접 호출 — 가장 안정적
@@ -203,11 +288,11 @@ function runTsc(projectRoot) {
 
   const local = resolveLocalTscBinary(projectRoot);
   if (local) {
-    return spawnSync(local, tscArgs, baseOptions);
+    return spawnSyncCli(local, tscArgs, baseOptions);
   }
 
   const { cmd, prefix } = buildPackageManagerTscCommand(projectRoot);
-  return spawnSync(cmd, [...prefix, ...tscArgs], baseOptions);
+  return spawnSyncCli(cmd, [...prefix, ...tscArgs], baseOptions);
 }
 
 function isProjectErrorFile(file) {
@@ -405,6 +490,25 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
     return { ran: false, reason: 'no_tsconfig' };
   }
 
+  const dependencyCheck = ensureTypecheckDependencies(projectRoot);
+  if (!dependencyCheck.ok) {
+    console.log(chalk.yellow('   TypeScript 검증을 실행하지 못했습니다.'));
+    console.log(chalk.gray(`   원인: ${dependencyCheck.reason}${dependencyCheck.message ? ` (${dependencyCheck.message})` : ''}`));
+    const tail = tailText(dependencyCheck.stderr);
+    if (tail) {
+      console.log(chalk.gray('   의존성 설치 로그 마지막 부분:'));
+      for (const line of tail.split(/\r?\n/)) {
+        console.log(chalk.gray(`      ${line}`));
+      }
+    }
+    console.log(chalk.gray(`   의존성 설치 후 \`${getBuildCommand(projectRoot)}\`로 직접 확인하세요.`));
+    return {
+      ran: false,
+      reason: dependencyCheck.reason,
+      message: dependencyCheck.message,
+    };
+  }
+
   // ── 0) TypeScript 검증 전 import 경로 보정 ───────────────────────────
   // Vite 코드에 남은 './File.tsx' 형태는 Next.js/tsc에서 TS5097/TS2867을 만들 수 있습니다.
   try {
@@ -464,6 +568,14 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
   const t0 = Date.now();
   const first = runTscAndParse(projectRoot);
   if (!first.ok) {
+    console.log(chalk.gray(`   원인: ${first.reason}${first.message ? ` (${first.message})` : ''}`));
+    const tail = tailText(first.stderr);
+    if (tail) {
+      console.log(chalk.gray('   tsc 실행 로그 마지막 부분:'));
+      for (const line of tail.split(/\r?\n/)) {
+        console.log(chalk.gray(`      ${line}`));
+      }
+    }
     console.log(chalk.yellow('   TypeScript 검증을 실행하지 못했습니다.'));
     console.log(chalk.gray('   마이그레이션 결과는 유지됩니다.'));
     console.log(chalk.gray(`   의존성 설치 후 \`${getBuildCommand(projectRoot)}\`로 직접 확인하세요.`));
