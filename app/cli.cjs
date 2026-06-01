@@ -131,7 +131,7 @@ const { runStep4 } = require('./src/step4/index.cjs');
 const { runStep5 } = require('./src/step5/index.cjs');
 const { runStep6 } = require('./src/step6/index.cjs');
 const { runValidation } = require('./src/validation/index.cjs');
-const { runEnvAndDependencyGuide, guideDependencyReset } = require('./src/guides/env-guide.cjs');
+const { runEnvAndDependencyGuide } = require('./src/guides/env-guide.cjs');
 
 const {
   detectPackageManager,
@@ -957,7 +957,6 @@ async function printBaseMigrationFinalGuide(projectRoot, mode = 'copy') {
 
 async function printAdvancedNextSteps(projectRoot) {
   console.log(chalk.white('\n심화 변환 후 확인할 항목'));
-  await guideDependencyReset(projectRoot);
   console.log(chalk.white('\n빌드 확인'));
   console.log(chalk.gray('  마이그레이션된 프로젝트에서 빌드·실행을 다시 확인하세요.'));
   logSection('추가 명령어');

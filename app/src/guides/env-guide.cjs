@@ -261,7 +261,9 @@ function getInstallCommand(pm) {
  */
 async function runEnvAndDependencyGuide(projectRoot, options = {}) {
   await guideEnvMigration(projectRoot);
-  await guideDependencyReset(projectRoot);
+  if (options.showDependencyReset === true) {
+    await guideDependencyReset(projectRoot);
+  }
 
   if (options.reportPath) {
     console.log(chalk.gray(`※ 성능 레포트: ${options.reportPath}`));

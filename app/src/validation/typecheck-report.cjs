@@ -32,6 +32,7 @@ const {
 const { sweepAfterAiApply } = require('../utils/post-ai-sweep.cjs');
 const { stripImportExtensions } = require('../utils/strip-import-extensions.cjs');
 const { resolvePackageManagerCommand } = require('../utils/project-info.cjs');
+const { guideDependencyReset } = require('../guides/env-guide.cjs');
 
 const REPORT_FILE_NAME = 'nextify-typecheck-report.txt';
 const TSCONFIG_FILE_NAME = 'tsconfig.json';
@@ -502,6 +503,7 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
       }
     }
     console.log(chalk.gray(`   의존성 설치 후 \`${getBuildCommand(projectRoot)}\`로 직접 확인하세요.`));
+    await guideDependencyReset(projectRoot);
     return {
       ran: false,
       reason: dependencyCheck.reason,
@@ -579,6 +581,7 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
     console.log(chalk.yellow('   TypeScript 검증을 실행하지 못했습니다.'));
     console.log(chalk.gray('   마이그레이션 결과는 유지됩니다.'));
     console.log(chalk.gray(`   의존성 설치 후 \`${getBuildCommand(projectRoot)}\`로 직접 확인하세요.`));
+    await guideDependencyReset(projectRoot);
     return { ran: false, reason: first.reason };
   }
 
