@@ -131,7 +131,7 @@ const { runStep4 } = require('./src/step4/index.cjs');
 const { runStep5 } = require('./src/step5/index.cjs');
 const { runStep6 } = require('./src/step6/index.cjs');
 const { runValidation } = require('./src/validation/index.cjs');
-const { runEnvAndDependencyGuide, guideDependencyReset } = require('./src/guides/env-guide.cjs');
+const { runEnvAndDependencyGuide } = require('./src/guides/env-guide.cjs');
 
 const {
   detectPackageManager,
@@ -142,6 +142,8 @@ const {
   getInstallCommand,
 } = require('./src/utils/project-info.cjs');
 const { cloneProject } = require('./src/utils/copy.cjs');
+const { resolveCopyTargetPath } = require('./src/utils/copy-target-resolver.cjs');
+const { ensureGeminiApiKey } = require('./src/utils/gemini-precheck.cjs');
 const {
   REVIEW_ROOT_DIR,
   REVIEW_EXTENSION_MARKET_ID,
@@ -226,32 +228,13 @@ program
       let mode;
       let targetPath = cwd;
 
-      // CLI 옵션으로 모드 결정
       if (options.review) {
         mode = 'review';
       } else if (options.output) {
         mode = 'copy';
-        // 입력값 정리 (공백 제거)
-        const cleanedPath = options.output.trim();
-
-        // Windows 절대 경로 판단 (C:\, D:\ 등) 또는 Unix 절대 경로 (/)
-        const isAbsolutePath = path.isAbsolute(cleanedPath) || /^[A-Za-z]:[\\/]/.test(cleanedPath);
-
-        if (isAbsolutePath) {
-          // 절대 경로면 그대로 사용
-          targetPath = path.resolve(cleanedPath);
-        } else if (cleanedPath.includes('/') || cleanedPath.includes('\\')) {
-          // 상대 경로 (./foo, ../bar 등)면 현재 디렉토리 기준
-          targetPath = path.resolve(cwd, cleanedPath);
-        } else {
-          // 폴더명만 입력한 경우 부모 디렉토리에 생성
-          const parentDir = path.dirname(cwd);
-          targetPath = path.join(parentDir, cleanedPath);
-        }
       } else if (options.inplace) {
         mode = 'inplace';
       } else {
-        // 옵션 없으면 대화형으로 선택
         const answer = await inquirer.prompt([
           {
             type: 'list',
@@ -266,39 +249,11 @@ program
         mode = answer.mode;
       }
 
-      if (mode === 'copy' && !options.output) {
-        const parentDir = path.dirname(cwd);
-        const currentDirName = path.basename(cwd);
-        const defaultNewPath = path.join(parentDir, `${currentDirName}-nextified`);
-
-        const { outputPath } = await inquirer.prompt([
-          {
-            type: 'input',
-            name: 'outputPath',
-            message: '복사본을 생성할 경로 (폴더명 또는 전체 경로):',
-            default: defaultNewPath,
-          },
-        ]);
-
-        // 입력값 정리 (공백 제거)
-        const cleanedPath = outputPath.trim();
-
-        // Windows 절대 경로 판단 (C:\, D:\ 등) 또는 Unix 절대 경로 (/)
-        const isAbsolutePath = path.isAbsolute(cleanedPath) || /^[A-Za-z]:[\\/]/.test(cleanedPath);
-
-        if (isAbsolutePath) {
-          // 절대 경로면 그대로 사용
-          targetPath = path.resolve(cleanedPath);
-        } else if (cleanedPath.includes('/') || cleanedPath.includes('\\')) {
-          // 상대 경로 (./foo, ../bar 등)면 현재 디렉토리 기준
-          targetPath = path.resolve(cwd, cleanedPath);
-        } else {
-          // 폴더명만 입력한 경우 부모 디렉토리에 생성
-          targetPath = path.join(parentDir, cleanedPath);
-        }
-      }
-
       if (mode === 'copy') {
+        targetPath = await resolveCopyTargetPath({
+          cwd,
+          predefinedPath: options.output ? options.output.trim() : null,
+        });
         await cloneProject(cwd, targetPath, {
           startMessage: '작업용 프로젝트를 복사하는 중...',
           successMessage: `작업용 프로젝트 복사 완료: ${targetPath}`,
@@ -513,6 +468,8 @@ program
   .action(async () => {
     try {
       const projectRoot = process.cwd();
+      // step5~7 는 Gemini API 를 사용하므로 시작 전에 키 보유를 확정한다.
+      await ensureGeminiApiKey({ projectRoot });
       const stepEntries = [
         ['step1', runStep1],
         ['step2', runStep2],
@@ -606,16 +563,7 @@ program
   .option('-f, --files <list>', '쉼표로 구분한 프로젝트 루트 기준 상대 경로 (--apply 시 필수)')
   .action(async (options) => {
     try {
-      // API 키 확인
-      if (!process.env.GEMINI_API_KEY) {
-        console.error(chalk.red('\n❌ GEMINI_API_KEY 환경 변수가 설정되지 않았습니다.'));
-        console.log(chalk.yellow('\n설정 방법:'));
-        console.log(chalk.white('  1. Google AI Studio에서 API 키 발급: https://makersuite.google.com/app/apikey'));
-        console.log(chalk.white('  2. 환경 변수 설정:'));
-        console.log(chalk.cyan('     Windows: set GEMINI_API_KEY=your_api_key'));
-        console.log(chalk.cyan('     Mac/Linux: export GEMINI_API_KEY=your_api_key'));
-        process.exit(1);
-      }
+      await ensureGeminiApiKey();
 
       if (options.apply && options.stream) {
         console.error(chalk.red('\n❌ --apply 와 --stream 은 함께 쓸 수 없습니다.\n'));
@@ -1009,7 +957,6 @@ async function printBaseMigrationFinalGuide(projectRoot, mode = 'copy') {
 
 async function printAdvancedNextSteps(projectRoot) {
   console.log(chalk.white('\n심화 변환 후 확인할 항목'));
-  await guideDependencyReset(projectRoot);
   console.log(chalk.white('\n빌드 확인'));
   console.log(chalk.gray('  마이그레이션된 프로젝트에서 빌드·실행을 다시 확인하세요.'));
   logSection('추가 명령어');
@@ -1162,6 +1109,10 @@ async function runDefaultOrchestrator() {
     process.exit(1);
   }
 
+  // 마이그레이션 시작 전에 Gemini 키 보유 여부를 먼저 확인한다.
+  // (step5~7 와 최종 리뷰가 키에 의존하므로, 작업 도중 멈추지 않도록 사전 차단)
+  await ensureGeminiApiKey({ projectRoot: cwd });
+
   // 2) mode selection
   const answer = await inquirer.prompt([
     {
@@ -1179,29 +1130,7 @@ async function runDefaultOrchestrator() {
   let targetPath = cwd;
 
   if (mode === 'copy') {
-    const parentDir = path.dirname(cwd);
-    const currentDirName = path.basename(cwd);
-    const defaultNewPath = path.join(parentDir, `${currentDirName}-nextified`);
-
-    const { outputPath } = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'outputPath',
-        message: '복사본을 생성할 경로 (폴더명 또는 전체 경로):',
-        default: defaultNewPath,
-      },
-    ]);
-
-    const cleanedPath = outputPath.trim();
-    const isAbsolutePath = path.isAbsolute(cleanedPath) || /^[A-Za-z]:[\\/]/.test(cleanedPath);
-
-    if (isAbsolutePath) {
-      targetPath = path.resolve(cleanedPath);
-    } else if (cleanedPath.includes('/') || cleanedPath.includes('\\')) {
-      targetPath = path.resolve(cwd, cleanedPath);
-    } else {
-      targetPath = path.join(parentDir, cleanedPath);
-    }
+    targetPath = await resolveCopyTargetPath({ cwd });
 
     await cloneProject(cwd, targetPath, {
       startMessage: '작업용 프로젝트를 복사하는 중...',

@@ -57,6 +57,19 @@ async function updatePackageJson(cwd) {
   pkg.dependencies = pkg.dependencies || {};
   pkg.dependencies['next'] = 'latest';
 
+  if (fs.existsSync(path.join(cwd, 'tsconfig.json'))) {
+    pkg.devDependencies = pkg.devDependencies || {};
+    const ensureDevDependency = (name, version) => {
+      if (!pkg.dependencies[name] && !pkg.devDependencies[name]) {
+        pkg.devDependencies[name] = version;
+      }
+    };
+
+    ensureDevDependency('typescript', 'latest');
+    ensureDevDependency('@types/react', 'latest');
+    ensureDevDependency('@types/react-dom', 'latest');
+  }
+
   // 스크립트 교체 (case b: package.json의 vite scripts를 next scripts로 교체)
   pkg.scripts = pkg.scripts || {};
   // 1.1. "dev": "vite" → "dev": "next dev"
