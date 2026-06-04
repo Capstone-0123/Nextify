@@ -480,9 +480,9 @@ program
       ];
 
       for (const [stepName, stepRunner] of stepEntries) {
-        const partNum = stepName.replace('step', '');
-        logSection(`Part ${partNum} (${stepName})`);
         if (stepName === 'step6') {
+          const partNum = stepName.replace('step', '');
+          logSection(`Part ${partNum} (${stepName})`);
           try {
             await createBaseMigrationSnapshot(projectRoot);
           } catch (snapshotErr) {
@@ -1158,8 +1158,6 @@ async function runDefaultOrchestrator() {
     'step5',
     async (projectRoot) => {
       for (const [stepName, stepRunner] of stepEntries) {
-        const partNum = stepName.replace('step', '');
-        logSection(`Part ${partNum} (${stepName})`);
         await stepRunner(projectRoot);
       }
 
