@@ -488,6 +488,7 @@ async function runFinalTypecheckReport(projectRoot, options = {}) {
   let staticImportScan = { ran: false, scannedFiles: 0, missing: [] };
 
   if (!hasTsConfig(projectRoot)) {
+    console.log(chalk.gray('   tsconfig.json이 없어 TypeScript 검증을 건너뜁니다.'));
     return { ran: false, reason: 'no_tsconfig' };
   }
 
